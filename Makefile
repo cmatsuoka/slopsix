@@ -78,7 +78,8 @@ HEADERS := include/slopsix.h src/slopsix_internal.h
 TABLES := build/tables/logsin_table.c \
           build/tables/exp_table.c \
           build/tables/note_table.c \
-          build/tables/com_table.c
+          build/tables/com_table.c \
+          build/tables/freq_table.c
 
 .PHONY: all check check-dx7 check-dx100 check-extras tables tables-install \
         check-tables clean

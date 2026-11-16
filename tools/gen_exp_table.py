@@ -12,7 +12,7 @@ appended. Final linear values:
     frequency path: exp_table[f] << (int >> 5)   -> 22 bits
     signal path:    exp_table[s] << int >> 13    -> 14 bits
 
-Rounding convention: half-up (floor(x + 0.5)), pinned in the plan page.
+Rounding convention: half-up (floor(x + 0.5)).
 
 Usage: gen_exp_table.py [--check FILE] [--dump]
   --check FILE   compare each generated value against an external

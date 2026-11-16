@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the DX7 carrier-count compensation (COM) table.
 
-Die readout (research A-05, dx7 section 2.4): every carrier of an
+Die readout (research A-05): every carrier of an
 algorithm carries a COM value equal to the algorithm's carrier count
 minus one, and the hardware subtracts log2(carrier_count) from the
 carrier's log amplitude inside the algorithm box.

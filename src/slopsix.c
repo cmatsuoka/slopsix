@@ -18,6 +18,8 @@ extern const uint16_t slopsix_exp_q11[1024];
 extern const uint8_t slopsix_note_t[128];
 extern const uint16_t slopsix_note_word[128];
 extern const uint8_t slopsix_com_log[6];
+extern const int32_t slopsix_coarse_offset[32];
+extern const int16_t slopsix_fine_offset[100];
 
 /* Keep the generated tables referenced so the compiler cannot drop them
  * before the render path uses them. */
@@ -28,6 +30,8 @@ static void slopsix_tables_keepalive(void)
     (void)slopsix_note_t;
     (void)slopsix_note_word;
     (void)slopsix_com_log;
+    (void)slopsix_coarse_offset;
+    (void)slopsix_fine_offset;
 }
 
 static void slopsix_context_defaults(slopsix_context_state *state)
@@ -104,7 +108,7 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
         return;
     }
 
-    /* The voice path arrives in Phase 2; until then the output is
+    /* The voice path arrives in Phase 3; until then the output is
      * silence. */
     for (i = 0; i < frames * 2u; i++) {
         stereo_out[i] = 0;

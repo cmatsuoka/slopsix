@@ -6,10 +6,7 @@
  * caller-supplied buffers, performs no I/O, and allocates only when a
  * context is created.
  *
- * Design: /projects/slopsix/library (wiki).  Implementation plan:
- * /projects/slopsix/library/plan.
- *
- * Units and conventions (see the library page, section 0):
+ * Units and conventions:
  *   - Human-facing scalars are Q16: 1.0 == 65536 is one unit of the
  *     parameter's own unit (gain, pan position, cents).
  *   - Parameters whose value the hardware itself encodes keep that
@@ -78,8 +75,10 @@ bool slopsix_get_voice(const void *ctx, uint8_t *out_voice_156);
 /* ------------------------------------------------------- voice management */
 
 /* Note on.  velocity is 0..127 and feeds the per-operator
- * velocity-sensitivity route; a host sending a fixed value reproduces the
- * behaviour of an instrument whose keyboard has no velocity sensing. */
+ * velocity-sensitivity route (the DX7's own route: the keybed is
+ * velocity sensitive, and the patch's per-operator sensitivity decides
+ * how much each operator follows it).  A host that sends a fixed value
+ * reproduces the behaviour of a keybed that never varies its velocity. */
 void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity);
 void slopsix_note_off(slopsix_context ctx, uint8_t note);
 /* All Notes Off (CC 123 semantics): every key is released, so voices held

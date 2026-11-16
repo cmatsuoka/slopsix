@@ -9,7 +9,11 @@
  *   init     context creation, reset and destruction
  *   silence  the render path writes silence into a sentinel-filled buffer
  *   tables   the generated tables match their recipes (canary entries)
- *   voices   voice state transitions and sustain pedal logic
+ *   voices      voice state transitions and sustain pedal logic
+ *   operator    the operator core against the closed sine recipe
+ *   freq        the frequency path: words, grid and pitch
+ *   algorithms  the 32 algorithms' decoded connections
+ *   graph       the operator-graph walk
  *
  * The harness is a host tool, not the library: it may use whatever it
  * likes, but it links only the public library plus the internal table
@@ -215,6 +219,540 @@ static void stage_voices(void)
     slopsix_destroy_context(ctx);
 }
 
+
+/* ------------------------------------------------- Phase 2: the operator */
+
+/* The reference operator: the closed sine recipe, written out again in
+ * the harness so that the library's operator is checked against the
+ * recipe and not against itself. */
+static int32_t reference_sample(uint32_t phase, int32_t log_amp_q8)
+{
+    uint32_t sine_phase = (phase >> 11) & 0xFFFu;
+    uint32_t quarter = sine_phase & 0x3FFu;
+    int32_t log_word;
+    int32_t sample;
+
+    if (sine_phase & 0x400u) {
+        quarter = 1023u - quarter;
+    }
+
+    log_word = (log_amp_q8 << 2) - (int32_t)slopsix_logsin_quarter[quarter];
+
+    if (log_word < 0) {
+        sample = 0;
+    } else {
+        int32_t int_part = log_word >> 10;
+        int32_t frac = log_word & 1023;
+
+        if (int_part > 15) {
+            int_part = 15;
+            frac = 1023;
+        }
+        sample = (int32_t)(((uint32_t)slopsix_exp_q11[frac] <<
+                            (uint32_t)int_part) >> 13);
+    }
+
+    if (sine_phase & 0x800u) {
+        sample = -sample;
+    }
+
+    return sample;
+}
+
+static void stage_operator(void)
+{
+    slopsix_operator op;
+    slopsix_op_params params;
+    int note;
+    int mismatch = 0;
+    int32_t peak = 0;
+
+    printf("stage operator\n");
+
+    /* A pure carrier: the operator's output must follow the closed sine
+     * recipe exactly, sample for sample. */
+    memset(&params, 0, sizeof(params));
+    params.mode = 0;
+    params.coarse = 1;
+    params.fine = 0;
+    params.detune = 7;
+    params.log_amp_q8 = 4095;
+
+    for (note = 21; note <= 108; note += 3) {
+        int32_t word;
+        uint32_t increment;
+        uint32_t phase = 0;
+        int i;
+
+        memset(&op, 0, sizeof(op));
+
+        word = slopsix_op_freq_word((uint8_t)note, &params, 0);
+        increment = slopsix_increment_from_word(word,
+                                                SLOPSIX_DEFAULT_SAMPLE_RATE);
+        op.increment = increment;
+
+        for (i = 0; i < 4096; i++) {
+            int32_t got;
+            int32_t want;
+
+            slopsix_op_render(&op, &params, 0, &got);
+            want = reference_sample(phase, params.log_amp_q8);
+
+            if (got != want) {
+                mismatch++;
+            }
+            if (got > peak) {
+                peak = got;
+            }
+
+            phase = (phase + increment) & SLOPSIX_PHASE_MASK;
+        }
+    }
+
+    check(mismatch == 0,
+          "the operator matches the closed sine recipe sample for sample");
+    check(peak > 16000,
+          "a full-scale carrier reaches the 14-bit output's top (>= 16000)");
+}
+
+/* The frequency of a phase increment, in milli-hertz, computed with
+ * integer arithmetic only. */
+static int64_t increment_millihertz(uint32_t increment, uint32_t rate)
+{
+    /* f = increment * rate / 2^23 Hz, in milli-hertz. */
+    return ((int64_t)increment * (int64_t)rate * 1000) /
+           ((int64_t)1 << SLOPSIX_PHASE_BITS);
+}
+
+/* The expected frequency of a note on the T-law curve, in milli-hertz:
+ * 440 Hz scaled by the note word's offset from A4. */
+static int64_t expected_millihertz(int32_t word)
+{
+    /* The offset from A4 in 1024ths of an octave. */
+    int32_t octave_1024 = (word - SLOPSIX_WORD_A4) / 4;
+    int32_t int_part = octave_1024 >> 10;
+    int32_t frac = octave_1024 & 1023;
+    uint32_t frac_value = slopsix_exp_q11[frac];
+    int64_t ratio_q16;  /* 2^(frac/1024) in Q16 */
+
+    ratio_q16 = ((int64_t)frac_value * 65536) / 2048;
+
+    if (int_part >= 0) {
+        ratio_q16 <<= int_part;
+    } else {
+        ratio_q16 >>= (-int_part);
+    }
+
+    /* ratio_q16 is 2^(the offset in octaves) in Q16. */
+    return (440LL * 1000LL * ratio_q16) / 65536LL;
+}
+
+static void stage_freq(void)
+{
+    slopsix_op_params params;
+    int note;
+    int a4_ok = 1;
+    int cents_ok = 1;
+    int grid_ok = 1;
+    int octave_ok = 1;
+    int64_t a4_freq = 0;
+    int64_t frequencies[128];
+
+    printf("stage freq\n");
+
+    memset(&params, 0, sizeof(params));
+    params.mode = 0;
+    params.coarse = 1;
+    params.fine = 0;
+    params.detune = 7;
+
+    for (note = 0; note < 128; note++) {
+        int32_t word = slopsix_op_freq_word((uint8_t)note, &params, 0);
+        uint32_t increment = slopsix_increment_from_word(
+            word, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int64_t freq = increment_millihertz(increment,
+                                            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int64_t want = expected_millihertz(word);
+        int64_t diff = freq - want;
+
+        if (diff < 0) {
+            diff = -diff;
+        }
+
+        /* The engine's pitch is quantized twice: to the EGS's
+         * 1024-per-octave field (up to 1.17 cents) and by the frequency
+         * exponent's own step (up to 1.5 cents at the top of the range),
+         * so the rendered frequency can sit a few cents away from the
+         * T-law's value. */
+        if (want > 0 && diff * 1731 > want * 3) {
+            cents_ok = 0;
+        }
+
+        /* The increment must be one the hardware's frequency exponent can
+         * produce: (round(2^frac * 2048) << int) >> 5. */
+        {
+            int32_t datum = ((word - SLOPSIX_FREQ_BIAS) >> 2) + 6411;
+            uint32_t expect;
+
+            if (datum < 0) {
+                datum = 0;
+            }
+            if (datum > 16383) {
+                datum = 16383;
+            }
+            expect = ((uint32_t)slopsix_exp_q11[datum & 1023] <<
+                      (uint32_t)(datum >> 10)) >> 5;
+            if (expect != increment) {
+                grid_ok = 0;
+            }
+        }
+
+        if (note == 69) {
+            a4_freq = freq;
+            /* The closest frequency the hardware's exponent can produce
+             * for A4 is 440.12 Hz: the field's step is 32 phase units,
+             * about 0.19 Hz here. */
+            if (freq < 439900LL || freq > 440200LL) {
+                a4_ok = 0;
+            }
+        }
+        if (note >= 13) {
+            /* Twelve notes up is one octave: the frequency doubles.  The
+             * series starts at note 1: key code 0 is a safe default that
+             * duplicates note 1 and does not continue the series. */
+            int64_t diff = freq - 2 * frequencies[note - 12];
+
+            if (diff < 0) {
+                diff = -diff;
+            }
+            if (diff * 1000 > freq) {
+                octave_ok = 0;
+            }
+        }
+        frequencies[note] = freq;
+    }
+
+    check(a4_ok, "MIDI note 69 renders at 440 Hz (within the field's step)");
+    check(cents_ok,
+          "every note's frequency is within 3 cents of the T-law curve");
+    check(grid_ok,
+          "every increment is one the hardware's frequency exponent produces");
+    check(octave_ok, "twelve notes up doubles the frequency");
+    check(a4_freq > 0, "the frequency path returns values");
+
+    /* The master tune moves the pitch by the requested number of cents. */
+    {
+        int32_t word_flat = slopsix_op_freq_word(69, &params, 0);
+        int32_t word_sharp = slopsix_op_freq_word(69, &params, 100 << 16);
+        uint32_t inc_flat = slopsix_increment_from_word(
+            word_flat, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        uint32_t inc_sharp = slopsix_increment_from_word(
+            word_sharp, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int64_t f_flat = increment_millihertz(inc_flat,
+                                              SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int64_t f_sharp = increment_millihertz(inc_sharp,
+                                               SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int64_t cents = (f_sharp - f_flat) * 1731 / f_flat;
+
+        check(cents >= 98 && cents <= 102,
+              "a master tune of +100 cents raises the pitch by 100 cents");
+    }
+
+    /* The fixed-frequency mode ignores the note. */
+    {
+        slopsix_op_params fixed = params;
+        int64_t f_low;
+        int64_t f_high;
+
+        fixed.mode = 1;
+        fixed.coarse = 2;
+        fixed.fine = 0;
+
+        f_low = increment_millihertz(
+            slopsix_increment_from_word(
+                slopsix_op_freq_word(30, &fixed, 0),
+                SLOPSIX_DEFAULT_SAMPLE_RATE),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        f_high = increment_millihertz(
+            slopsix_increment_from_word(
+                slopsix_op_freq_word(90, &fixed, 0),
+                SLOPSIX_DEFAULT_SAMPLE_RATE),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+        check(f_low == f_high,
+              "a fixed-frequency operator ignores the note");
+        check(f_low > 99000LL && f_low < 101000LL,
+              "the fixed frequency of coarse 2 is 100 Hz");
+
+        /* The coarse field is a decade selector: one step multiplies
+         * the frequency by ten. */
+        {
+            int64_t f_coarse[4];
+            unsigned coarse;
+            int decade_ok = 1;
+
+            for (coarse = 0; coarse < 4; coarse++) {
+                fixed.coarse = (uint8_t)coarse;
+                fixed.fine = 0;
+                f_coarse[coarse] = increment_millihertz(
+                    slopsix_increment_from_word(
+                        slopsix_op_freq_word(69, &fixed, 0),
+                        SLOPSIX_DEFAULT_SAMPLE_RATE),
+                    SLOPSIX_DEFAULT_SAMPLE_RATE);
+            }
+            for (coarse = 0; coarse < 3; coarse++) {
+                int64_t ratio = f_coarse[coarse + 1] * 1000 /
+                                f_coarse[coarse];
+
+                if (ratio < 9800 || ratio > 10200) {
+                    decade_ok = 0;
+                }
+            }
+            check(decade_ok,
+                  "each fixed-coarse step multiplies the frequency by ten");
+        }
+
+        /* The fixed mode shares the ratio mode's antisymmetric detune
+         * law: flat detune lowers the pitch, with the same magnitude. */
+        {
+            slopsix_op_params fixed_detuned = params;
+            int32_t w_neutral;
+            int32_t w_flat;
+            int32_t w_sharp;
+
+            fixed_detuned.mode = 1;
+            fixed_detuned.coarse = 2;
+            fixed_detuned.fine = 0;
+
+            fixed_detuned.detune = 7;
+            w_neutral = slopsix_op_freq_word(69, &fixed_detuned, 0);
+            fixed_detuned.detune = 0;
+            w_flat = slopsix_op_freq_word(69, &fixed_detuned, 0);
+            fixed_detuned.detune = 14;
+            w_sharp = slopsix_op_freq_word(69, &fixed_detuned, 0);
+
+            check(w_flat < w_neutral && w_sharp > w_neutral,
+                  "the fixed mode's flat detune lowers the pitch");
+            {
+                int32_t flat_amount = w_neutral - w_flat;
+                int32_t sharp_amount = w_sharp - w_neutral;
+
+                check(flat_amount <= sharp_amount + 2 &&
+                      sharp_amount <= flat_amount + 2,
+                      "the fixed mode's detune magnitudes are symmetric");
+            }
+        }
+    }
+
+    /* The detune is zero at the hardware's neutral value and antisymmetric
+     * around it. */
+    {
+        slopsix_op_params detuned = params;
+
+        detuned.detune = 7;
+        check(slopsix_op_freq_word(69, &detuned, 0) ==
+              slopsix_op_freq_word(69, &params, 0),
+              "the neutral detune adds nothing");
+
+        detuned.detune = 14;
+        {
+            int32_t high = slopsix_op_freq_word(69, &detuned, 0);
+            int32_t low;
+
+            detuned.detune = 0;
+            low = slopsix_op_freq_word(69, &detuned, 0);
+            check(high > low, "a higher detune raises the pitch");
+            check((high - low) < 64,
+                  "the detune offset stays within a cent of the word");
+        }
+    }
+}
+
+
+/* --------------------------------------------------- Phase 2: the graph */
+
+/* Build a voice's engine for one algorithm: every operator at the given
+ * level, the note's frequency, and no modulation level differences. */
+static void build_voice(slopsix_voice_engine *voice, unsigned algorithm,
+                        uint8_t note, int32_t level_q8)
+{
+    unsigned op;
+
+    memset(voice, 0, sizeof(*voice));
+
+    for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
+        voice->params[op].mode = 0;
+        voice->params[op].coarse = 1;
+        voice->params[op].fine = 0;
+        voice->params[op].detune = 7;
+        voice->params[op].log_amp_q8 = level_q8;
+        voice->ops[op].increment = slopsix_increment_from_word(
+            slopsix_op_freq_word(note, &voice->params[op], 0),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+    }
+
+    /* The feedback level belongs to the operator that carries the
+     * feedback path; the level itself is the voice's own field. */
+    voice->feedback_level = 0;
+    (void)algorithm;
+}
+
+static void stage_graph(void)
+{
+    slopsix_voice_engine voice;
+    slopsix_voice_engine plain;
+    int32_t samples[1024];
+    int nonzero = 0;
+    int differs = 0;
+    int deterministic = 1;
+    int i;
+
+    printf("stage graph\n");
+
+    /* Algorithm 1: the chain 6 -> 5 -> 4 -> 3 with the feedback on
+     * operator 6, and 2 -> 1.  Operator 3 is a carrier. */
+    build_voice(&voice, 0, 60, 4095);
+    build_voice(&plain, 0, 60, 4095);
+
+    /* The plain voice has no modulator: operator 4's level is zero, so
+     * operator 3 is an unmodulated carrier. */
+    plain.params[3].log_amp_q8 = 0;
+
+    for (i = 0; i < 1024; i++) {
+        int32_t out;
+        int32_t plain_out;
+
+        slopsix_voice_render_sample(&voice,
+                                    slopsix_algorithm_get(0), &out);
+        slopsix_voice_render_sample(&plain,
+                                    slopsix_algorithm_get(0), &plain_out);
+        samples[i] = out;
+
+        if (out != 0) {
+            nonzero++;
+        }
+        if (out != plain_out) {
+            differs++;
+        }
+    }
+
+    check(nonzero > 0, "the graph renders a non-silent carrier");
+
+    /* The modulated voice must differ from the unmodulated one: the
+     * modulation enters the carrier's phase in the same sample. */
+    check(differs > 900,
+          "the modulator's output reaches the carrier in the same sample");
+
+    /* The same voice rendered twice must give the same samples. */
+    {
+        slopsix_voice_engine again;
+
+        build_voice(&again, 0, 60, 4095);
+        for (i = 0; i < 1024; i++) {
+            int32_t out;
+
+            slopsix_voice_render_sample(&again,
+                                        slopsix_algorithm_get(0), &out);
+            if (out != samples[i]) {
+                deterministic = 0;
+            }
+        }
+    }
+    check(deterministic, "the graph walk is deterministic");
+
+    /* An algorithm whose carrier is modulated through the sum/delay
+     * register must render too. */
+    {
+        slopsix_voice_engine other;
+        int32_t out;
+        int32_t sum = 0;
+
+        build_voice(&other, 6, 60, 4095);   /* algorithm 7 */
+        for (i = 0; i < 256; i++) {
+            slopsix_voice_render_sample(&other,
+                                        slopsix_algorithm_get(6), &out);
+            sum += out;
+        }
+        check(sum != 0,
+              "an algorithm with a sum/delay register renders a signal");
+    }
+}
+
+/* ------------------------------------------------- Phase 2: the algorithm */
+
+/* The decoded carrier sets and feedback operators of the 32 algorithms
+ * (research A-01: 32/32 against the service-manual chart and
+ * 32/32 against the analysed engine's feedback structure). */
+static const uint8_t dx7_carriers[32][6] = {
+    { 1, 3, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 }, { 1, 4, 0, 0, 0, 0 },
+    { 1, 4, 0, 0, 0, 0 }, { 1, 3, 5, 0, 0, 0 }, { 1, 3, 5, 0, 0, 0 },
+    { 1, 3, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 },
+    { 1, 4, 0, 0, 0, 0 }, { 1, 4, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 },
+    { 1, 3, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 }, { 1, 3, 0, 0, 0, 0 },
+    { 1, 0, 0, 0, 0, 0 }, { 1, 0, 0, 0, 0, 0 }, { 1, 0, 0, 0, 0, 0 },
+    { 1, 4, 5, 0, 0, 0 }, { 1, 2, 4, 0, 0, 0 }, { 1, 2, 4, 5, 0, 0 },
+    { 1, 3, 4, 5, 0, 0 }, { 1, 2, 4, 5, 0, 0 }, { 1, 2, 3, 4, 5, 0 },
+    { 1, 2, 3, 4, 5, 0 }, { 1, 2, 4, 0, 0, 0 }, { 1, 2, 4, 0, 0, 0 },
+    { 1, 3, 6, 0, 0, 0 }, { 1, 2, 3, 5, 0, 0 }, { 1, 2, 3, 6, 0, 0 },
+    { 1, 2, 3, 4, 5, 0 }, { 1, 2, 3, 4, 5, 6 }
+};
+
+static const uint8_t dx7_feedback_op[32] = {
+    6, 2, 6, 6, 6, 6, 6, 4, 2, 3, 6, 2, 6, 6, 2, 6,
+    2, 3, 6, 3, 3, 6, 6, 6, 6, 6, 3, 5, 6, 5, 6, 6
+};
+
+static void stage_algorithms(void)
+{
+    unsigned alg;
+    int carriers_ok = 1;
+    int feedback_ok = 1;
+    int order_ok = 1;
+
+    printf("stage algorithms\n");
+
+    for (alg = 0; alg < 32u; alg++) {
+        const slopsix_algorithm *decoded = slopsix_algorithm_get(alg);
+        unsigned op;
+
+        /* The carrier set. */
+        for (op = 1; op <= SLOPSIX_OP_COUNT; op++) {
+            int want = 0;
+            unsigned i;
+
+            for (i = 0; i < 6u; i++) {
+                if (dx7_carriers[alg][i] == (uint8_t)op) {
+                    want = 1;
+                }
+            }
+            if ((decoded->ops[op - 1u].carrier != 0u) != (want != 0)) {
+                carriers_ok = 0;
+            }
+        }
+
+        /* The feedback operator. */
+        if (slopsix_algorithm_feedback_operator(alg) !=
+            dx7_feedback_op[alg]) {
+            feedback_ok = 0;
+        }
+
+        /* An operator is only ever modulated by a higher-numbered
+         * operator, except for its own feedback path. */
+        for (op = 1; op <= SLOPSIX_OP_COUNT; op++) {
+            if (decoded->ops[op - 1u].source == SLOPSIX_MOD_OPERATOR &&
+                decoded->ops[op - 1u].source_op <= (uint8_t)op) {
+                order_ok = 0;
+            }
+        }
+    }
+
+    check(carriers_ok, "all 32 algorithms decode the documented carriers");
+    check(feedback_ok,
+          "all 32 algorithms decode the documented feedback operator");
+    check(order_ok,
+          "no operator is modulated by an equal or lower-numbered one");
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -242,6 +780,18 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--voices") == 0) {
             stage_voices();
             ran = 1;
+        } else if (strcmp(argv[i], "--operator") == 0) {
+            stage_operator();
+            ran = 1;
+        } else if (strcmp(argv[i], "--freq") == 0) {
+            stage_freq();
+            ran = 1;
+        } else if (strcmp(argv[i], "--algorithms") == 0) {
+            stage_algorithms();
+            ran = 1;
+        } else if (strcmp(argv[i], "--graph") == 0) {
+            stage_graph();
+            ran = 1;
         } else {
             fprintf(stderr, "unknown stage: %s\n", argv[i]);
             return 2;
@@ -253,6 +803,10 @@ int main(int argc, char **argv)
         stage_silence();
         stage_tables();
         stage_voices();
+        stage_operator();
+        stage_freq();
+        stage_algorithms();
+        stage_graph();
     }
 
     if (failures != 0) {
