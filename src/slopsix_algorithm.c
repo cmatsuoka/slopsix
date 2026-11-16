@@ -74,8 +74,10 @@ static const uint16_t slopsix_algorithm_rom[32][6] = {
 
 /* The three algorithms whose single carrier carries no compensation code
  * (the carrier count of one, so the code is zero); their carrier is
- * operator 1 (research A-01, the one-carrier caveat). */
-static const uint8_t slopsix_single_carrier_algorithms[3] = { 16, 17, 18 };
+ * operator 1 (research A-01, the one-carrier caveat).  The indices run
+ * from zero, so the algorithms are 16, 17 and 18. */
+#define SLOPSIX_SINGLE_CARRIER_FIRST 15u
+#define SLOPSIX_SINGLE_CARRIER_LAST  17u
 
 /* Decode the ROM into the graph.  The decoding runs once per algorithm
  * and is cheap, but the result is kept in the algorithm table so that the
@@ -93,6 +95,8 @@ static void slopsix_algorithm_decode(unsigned index)
     unsigned column;
     unsigned op;
     unsigned i;
+
+    slopsix_feedback_operator[index] = 0u;
 
     for (op = 1; op <= SLOPSIX_OP_COUNT; op++) {
         uint16_t entry;
@@ -112,10 +116,11 @@ static void slopsix_algorithm_decode(unsigned index)
 
         alg->ops[consumer - 1u].com = (uint8_t)com;
         alg->ops[consumer - 1u].carrier = (uint8_t)(com != 0u ? 1u : 0u);
+        alg->ops[consumer - 1u].source = SLOPSIX_MOD_NONE;
+        alg->ops[consumer - 1u].source_op = 0u;
 
         switch (sel) {
         case 0:
-            alg->ops[consumer - 1u].source = SLOPSIX_MOD_NONE;
             break;
         case 1:
             /* The unmodified signal of the operator computed just before
@@ -164,20 +169,18 @@ static void slopsix_algorithm_decode(unsigned index)
 
         alg->ops[op_number - 1u].fb_out =
             (uint8_t)((entry & SLOPSIX_ROM_FB_OUT) ? 1u : 0u);
-    }
 
-    /* The feedback operator's own output joins the feedback path. */
-    for (i = 0; i < SLOPSIX_OP_COUNT; i++) {
-        if (alg->ops[i].source == SLOPSIX_MOD_FEEDBACK) {
-            alg->ops[i].fb_out = 1u;
+        /* The feedback operator's own output always joins the feedback
+         * path. */
+        if (alg->ops[op_number - 1u].source == SLOPSIX_MOD_FEEDBACK) {
+            alg->ops[op_number - 1u].fb_out = 1u;
         }
     }
 
     /* The single-carrier algorithms carry no compensation code. */
-    for (i = 0; i < 3u; i++) {
-        if (slopsix_single_carrier_algorithms[i] == (index + 1u)) {
-            alg->ops[0].carrier = 1u;
-        }
+    if (index >= SLOPSIX_SINGLE_CARRIER_FIRST &&
+        index <= SLOPSIX_SINGLE_CARRIER_LAST) {
+        alg->ops[0].carrier = 1u;
     }
 }
 
@@ -190,17 +193,6 @@ static void slopsix_algorithms_init(void)
     }
 
     for (i = 0; i < 32u; i++) {
-        unsigned op;
-
-        for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
-            slopsix_algorithms[i].ops[op].source = SLOPSIX_MOD_NONE;
-            slopsix_algorithms[i].ops[op].source_op = 0u;
-            slopsix_algorithms[i].ops[op].carrier = 0u;
-            slopsix_algorithms[i].ops[op].com = 0u;
-            slopsix_algorithms[i].ops[op].buses = 0u;
-            slopsix_algorithms[i].ops[op].fb_out = 0u;
-        }
-        slopsix_feedback_operator[i] = 0u;
         slopsix_algorithm_decode(i);
     }
 
@@ -225,6 +217,19 @@ uint8_t slopsix_algorithm_feedback_operator(unsigned index)
     }
     slopsix_algorithms_init();
     return slopsix_feedback_operator[index];
+}
+
+/*
+ * The sum/delay register's content: the sum of the two scratch buses.
+ * An operator that wrote both buses counts once, so the register reads
+ * the single value.
+ */
+static int32_t slopsix_bus_sum(const int32_t *bus, const int32_t *bus_writer)
+{
+    if (bus_writer[0] == bus_writer[1]) {
+        return bus[0];
+    }
+    return bus[0] + bus[1];
 }
 
 /*
@@ -257,6 +262,7 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
     bus[1] = 0;
     bus_writer[0] = -1;
     bus_writer[1] = -1;
+    register_value = 0;
     voice_sum = 0;
     feedback_path = 0;
 
@@ -270,11 +276,9 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
             mod_in = voice->out[conn->source_op - 1u];
             break;
         case SLOPSIX_MOD_REGISTER:
-            if (bus_writer[0] == bus_writer[1]) {
-                mod_in = bus[0];
-            } else {
-                mod_in = bus[0] + bus[1];
-            }
+            /* The cached sum of the buses as written so far this sample;
+             * it is recomputed only when a bus is written below. */
+            mod_in = register_value;
             break;
         case SLOPSIX_MOD_REGISTER_DELAYED:
             mod_in = voice->reg_delay;
@@ -311,18 +315,16 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
             bus[1] = sample;
             bus_writer[1] = op;
         }
+        if (conn->buses != 0u) {
+            register_value = slopsix_bus_sum(bus, bus_writer);
+        }
         if (conn->fb_out) {
             feedback_path += sample;
         }
     }
 
-    /* The register's delayed value and the feedback path's delayed value
-     * are the ones of this sample, for the next one. */
-    if (bus_writer[0] == bus_writer[1]) {
-        register_value = bus[0];
-    } else {
-        register_value = bus[0] + bus[1];
-    }
+    /* The register's delayed value is this sample's bus sum, for the next
+     * one. */
     voice->reg_delay = register_value;
 
     /* The feedback path's registers: the two last sums, so that the

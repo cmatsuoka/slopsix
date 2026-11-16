@@ -60,9 +60,9 @@ INCLUDES := -Iinclude -Isrc
 
 # The core: context, API glue and the generated tables (size-first).
 CORE_SRCS := src/slopsix.c src/slopsix_tables.c
-# The per-sample render path (speed-first).
-PERF_SRCS := src/slopsix_operator.c \
-             src/slopsix_eg.c \
+# The per-sample render path (speed-first).  The operator core is inline in
+# src/slopsix_internal.h so it compiles into these translation units.
+PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_pitch.c \
              src/slopsix_algorithm.c \
              src/slopsix_output.c

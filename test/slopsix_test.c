@@ -16,20 +16,14 @@
  *   graph       the operator-graph walk
  *
  * The harness is a host tool, not the library: it may use whatever it
- * likes, but it links only the public library plus the internal table
- * declarations it needs to check.
+ * likes, but it links the public library plus the internal declarations
+ * from the internal header.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "slopsix_internal.h"
-
-extern const int16_t slopsix_logsin_quarter[1024];
-extern const uint16_t slopsix_exp_q11[1024];
-extern const uint8_t slopsix_note_t[128];
-extern const uint16_t slopsix_note_word[128];
-extern const uint8_t slopsix_com_log[6];
 
 static int failures;
 
@@ -225,7 +219,7 @@ static void stage_voices(void)
 /* The reference operator: the closed sine recipe, written out again in
  * the harness so that the library's operator is checked against the
  * recipe and not against itself. */
-static int32_t reference_sample(uint32_t phase, int32_t log_amp_q8)
+static int32_t reference_sample(uint32_t phase, int32_t log_amp_q10)
 {
     uint32_t sine_phase = (phase >> 11) & 0xFFFu;
     uint32_t quarter = sine_phase & 0x3FFu;
@@ -236,7 +230,7 @@ static int32_t reference_sample(uint32_t phase, int32_t log_amp_q8)
         quarter = 1023u - quarter;
     }
 
-    log_word = (log_amp_q8 << 2) - (int32_t)slopsix_logsin_quarter[quarter];
+    log_word = log_amp_q10 - (int32_t)slopsix_logsin_quarter[quarter];
 
     if (log_word < 0) {
         sample = 0;
@@ -276,7 +270,7 @@ static void stage_operator(void)
     params.coarse = 1;
     params.fine = 0;
     params.detune = 7;
-    params.log_amp_q8 = 4095;
+    params.log_amp_q10 = 4095 << SLOPSIX_AMP_Q8_SHIFT;
 
     for (note = 21; note <= 108; note += 3) {
         int32_t word;
@@ -296,7 +290,7 @@ static void stage_operator(void)
             int32_t want;
 
             slopsix_op_render(&op, &params, 0, &got);
-            want = reference_sample(phase, params.log_amp_q8);
+            want = reference_sample(phase, params.log_amp_q10);
 
             if (got != want) {
                 mismatch++;
@@ -585,7 +579,7 @@ static void build_voice(slopsix_voice_engine *voice, unsigned algorithm,
         voice->params[op].coarse = 1;
         voice->params[op].fine = 0;
         voice->params[op].detune = 7;
-        voice->params[op].log_amp_q8 = level_q8;
+        voice->params[op].log_amp_q10 = level_q8 << SLOPSIX_AMP_Q8_SHIFT;
         voice->ops[op].increment = slopsix_increment_from_word(
             slopsix_op_freq_word(note, &voice->params[op], 0),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
@@ -616,7 +610,7 @@ static void stage_graph(void)
 
     /* The plain voice has no modulator: operator 4's level is zero, so
      * operator 3 is an unmodulated carrier. */
-    plain.params[3].log_amp_q8 = 0;
+    plain.params[3].log_amp_q10 = 0;
 
     for (i = 0; i < 1024; i++) {
         int32_t out;

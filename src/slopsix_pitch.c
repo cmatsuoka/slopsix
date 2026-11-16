@@ -21,10 +21,6 @@
  */
 #include "slopsix_internal.h"
 
-/* The generated tables (shared const data, plan decision D-4). */
-extern const uint16_t slopsix_note_word[128];
-extern const uint16_t slopsix_exp_q11[1024];
-
 /*
  * The EGS's calibration offset.
  *
@@ -148,7 +144,6 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
         word = (int32_t)slopsix_note_word[note & 127u];
         word += slopsix_coarse_offset[params->coarse & 31u];
         word += (int32_t)slopsix_fine_offset[params->fine % 100u];
-        word += slopsix_detune_offset(word, detune);
     } else {
         /* The fixed frequency.  The index is a decade-scaled log2 of
          * the frequency: frequency = 10^(index / 100), so one coarse
@@ -169,11 +164,11 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
 
         word = ((4458616 * index) >> 15) -
                (SLOPSIX_LOG2_440_Q10 * 4) + SLOPSIX_WORD_A4;
-
-        /* Both modes share the one detune law, so the fixed mode's
-         * detune is antisymmetric around the neutral value too. */
-        word += slopsix_detune_offset(word, detune);
     }
+
+    /* Both modes share the one detune law, so the fixed mode's detune is
+     * antisymmetric around the neutral value too. */
+    word += slopsix_detune_offset(word, detune);
 
     return word + tune;
 }
@@ -189,6 +184,9 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
  *
  *   increment = round(2^frac * 2048) << int >> 5
  *
+ * The recipe is the operator core's own exponential (slopsix_exp_value),
+ * with the frequency path's own shift.
+ *
  * The increment counts phase units per sample at the engine's own rate
  * of 49,096 Hz, so it is rescaled for a different host rate; the
  * frequency itself is rate-independent.
@@ -196,8 +194,6 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
 uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
 {
     int32_t datum;
-    int32_t int_part;
-    int32_t frac;
     uint32_t increment;
 
     /* The firmware's composition: the note's word plus the pitch EG's
@@ -214,10 +210,7 @@ uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
         datum = 16383;
     }
 
-    int_part = datum >> 10;
-    frac = datum & 1023;
-
-    increment = ((uint32_t)slopsix_exp_q11[frac] << (uint32_t)int_part) >> 5;
+    increment = slopsix_exp_value(datum, 5u);
 
     /* Rescale from the engine's 49,096 Hz to the host's rate.
      *

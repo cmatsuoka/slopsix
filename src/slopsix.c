@@ -2,7 +2,8 @@
  * slopsix.c - context life cycle, public API entry points.
  *
  * The audio path proper lives in the per-sample translation units
- * (slopsix_operator.c, slopsix_eg.c, slopsix_pitch.c, slopsix_output.c);
+ * (slopsix_eg.c, slopsix_pitch.c, slopsix_output.c) and the inline
+ * operator core in slopsix_internal.h;
  * this file owns the context, the parameter state and the public entry
  * points.  Nothing here allocates after the context exists.
  */
@@ -10,29 +11,6 @@
 #include <string.h>
 
 #include "slopsix_internal.h"
-
-/* The generated tables (src/slopsix_tables.c) are shared const data: no
- * per-context copies (plan decision D-4). */
-extern const int16_t slopsix_logsin_quarter[1024];
-extern const uint16_t slopsix_exp_q11[1024];
-extern const uint8_t slopsix_note_t[128];
-extern const uint16_t slopsix_note_word[128];
-extern const uint8_t slopsix_com_log[6];
-extern const int32_t slopsix_coarse_offset[32];
-extern const int16_t slopsix_fine_offset[100];
-
-/* Keep the generated tables referenced so the compiler cannot drop them
- * before the render path uses them. */
-static void slopsix_tables_keepalive(void)
-{
-    (void)slopsix_logsin_quarter;
-    (void)slopsix_exp_q11;
-    (void)slopsix_note_t;
-    (void)slopsix_note_word;
-    (void)slopsix_com_log;
-    (void)slopsix_coarse_offset;
-    (void)slopsix_fine_offset;
-}
 
 static void slopsix_context_defaults(slopsix_context_state *state)
 {
@@ -59,7 +37,6 @@ slopsix_context slopsix_create_context(uint32_t sample_rate)
     if (sample_rate != 0u) {
         state->sample_rate = sample_rate;
     }
-    slopsix_tables_keepalive();
 
     return (slopsix_context)state;
 }
@@ -96,20 +73,15 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 {
     size_t i;
 
+    (void)ctx;
+
     if (stereo_out == NULL) {
-        return;
-    }
-    if (ctx == NULL) {
-        /* No context: the buffer is still filled, with silence, so that
-         * the render call always writes deterministic output. */
-        for (i = 0; i < frames * 2u; i++) {
-            stereo_out[i] = 0;
-        }
         return;
     }
 
     /* The voice path arrives in Phase 3; until then the output is
-     * silence. */
+     * silence.  The buffer is filled even without a context, so that the
+     * render call always writes deterministic output. */
     for (i = 0; i < frames * 2u; i++) {
         stereo_out[i] = 0;
     }
@@ -137,6 +109,55 @@ bool slopsix_get_voice(const void *ctx, uint8_t *out_voice_156)
     return true;
 }
 
+/* The release modes of the voice release helper. */
+typedef enum {
+    SLOPSIX_REL_NOTE,   /* the voices of one note */
+    SLOPSIX_REL_ALL,    /* every sounding voice */
+    SLOPSIX_REL_PEDAL   /* the voices the pedal holds */
+} slopsix_release_mode;
+
+/*
+ * Release voices.
+ *
+ * A released voice that the sustain pedal holds stays in the ON state
+ * with its key marked as lifted; the pedal's release (the pedal-up
+ * case) frees the voices it holds.
+ */
+static void slopsix_release_voices(slopsix_context_state *state,
+    slopsix_release_mode mode, uint8_t note)
+{
+    size_t i;
+
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        slopsix_voice *voice = &state->voices[i];
+
+        if (voice->state != SLOPSIX_VOICE_ON) {
+            continue;
+        }
+
+        switch (mode) {
+        case SLOPSIX_REL_NOTE:
+            if (voice->note != note) {
+                continue;
+            }
+            break;
+        case SLOPSIX_REL_ALL:
+            break;
+        case SLOPSIX_REL_PEDAL:
+            if (voice->held) {
+                continue;
+            }
+            break;
+        }
+
+        voice->held = false;
+
+        if (!state->sustain) {
+            voice->state = SLOPSIX_VOICE_RELEASED;
+        }
+    }
+}
+
 void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
@@ -162,27 +183,17 @@ void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity)
 void slopsix_note_off(slopsix_context ctx, uint8_t note)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-    size_t i;
 
     if (state == NULL) {
         return;
     }
 
-    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
-        if (state->voices[i].state == SLOPSIX_VOICE_ON &&
-            state->voices[i].note == note) {
-            state->voices[i].held = false;
-            if (!state->sustain) {
-                state->voices[i].state = SLOPSIX_VOICE_RELEASED;
-            }
-        }
-    }
+    slopsix_release_voices(state, SLOPSIX_REL_NOTE, note);
 }
 
 void slopsix_all_notes_off(slopsix_context ctx)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-    size_t i;
 
     if (state == NULL) {
         return;
@@ -191,32 +202,19 @@ void slopsix_all_notes_off(slopsix_context ctx)
      * Voices held by the sustain pedal keep ringing until pedal-up; this is
      * deliberately weaker than an all-sound-off, which would bypass the
      * pedal state machine entirely. */
-    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
-        if (state->voices[i].state == SLOPSIX_VOICE_ON) {
-            state->voices[i].held = false;
-            if (!state->sustain) {
-                state->voices[i].state = SLOPSIX_VOICE_RELEASED;
-            }
-        }
-    }
+    slopsix_release_voices(state, SLOPSIX_REL_ALL, 0);
 }
 
 void slopsix_set_sustain(slopsix_context ctx, bool on)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-    size_t i;
 
     if (state == NULL) {
         return;
     }
     state->sustain = on;
     if (!on) {
-        for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
-            if (state->voices[i].state == SLOPSIX_VOICE_ON &&
-                !state->voices[i].held) {
-                state->voices[i].state = SLOPSIX_VOICE_RELEASED;
-            }
-        }
+        slopsix_release_voices(state, SLOPSIX_REL_PEDAL, 0);
     }
 }
 
