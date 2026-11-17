@@ -41,8 +41,6 @@
  * This translation unit runs at control rate, so it is compiled
  * size-first.
  */
-#include <string.h>
-
 #include "slopsix_internal.h"
 
 /* ------------------------------------------------- the activation scaling */
@@ -450,13 +448,6 @@ int32_t slopsix_mod_pitch_offset(const slopsix_context_state *state)
 }
 
 /* --------------------------------------------------------- life cycle */
-
-void slopsix_lfo_cadence_init(slopsix_lfo_cadence *cadence,
-    uint32_t sample_rate)
-{
-    memset(cadence, 0, sizeof(*cadence));
-    cadence->sample_rate = sample_rate;
-}
 
 /*
  * The note-on hook (the firmware's VOICE_ADD side, both the poly and the

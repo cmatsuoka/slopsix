@@ -199,14 +199,3 @@ void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg)
 {
     eg->step = SLOPSIX_PITCH_EG_RELEASE;
 }
-
-/*
- * The cadence's own initialization: the gate reads the host rate from the
- * cadence, so the context sets it once.
- */
-void slopsix_pitch_eg_cadence_init(slopsix_pitch_eg_cadence *cadence,
-    uint32_t sample_rate)
-{
-    memset(cadence, 0, sizeof(*cadence));
-    cadence->sample_rate = sample_rate;
-}

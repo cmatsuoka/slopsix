@@ -222,44 +222,46 @@ typedef struct {
                              * 5 finished */
 } slopsix_pitch_eg;
 
-/* The pitch envelope's update cadence.
+/* The global control-rate cadence.
  *
- * The firmware's update is driven by a global toggle, not by a per-voice
- * one: the pitch EG process runs every second OCF tick for the whole
- * instrument, so every voice's envelope steps on the same samples.  The
- * accumulator therefore belongs to the context, not to the voice; a voice
- * that starts between two ticks waits for the next one, exactly as on the
- * hardware. */
+ * The pitch EG and the LFO are both free-running control-rate processes
+ * driven by the same OCF timer, so they share one accumulator: the host
+ * rate, the sub-tick accumulator and the accumulator's per-sample step (a
+ * multiple of the anchor rate).  The two processes differ only in that
+ * step - the LFO's is twice the pitch EG's - so one gate serves both and
+ * their phases stay locked by construction. */
 typedef struct {
     uint32_t sample_rate;
     uint32_t acc;           /* the sub-tick cadence accumulator */
-} slopsix_pitch_eg_cadence;
+    uint32_t step;          /* the accumulator's increment per sample */
+} slopsix_cadence;
 
-/* The cadence's constants.
+/* The cadence's period numerator.
  *
  * The serial rate is the 9.4265 MHz master clock divided by 192, so a
  * sample spans 192 master clocks.  The OCF timer reloads 3140 E-clock
  * cycles and the E-clock is the master clock divided by 8, so one tick
- * spans 8 * 3140 = 25,120 master clocks; the pitch EG advances on every
- * second tick, 50,240 master clocks.  At the engine's anchor rate that is
- * 50,240 / 192 = 785 / 3 samples per update.  For a host rate the same
- * real-time interval is 785 * rate / (3 * 49,096) samples, which the
- * accumulator below realizes in 32-bit integer arithmetic. */
-#define SLOPSIX_PITCH_EG_TICK_NUM 785u
-#define SLOPSIX_PITCH_EG_TICK_ACC (3u * SLOPSIX_DEFAULT_SAMPLE_RATE)
+ * spans 8 * 3140 = 25,120 master clocks.  At the engine's anchor rate
+ * that is 25,120 / 192 = 785 / 6 samples per tick; the pitch EG advances
+ * on every second tick, so its step is half the LFO's.  For a host rate
+ * the same real-time interval is 785 * rate / (6 * 49,096) samples, which
+ * the accumulator realizes in 32-bit integer arithmetic. */
+#define SLOPSIX_CADENCE_TICK_NUM 785u
+
+static inline void slopsix_cadence_init(slopsix_cadence *cadence,
+    uint32_t sample_rate, uint32_t step)
+{
+    cadence->sample_rate = sample_rate;
+    cadence->acc = 0u;
+    cadence->step = step;
+}
 
 /* The cadence gate: call once per sample; it returns nonzero on the
- * samples where the firmware's pitch-EG process runs.
- *
- * The gate advances the cadence only: it never touches an envelope, so it
- * cannot advance one twice.  The caller advances every sounding voice's
- * envelope with slopsix_pitch_eg_update() on the samples where the gate
- * fires, which is what makes every voice's staircase land on the same
- * samples, as on the hardware.
+ * samples where the process runs.  The gate advances the accumulator only.
  *
  * The rate is capped like the frequency path's, so the products stay
  * inside 32 bits. */
-static inline int slopsix_pitch_eg_cadence_tick(slopsix_pitch_eg_cadence *cadence)
+static inline int slopsix_cadence_tick(slopsix_cadence *cadence)
 {
     uint32_t rate = cadence->sample_rate;
     uint32_t threshold;
@@ -271,8 +273,8 @@ static inline int slopsix_pitch_eg_cadence_tick(slopsix_pitch_eg_cadence *cadenc
         rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
     }
 
-    threshold = SLOPSIX_PITCH_EG_TICK_NUM * rate;
-    cadence->acc += SLOPSIX_PITCH_EG_TICK_ACC;
+    threshold = SLOPSIX_CADENCE_TICK_NUM * rate;
+    cadence->acc += cadence->step;
 
     if (cadence->acc >= threshold) {
         cadence->acc -= threshold;
@@ -280,6 +282,39 @@ static inline int slopsix_pitch_eg_cadence_tick(slopsix_pitch_eg_cadence *cadenc
     }
 
     return 0;
+}
+
+/* The pitch envelope's update cadence.
+ *
+ * The firmware's update is driven by a global toggle, not by a per-voice
+ * one: the pitch EG process runs every second OCF tick for the whole
+ * instrument, so every voice's envelope steps on the same samples.  The
+ * accumulator therefore belongs to the context, not to the voice; a voice
+ * that starts between two ticks waits for the next one, exactly as on the
+ * hardware. */
+typedef slopsix_cadence slopsix_pitch_eg_cadence;
+
+/* The pitch EG advances on every second OCF tick, 50,240 master clocks,
+ * i.e. 785 / 3 samples at the anchor rate: half the LFO's step. */
+#define SLOPSIX_PITCH_EG_TICK_ACC (3u * SLOPSIX_DEFAULT_SAMPLE_RATE)
+
+static inline void slopsix_pitch_eg_cadence_init(
+    slopsix_pitch_eg_cadence *cadence, uint32_t sample_rate)
+{
+    slopsix_cadence_init(cadence, sample_rate, SLOPSIX_PITCH_EG_TICK_ACC);
+}
+
+/* The cadence gate for the pitch-EG process.
+ *
+ * The gate advances the cadence only: it never touches an envelope, so it
+ * cannot advance one twice.  The caller advances every sounding voice's
+ * envelope with slopsix_pitch_eg_update() on the samples where the gate
+ * fires, which is what makes every voice's staircase land on the same
+ * samples, as on the hardware. */
+static inline int slopsix_pitch_eg_cadence_tick(
+    slopsix_pitch_eg_cadence *cadence)
+{
+    return slopsix_cadence_tick(cadence);
 }
 
 /* The pitch-EG level's neutral word: the firmware initializes an idle
@@ -324,47 +359,26 @@ typedef struct {
  *
  * The hardware's one OCF timer drives everything: the LFO advances (and
  * both registers are pushed) on every tick, the pitch EG walks on every
- * second tick.  The engine realizes the same real-time cadence with two
- * 32-bit accumulators whose periods are exact multiples of each other, so
- * the pitch EG's gate lands exactly on every second LFO tick, as on the
- * hardware (see the pitch EG's cadence above). */
-typedef struct {
-    uint32_t sample_rate;
-    uint32_t acc;               /* the sub-tick cadence accumulator */
-} slopsix_lfo_cadence;
+ * second tick.  Both share slopsix_cadence; the LFO's step is twice the
+ * pitch EG's, so the pitch EG's gate lands exactly on every second LFO
+ * tick, as on the hardware (see the pitch EG's cadence above). */
+typedef slopsix_cadence slopsix_lfo_cadence;
 
-/* The cadence's constants: one OCF tick spans 8 * 3140 = 25,120 master
- * clocks and a sample spans 192 of them, so the LFO's period is
- * 25,120 / 192 = 785 / 6 samples at the anchor rate.  For a host rate the
- * same real-time interval is 785 * rate / (6 * 49,096) samples, which the
- * accumulator realizes in 32-bit integer arithmetic (the pitch EG's
- * constants are the doubled period). */
-#define SLOPSIX_LFO_TICK_NUM 785u
+/* The LFO ticks on every OCF tick, 25,120 master clocks, i.e. 785 / 6
+ * samples at the anchor rate. */
 #define SLOPSIX_LFO_TICK_ACC (6u * SLOPSIX_DEFAULT_SAMPLE_RATE)
+
+static inline void slopsix_lfo_cadence_init(slopsix_lfo_cadence *cadence,
+    uint32_t sample_rate)
+{
+    slopsix_cadence_init(cadence, sample_rate, SLOPSIX_LFO_TICK_ACC);
+}
 
 /* The cadence gate: call once per sample; it returns nonzero on the
  * samples where the firmware's OCF handler runs the LFO. */
 static inline int slopsix_lfo_cadence_tick(slopsix_lfo_cadence *cadence)
 {
-    uint32_t rate = cadence->sample_rate;
-    uint32_t threshold;
-
-    if (rate == 0u) {
-        rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
-    }
-    if (rate > SLOPSIX_DEFAULT_SAMPLE_RATE * 8u) {
-        rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
-    }
-
-    threshold = SLOPSIX_LFO_TICK_NUM * rate;
-    cadence->acc += SLOPSIX_LFO_TICK_ACC;
-
-    if (cadence->acc >= threshold) {
-        cadence->acc -= threshold;
-        return 1;
-    }
-
-    return 0;
+    return slopsix_cadence_tick(cadence);
 }
 
 /* ------------------------------------------------------------ voice state */
@@ -1064,14 +1078,12 @@ int32_t slopsix_bend_context_offset(const slopsix_context_state *state);
  * per render call; the state itself carries no cadence. */
 void slopsix_lfo_tick(slopsix_context_state *state);
 
-/* The LFO's life cycle: the cadence's initialization (the gate reads the
- * host rate) and the note-on hook - the firmware's VOICE_ADD side, which
- * clears the delay accumulator and the fade factor when the patch's
- * delay is not 0, and seeds the phase accumulator to 0x7FFF when the
- * patch's LFO SYNC is set.  The LFO state is global, so the hook runs on
- * every note-on, as the firmware's voice-add paths do. */
-void slopsix_lfo_cadence_init(slopsix_lfo_cadence *cadence,
-    uint32_t sample_rate);
+/* The LFO's life cycle: the shared cadence gate (above) and the note-on
+ * hook - the firmware's VOICE_ADD side, which clears the delay
+ * accumulator and the fade factor when the patch's delay is not 0, and
+ * seeds the phase accumulator to 0x7FFF when the patch's LFO SYNC is set.
+ * The LFO state is global, so the hook runs on every note-on, as the
+ * firmware's voice-add paths do. */
 void slopsix_lfo_note_on(slopsix_context_state *state);
 
 /* The patch activation's LFO parse: the dump's bytes 137..143 through the
@@ -1140,11 +1152,6 @@ void slopsix_pitch_eg_init(slopsix_pitch_eg *eg, const uint8_t rates[4],
     const uint8_t levels[4]);
 void slopsix_pitch_eg_note_on(slopsix_pitch_eg *eg);
 void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg);
-
-/* The cadence's own initialization: the gate reads the host rate from the
- * cadence, so the context sets it once. */
-void slopsix_pitch_eg_cadence_init(slopsix_pitch_eg_cadence *cadence,
-    uint32_t sample_rate);
 
 /* The frequency path.  `pitch_offset` is the voice's total log-frequency
  * offset (the pitch bend and the pitch EG), which the EGS applies to a
