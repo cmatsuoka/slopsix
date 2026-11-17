@@ -5,7 +5,7 @@
 #   check          regenerate-and-compare the tables, then run the harness
 #   check-dx7      the default configuration (feature macros off)
 #   check-dx100    the DX100 personality build
-#   check-extras   the extras extension build
+#   check-extras   the extras build (conveniences beyond the original hardware)
 #   tables         regenerate the generated tables under build/tables/
 #   tables-install regenerate the tables and write src/slopsix_tables.c
 #   clean          remove the build products
@@ -58,8 +58,9 @@ OPT_FAST := -O2
 
 INCLUDES := -Iinclude -Isrc
 
-# The core: context, API glue and the generated tables (size-first).
-CORE_SRCS := src/slopsix.c src/slopsix_tables.c
+# The core: context, API glue, the generated tables and the control-rate
+# DX7 sources (size-first).
+CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c
 # The per-sample render path (speed-first).  The operator core is inline in
 # src/slopsix_internal.h so it compiles into these translation units.
 PERF_SRCS := src/slopsix_eg.c \

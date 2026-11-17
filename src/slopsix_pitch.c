@@ -40,16 +40,6 @@
 #define SLOPSIX_EGS_OCTAVE_OFFSET \
     (SLOPSIX_EGS_DATUM_A4 - ((SLOPSIX_WORD_A4 - SLOPSIX_FREQ_BIAS) >> 2))
 
-/* Floor division by a power of two, defined for negative values (the word
- * minus the bias can be negative for the lowest notes). */
-static int32_t slopsix_floor_div(int32_t value, unsigned shift)
-{
-    if (value >= 0) {
-        return value >> shift;
-    }
-    return -(((-value) + (int32_t)((1u << shift) - 1u)) >> shift);
-}
-
 /*
  * The detune term.
  *
@@ -72,9 +62,14 @@ static int32_t slopsix_detune_offset(uint8_t detune)
  * the fine ratio and the detune term.  Fixed-frequency mode (mode 1)
  * ignores the note and uses the operator's fixed frequency (research
  * P-03, hypothesis-grade); it still receives the master tune.
+ *
+ * The voice's pitch contributions - the master tune and the pitch bend -
+ * reach the operator in ratio mode only: the EGS adds them to the voice
+ * frequency, which a fixed-frequency operator does not read (research
+ * P-03, a bit-synchronous EGS model).
  */
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
-                             int32_t master_tune_q16)
+                             int32_t master_tune_q16, int32_t bend_offset)
 {
     int32_t word;
     int32_t tune;
@@ -128,6 +123,7 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
      * bit-synchronous EGS model). */
     if (params->mode == 0u) {
         word += tune;
+        word += bend_offset;
     }
 
     return word;

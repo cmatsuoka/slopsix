@@ -94,7 +94,7 @@ extern const int16_t slopsix_fine_offset[100];
 #define SLOPSIX_FB_SHIFT_MAX 6
 
 /* The word for MIDI note 69 (A4): the note word's reference pitch, and
- * the anchor of the frequency calibration (see slopsix_pitch.c). */
+ * the anchor of the frequency calibration (see src/slopsix_pitch.c). */
 #define SLOPSIX_WORD_A4 23208
 
 /* log2(440 Hz) in Q10 units (1024 per octave): 8.781743 octaves. */
@@ -102,7 +102,7 @@ extern const int16_t slopsix_fine_offset[100];
 
 /* The EGS's datum for MIDI note 69, i.e. the 1024-per-octave value whose
  * frequency exponent gives the closest frequency to 440 Hz that the
- * hardware can produce at 49,096 Hz: 440.12 Hz (see slopsix_pitch.c). */
+ * hardware can produce at 49,096 Hz: 440.12 Hz (see src/slopsix_pitch.c). */
 #define SLOPSIX_EGS_DATUM_A4 10443
 
 /* --------------------------------------------------- hypothesis-grade block
@@ -173,7 +173,7 @@ typedef struct {
     int32_t master_tune_q16;    /* cents, 0 == shipped tuning */
 
     /* Mix. */
-    int32_t pan_q16;            /* 32768 == centre */
+    int32_t pan_q16;            /* 32768 == centre; SLOPSIX_EXTRAS only */
     unsigned master_volume;     /* 0..7 */
 
     /* Voice management. */
@@ -205,7 +205,7 @@ typedef struct {
  * 1/8 of an octave, i.e. 32 units of the Q8 domain.  The mapping is
  * closed (research E-08, the ROM's own attenuation table is the exact
  * inverse of the law below) and is implemented in
- * slopsix_eg.c. */
+ * src/slopsix_eg.c. */
 #define SLOPSIX_MICROSTEP_MAX 127
 #define SLOPSIX_MICROSTEP_Q8 32
 #define SLOPSIX_MICROSTEP_Q8_SHIFT 5
@@ -569,9 +569,44 @@ static inline int32_t slopsix_ams_reduction_q8(uint8_t ams_sens,
     return (int32_t)reduction;
 }
 
+/* Floor division by a power of two, defined for negative values.  C leaves
+ * the result of a right shift on a negative integer implementation-defined,
+ * so the conversions that can see a signed word use this instead. */
+static inline int32_t slopsix_floor_div(int32_t value, unsigned shift)
+{
+    if (value >= 0) {
+        return value >> shift;
+    }
+    return -(((-value) + (int32_t)((1u << shift) - 1u)) >> shift);
+}
+
+/* The pitch bend (Phase 4). */
+
+/* The EGS's pitch-modification word: 16 bits in units of 1/16384 of an
+ * octave, that is, two fractional bits below the EGS's 1024-per-octave
+ * frequency datum.  The engine's log-frequency word is the firmware's
+ * 4096-per-octave word (plan decision D-12), so the pitch mod enters it
+ * shifted right by two: the two units denote the same pitch, and the
+ * shift is the conversion between the chips' domains. */
+#define SLOPSIX_PITCH_MOD_UNITS_PER_OCTAVE 16384
+#define SLOPSIX_PITCH_MOD_TO_LOG_SHIFT 2
+
+/* The bend's pitch-modification word, in the EGS's 1/16384-octave units.
+ * The bend range is 0..12 semitones and the step is 0..15 (0 =
+ * continuous); a non-zero step ignores the range, as on the hardware. */
+int32_t slopsix_bend_pitch_mod(uint16_t bend14, uint8_t range, uint8_t step);
+
+/* The bend's contribution to the voice's log-frequency word, in the
+ * engine's 4096-per-octave units. */
+int32_t slopsix_bend_log_offset(uint16_t bend14, uint8_t range, uint8_t step);
+
+/* The bend's contribution for a context: the bend, its range and its step
+ * are global, as on the hardware. */
+int32_t slopsix_bend_context_offset(const slopsix_context_state *state);
+
 /* The frequency path. */
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
-                             int32_t master_tune_q16);
+                             int32_t master_tune_q16, int32_t bend_offset);
 uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate);
 
 /* The operator graph. */

@@ -14,6 +14,8 @@
  *   freq        the frequency path: words, grid and pitch
  *   algorithms  the 32 algorithms' decoded connections
  *   graph       the operator-graph walk
+ *   bend        the pitch bend: the curve, its quantisation and its scale
+ *   extras      the pan is an extra: available or a no-op by build
  *
  * The harness is a host tool, not the library: it may use whatever it
  * likes, but it links the public library plus the internal declarations
@@ -280,7 +282,7 @@ static void stage_operator(void)
 
         memset(&op, 0, sizeof(op));
 
-        word = slopsix_op_freq_word((uint8_t)note, &params, 0);
+        word = slopsix_op_freq_word((uint8_t)note, &params, 0, 0);
         increment = slopsix_increment_from_word(word,
                                                 SLOPSIX_DEFAULT_SAMPLE_RATE);
         op.increment = increment;
@@ -388,7 +390,7 @@ static void stage_freq(void)
     params.detune = 7;
 
     for (note = 0; note < 128; note++) {
-        int32_t word = slopsix_op_freq_word((uint8_t)note, &params, 0);
+        int32_t word = slopsix_op_freq_word((uint8_t)note, &params, 0, 0);
         uint32_t increment = slopsix_increment_from_word(
             word, SLOPSIX_DEFAULT_SAMPLE_RATE);
         int64_t freq = increment_millihertz(increment,
@@ -463,8 +465,8 @@ static void stage_freq(void)
 
     /* The master tune moves the pitch by the requested number of cents. */
     {
-        int32_t word_flat = slopsix_op_freq_word(69, &params, 0);
-        int32_t word_sharp = slopsix_op_freq_word(69, &params, 100 << 16);
+        int32_t word_flat = slopsix_op_freq_word(69, &params, 0, 0);
+        int32_t word_sharp = slopsix_op_freq_word(69, &params, 100 << 16, 0);
         uint32_t inc_flat = slopsix_increment_from_word(
             word_flat, SLOPSIX_DEFAULT_SAMPLE_RATE);
         uint32_t inc_sharp = slopsix_increment_from_word(
@@ -491,12 +493,12 @@ static void stage_freq(void)
 
         f_low = increment_millihertz(
             slopsix_increment_from_word(
-                slopsix_op_freq_word(30, &fixed, 0),
+                slopsix_op_freq_word(30, &fixed, 0, 0),
                 SLOPSIX_DEFAULT_SAMPLE_RATE),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
         f_high = increment_millihertz(
             slopsix_increment_from_word(
-                slopsix_op_freq_word(90, &fixed, 0),
+                slopsix_op_freq_word(90, &fixed, 0, 0),
                 SLOPSIX_DEFAULT_SAMPLE_RATE),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
 
@@ -517,7 +519,7 @@ static void stage_freq(void)
                 fixed.fine = 0;
                 f_coarse[coarse] = increment_millihertz(
                     slopsix_increment_from_word(
-                        slopsix_op_freq_word(69, &fixed, 0),
+                        slopsix_op_freq_word(69, &fixed, 0, 0),
                         SLOPSIX_DEFAULT_SAMPLE_RATE),
                     SLOPSIX_DEFAULT_SAMPLE_RATE);
             }
@@ -546,11 +548,11 @@ static void stage_freq(void)
             fixed_detuned.fine = 0;
 
             fixed_detuned.detune = 7;
-            w_neutral = slopsix_op_freq_word(69, &fixed_detuned, 0);
+            w_neutral = slopsix_op_freq_word(69, &fixed_detuned, 0, 0);
             fixed_detuned.detune = 0;
-            w_flat = slopsix_op_freq_word(69, &fixed_detuned, 0);
+            w_flat = slopsix_op_freq_word(69, &fixed_detuned, 0, 0);
             fixed_detuned.detune = 14;
-            w_sharp = slopsix_op_freq_word(69, &fixed_detuned, 0);
+            w_sharp = slopsix_op_freq_word(69, &fixed_detuned, 0, 0);
 
             check(w_flat < w_neutral && w_sharp > w_neutral,
                   "the fixed mode's flat detune lowers the pitch");
@@ -573,8 +575,8 @@ static void stage_freq(void)
             fixed_tune.coarse = 2;
             fixed_tune.fine = 0;
             fixed_tune.detune = 7;
-            check(slopsix_op_freq_word(69, &fixed_tune, 0) ==
-                  slopsix_op_freq_word(69, &fixed_tune, 65536),
+            check(slopsix_op_freq_word(69, &fixed_tune, 0, 0) ==
+                  slopsix_op_freq_word(69, &fixed_tune, 65536, 0),
                   "the fixed mode ignores the master tune");
         }
     }
@@ -585,17 +587,17 @@ static void stage_freq(void)
         slopsix_op_params detuned = params;
 
         detuned.detune = 7;
-        check(slopsix_op_freq_word(69, &detuned, 0) ==
-              slopsix_op_freq_word(69, &params, 0),
+        check(slopsix_op_freq_word(69, &detuned, 0, 0) ==
+              slopsix_op_freq_word(69, &params, 0, 0),
               "the neutral detune adds nothing");
 
         detuned.detune = 14;
         {
-            int32_t high = slopsix_op_freq_word(69, &detuned, 0);
+            int32_t high = slopsix_op_freq_word(69, &detuned, 0, 0);
             int32_t low;
 
             detuned.detune = 0;
-            low = slopsix_op_freq_word(69, &detuned, 0);
+            low = slopsix_op_freq_word(69, &detuned, 0, 0);
             check(high > low, "a higher detune raises the pitch");
             check((high - low) < 64,
                   "the detune offset stays within a cent of the word");
@@ -622,7 +624,7 @@ static void build_voice(slopsix_voice_engine *voice, unsigned algorithm,
         voice->params[op].detune = 7;
         voice->params[op].log_amp_q10 = level_q8 << SLOPSIX_AMP_Q8_SHIFT;
         voice->ops[op].increment = slopsix_increment_from_word(
-            slopsix_op_freq_word(note, &voice->params[op], 0),
+            slopsix_op_freq_word(note, &voice->params[op], 0, 0),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
     }
 
@@ -1160,7 +1162,7 @@ static void stage_level(void)
             voice.params[i].fine = 0;
             voice.params[i].detune = 7;
             voice.ops[i].increment = slopsix_increment_from_word(
-                slopsix_op_freq_word(60, &voice.params[i], 0),
+                slopsix_op_freq_word(60, &voice.params[i], 0, 0),
                 SLOPSIX_DEFAULT_SAMPLE_RATE);
             slopsix_eg_init(&voice.eg[i], rates, levels, TEST_OP_LEVEL_Q8, 0,
                             SLOPSIX_DEFAULT_SAMPLE_RATE);
@@ -1198,7 +1200,7 @@ static void stage_com(void)
         voice.params[i].fine = 0;
         voice.params[i].detune = 7;
         voice.ops[i].increment = slopsix_increment_from_word(
-            slopsix_op_freq_word(60, &voice.params[i], 0),
+            slopsix_op_freq_word(60, &voice.params[i], 0, 0),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
         voice.params[i].log_amp_q10 = 4000 << SLOPSIX_AMP_Q8_SHIFT;
     }
@@ -1219,7 +1221,7 @@ static void stage_com(void)
         voice.params[i].fine = 0;
         voice.params[i].detune = 7;
         voice.ops[i].increment = slopsix_increment_from_word(
-            slopsix_op_freq_word(60, &voice.params[i], 0),
+            slopsix_op_freq_word(60, &voice.params[i], 0, 0),
             SLOPSIX_DEFAULT_SAMPLE_RATE);
         voice.params[i].log_amp_q10 = (i == 0)
             ? (4000 << SLOPSIX_AMP_Q8_SHIFT) : 0;
@@ -1240,6 +1242,152 @@ static void stage_com(void)
           "a six-carrier algorithm is as loud as a single-carrier one");
 }
 
+/* --------------------------------------------------- the pitch bend */
+
+static void stage_bend(void)
+{
+    slopsix_context ctx;
+    int32_t value;
+    int32_t down;
+    unsigned i;
+    int seen_41 = 0;
+    int seen_87 = 0;
+
+    printf("stage bend\n");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+
+    /* The centre of the bend is the neutral one. */
+    slopsix_set_pitch_bend(ctx, 0x2000u);
+    slopsix_set_pitch_bend_range(ctx, 12u, 0u);
+    check(slopsix_bend_pitch_mod(0x2000u, 12u, 0u) == 0,
+          "the centred bend is neutral");
+
+    /* The dead zone: the curve holds the neutral value for the three
+     * input steps around the centre. */
+    check(slopsix_bend_pitch_mod(8064u, 11u, 0u) == 0,
+          "the bend's dead zone starts one step below the centre");
+    check(slopsix_bend_pitch_mod(8320u, 11u, 0u) == 0,
+          "the bend's dead zone ends one step above the centre");
+    check(slopsix_bend_pitch_mod(8448u, 11u, 0u) != 0,
+          "the bend leaves the dead zone one step further out");
+
+    /* The input is reduced to the hardware's seven bits. */
+    check(slopsix_bend_pitch_mod(0x2000u, 11u, 0u) ==
+          slopsix_bend_pitch_mod(0x207Fu, 11u, 0u),
+          "the bend is quantised to the hardware's seven bits");
+
+    /* The continuous path: the range scales the bend, and the full
+     * deflection reaches the range's semitones (within the input's
+     * quantisation). */
+    value = slopsix_bend_pitch_mod(0x3FFFu, 11u, 0u);
+    check(value == 14868, "the full upwards bend follows the range's scale");
+    check(value * 100 > 11 * 1365 * 98 && value * 100 < 11 * 1365 * 100,
+          "the full upwards bend reaches the range's semitones");
+
+    /* The down side is one step short of the up side (the |s|-1
+     * compression) and reaches one step further. */
+    down = slopsix_bend_pitch_mod(0u, 11u, 0u);
+    check(down == -14987, "the full downwards bend follows the |s|-1 law");
+    check(-down > value, "the downwards travel reaches further than the up");
+
+    check(slopsix_bend_pitch_mod(7936u, 11u, 0u) == -119,
+          "the first step below the dead zone is compressed");
+    check(slopsix_bend_pitch_mod(8448u, 11u, 0u) == 236,
+          "the first step above the dead zone is not compressed");
+
+    /* Two of the curve's values are never produced by any input.  Value 41
+     * is on the down side, so it surfaces as the negative word. */
+    for (i = 0; i < 128u; i++) {
+        int32_t bend = (int32_t)((unsigned)i << 7);
+        if (slopsix_bend_pitch_mod((uint16_t)bend, 11u, 0u) == -5311) {
+            seen_41 = 1;
+        }
+        if (slopsix_bend_pitch_mod((uint16_t)bend, 11u, 0u) == 5428) {
+            seen_87 = 1;
+        }
+    }
+    check(!seen_41, "the curve's value 41 is never produced");
+    check(!seen_87, "the curve's value 87 is never produced");
+
+    /* The range-12 path has its own scale, with the top sample special:
+     * the top sample's word is halved into 0x3FFF. */
+    check(slopsix_bend_pitch_mod(0x3FFFu, 12u, 0u) == 16383,
+          "the range-12 top sample is the halved word");
+    check(slopsix_bend_pitch_mod(16128u, 12u, 0u) == 15872,
+          "the range-12 path has its own scale");
+    check(slopsix_bend_pitch_mod(0u, 12u, 0u) == -16384,
+          "the range-12 downwards bend reaches the full travel");
+
+    /* A non-zero step ignores the range and quantises the bend into the
+     * step table's staircase. */
+    check(slopsix_bend_pitch_mod(0x3FFFu, 0u, 3u) ==
+          slopsix_bend_pitch_mod(0x3FFFu, 12u, 3u),
+          "the step ignores the range");
+    check(slopsix_bend_pitch_mod(0x3FFFu, 11u, 3u) == 16384,
+          "the step's staircase reaches the full travel");
+    check(slopsix_bend_pitch_mod(0u, 11u, 3u) == -16385,
+          "the step's downwards staircase is the complement");
+
+    /* The engine's word: the pitch mod is four times finer than the
+     * engine's log-frequency word, so it is shifted right by two. */
+    check(slopsix_bend_log_offset(0x3FFFu, 11u, 0u) == (14868 >> 2),
+          "the bend enters the engine's word shifted by two");
+
+    /* The public setters reach the engine's bend parameters. */
+    slopsix_set_pitch_bend(ctx, 0x3FFFu);
+    slopsix_set_pitch_bend_range(ctx, 11u, 0u);
+    check(SLOPSIX_CONTEXT(ctx)->pitch_bend == 0x3FFFu &&
+          SLOPSIX_CONTEXT(ctx)->bend_range == 11u &&
+          SLOPSIX_CONTEXT(ctx)->bend_step == 0u,
+          "the public setters store the bend's parameters");
+    check(slopsix_bend_context_offset(SLOPSIX_CONTEXT(ctx)) ==
+          slopsix_bend_log_offset(0x3FFFu, 11u, 0u),
+          "the stored bend produces the engine's offset");
+
+    slopsix_destroy_context(ctx);
+}
+
+/* --------------------------------------------------- extras: the pan */
+
+static void stage_extras(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    const int32_t centre = SLOPSIX_Q16_ONE / 2;
+
+    printf("stage extras\n");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+
+    check(state->pan_q16 == centre, "the default pan is centre");
+
+#if SLOPSIX_HAS_EXTRAS
+    slopsix_set_pan(ctx, 0);
+    check(state->pan_q16 == 0, "the extras build stores the pan");
+    slopsix_set_pan(ctx, SLOPSIX_Q16_ONE + 1);
+    check(state->pan_q16 == SLOPSIX_Q16_ONE,
+          "the extras build clamps the pan to hard right");
+    slopsix_set_pan(ctx, -1);
+    check(state->pan_q16 == 0, "the extras build clamps the pan to hard left");
+#else
+    slopsix_set_pan(ctx, 0);
+    check(state->pan_q16 == centre,
+          "without the extras build set_pan leaves the output at centre");
+#endif
+
+    slopsix_destroy_context(ctx);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -1250,8 +1398,10 @@ int main(int argc, char **argv)
 #else
     printf("configuration: DX7 only\n");
 #endif
-#if defined(SLOPSIX_EXTRAS)
-    printf("configuration: extensions enabled\n");
+#if SLOPSIX_HAS_EXTRAS
+    printf("configuration: extras enabled (pan is available)\n");
+#else
+    printf("configuration: extras disabled (mono, pan is a no-op)\n");
 #endif
 
     for (i = 1; i < argc; i++) {
@@ -1288,6 +1438,12 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--com") == 0) {
             stage_com();
             ran = 1;
+        } else if (strcmp(argv[i], "--bend") == 0) {
+            stage_bend();
+            ran = 1;
+        } else if (strcmp(argv[i], "--extras") == 0) {
+            stage_extras();
+            ran = 1;
         } else {
             fprintf(stderr, "unknown stage: %s\n", argv[i]);
             return 2;
@@ -1306,6 +1462,8 @@ int main(int argc, char **argv)
         stage_eg();
         stage_level();
         stage_com();
+        stage_bend();
+        stage_extras();
     }
 
     if (failures != 0) {

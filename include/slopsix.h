@@ -25,6 +25,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Optional features beyond the original instruments.  The pan control is
+ * the first of these; with SLOPSIX_EXTRAS off the synths stay mono at
+ * centre, as their hardware does. */
+#if defined(SLOPSIX_EXTRAS)
+#define SLOPSIX_HAS_EXTRAS 1
+#else
+#define SLOPSIX_HAS_EXTRAS 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -143,7 +152,12 @@ void slopsix_set_ctrl_assign(slopsix_context ctx,
 /* ------------------------------------------------------------------- mix */
 
 /* Per-voice-bus pan position, Q16: 0 is hard left, 65536 is hard right,
- * 32768 is centre (the default: identical left and right). */
+ * 32768 is centre (the default: identical left and right).
+ *
+ * This is an extra, not hardware behaviour: every supported instrument
+ * has a mono output.  It is available only when the library is compiled
+ * with SLOPSIX_EXTRAS (SLOPSIX_HAS_EXTRAS); without it the call is a
+ * no-op and the output stays at centre. */
 void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16);
 
 /* The hardware's 8 discrete master volume steps (0..7). */

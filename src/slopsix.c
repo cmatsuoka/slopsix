@@ -302,6 +302,7 @@ void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
     if (state == NULL) {
         return;
     }
+#if defined(SLOPSIX_EXTRAS)
     if (pan_q16 < 0) {
         pan_q16 = 0;
     }
@@ -309,6 +310,10 @@ void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
         pan_q16 = SLOPSIX_Q16_ONE;
     }
     state->pan_q16 = pan_q16;
+#else
+    /* Panning is an extra: without it the output stays mono at centre. */
+    (void)pan_q16;
+#endif
 }
 
 void slopsix_set_master_volume(slopsix_context ctx, unsigned level_0_7)

@@ -23,9 +23,9 @@ read together.
 |---|---|---|
 | SC-01 | DX7 target variant | **Decided:** DX7 family (MK1 plus later-variant sound-path features), no per-variant switch. |
 | SC-02 | DX100 target | **Decided:** 4 ops, 8 algorithms, 8-voice poly, mono, own patch surface, same graph core. |
-| SC-03 | Extension scope | **Decided:** opsix-style extras behind a macro; core leaves hooks for operator types, routing and an alternative output stage. |
+| SC-03 | Extension scope | **Decided:** `SLOPSIX_EXTRAS` carries conveniences beyond the original hardware (the pan control first), not opsix-style synthesis changes; opsix-style operator types, routing and an alternative output stage are deferred to a separate future macro. The core leaves the hooks for them. |
 | SC-04 | Sine table & curves as data | **Decided:** hardware tables are generated from `tools/`; log-sine, exponential, note and COM tables are closed-form. |
-| SC-05 | DX7-family delta map | **Decided:** velocity response, per-voice pan, micro-tuning and aftertouch routing are in engine scope; storage/MIDI/panel are host-side. |
+| SC-05 | DX7-family delta map | **Decided:** velocity response, micro-tuning and aftertouch routing are in engine scope; panning is a convenience beyond the hardware and sits behind `SLOPSIX_EXTRAS`; storage/MIDI/panel are host-side. |
 | SC-06 | Third-party model evidence | **Partial:** model-derived facts are hypothesis-grade and must stay tagged; no DX100 model content. |
 | SC-07 | DX7 hardware facts | **Partial (hardware):** 49,096 Hz; 22/23-bit phase arithmetic; closed-form tables; 12-bit amplitude domain; DAC + compander; algorithm graph decoded. |
 | SC-08 | DX7 firmware facts | **Partial (firmware):** register map, note→frequency closed form, 660-unit value scale, LFO speed/delay laws, EG-bias composition, detune/bend/pitch-EG tables. |
@@ -87,7 +87,7 @@ read together.
 | A-01 | 32 algorithms as data | **Resolved:** alignment rule, carriers, feedback ops and COM counts verified; implementation-ready. |
 | A-02 | Modulator→carrier summing | **Partial:** sum/delay register semantics defined; load/hold/add sequencing open. |
 | A-03 | Feedback slot | **Resolved:** 3-bit field on the per-algorithm self-loop. |
-| A-04 | Voice bus and pan | **Decided:** mono carrier bus; per-voice pan in the family API; pan law open. |
+| A-04 | Voice bus and pan | **Decided:** mono carrier bus; panning is an extra beyond the hardware (`SLOPSIX_EXTRAS`, see X-06); pan law open. |
 | A-05 | Per-algorithm output compensation | **Partial:** six COM log values and carrier counts verified; a known improvement over the model baseline. |
 
 ## Output stage
@@ -132,13 +132,13 @@ read together.
 | ID | Item | Resolution |
 |---|---|---|
 | X-01 | General operator graph | **Open (design):** graph with per-op inputs/gains and carrier roles as data; specifiable from the decoded structure. |
-| X-02 | Operator type field | **Open (design):** sine-PM is the DX7 kind; extras behind the macro. |
+| X-02 | Operator type field | **Open (design):** sine-PM is the DX7 kind; extra operator types are deferred to a future extension macro, not `SLOPSIX_EXTRAS`. |
 | X-03 | Per-operator filter slot | **Open (design):** extension-only. |
 | X-04 | Feedback generality | **Open (design):** feedback as edges; DX7 is one self-loop. |
 | X-05 | Parameter namespace | **Decided:** DX7 semantics frozen; extensions add parameters, never redefine them. |
-| X-06 | Stereo/pan core | **Decided:** DX7-family per-voice pan; wider stereo/FX are extras. The DX100's hardware output is physically mono, and the personality keeps that signal in both channels by default. Its pan is a **balance of that one signal across the two channels**, built into the personality rather than gated behind `SLOPSIX_EXTRAS`: centre pan (the default) is the faithful output, and any other position is a convenience for a stereo host, not hardware behaviour — the accurate DX100 is the case where the host does not move the pan. |
-| X-07 | Output-stage extensibility | **Decided:** separable compile-time-selected output stages; DX7 path has no runtime branch. |
-| X-08 | Idealised bend curve | **Decided:** DX7 curve fixed; an extension may offer a smooth curve. |
+| X-06 | Stereo/pan core | **Decided:** every supported instrument's hardware output is mono, so panning is not hardware behaviour. It is a convenience for a stereo host behind `SLOPSIX_EXTRAS`: centre pan (the default) is the faithful output, and any other position balances the single signal across the two channels. Without the macro `slopsix_set_pan` is a no-op and the output stays at centre. Wider stereo/FX remain future extras. |
+| X-07 | Output-stage extensibility | **Decided:** separable compile-time-selected output stages; DX7 path has no runtime branch. An alternative stage belongs to a future extension macro, not `SLOPSIX_EXTRAS`. |
+| X-08 | Idealised bend curve | **Decided:** DX7 curve fixed; a future extension macro may offer a smooth curve. |
 
 ## Fixed-point engineering
 
