@@ -650,6 +650,10 @@ typedef struct {
     int32_t fb_prev2;               /* the feedback path's sum before it */
     int32_t fb_delay;               /* the feedback path's delayed value */
     uint8_t feedback_level;         /* the OPS's 3-bit feedback field */
+    int32_t pitch_offset;           /* the last applied log-frequency
+                                     * offset (bend + LFO + pitch EG); the
+                                     * render gate skips a rewrite when it
+                                     * is unchanged */
     /* The LFO's amplitude modulation reaches the walk as a per-tick,
      * instrument-wide register value (src/slopsix_lfo.c), so it is not
      * cached per voice. */

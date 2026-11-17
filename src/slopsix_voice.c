@@ -60,6 +60,8 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
         engine->ops[op].increment =
             slopsix_increment_from_word(word, state->sample_rate);
     }
+
+    engine->pitch_offset = pitch_offset;
 }
 
 /*
@@ -180,11 +182,11 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
  * periods are exact multiples, so the pitch EG's walk lands on every
  * second LFO tick, as the hardware's toggle does), then every sounding
  * voice's graph walk, compander word and bus contribution, and finally
- * the output stages.  A tick that reaches either gate rewrites the
- * sounding voices' phase increments, the way the hardware's portamento
- * process carries the composed pitch offset; a free voice renders
- * nothing and its operators keep the increments they were last keyed
- * with.
+ * the output stages.  A tick that reaches either gate rewrites a sounding
+ * voice's phase increments only when its composed pitch offset has moved
+ * (the hardware's portamento process carries the composed pitch offset; a
+ * static pitch needs no rewrite); a free voice renders nothing and its
+ * operators keep the increments they were last keyed with.
  */
 void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 {
@@ -220,15 +222,28 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
             slopsix_lfo_tick(state);
         }
         if (lfo_tick || peg_tick) {
+            /* The LFO's and the bend's share of the pitch offset is the
+             * same for every voice, so compose it once; the pitch EG's
+             * level is per voice.  A voice whose composed offset has not
+             * moved keeps the increments it already has, so a static
+             * pitch costs no rewrite at all. */
+            int32_t lfo_offset = slopsix_mod_pitch_offset(state);
+
             for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+                int32_t offset;
+
                 if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
                     continue;
                 }
                 if (peg_tick) {
                     slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
                 }
-                slopsix_voice_engine_update_frequency(state,
-                    &state->voices[v], &state->engines[v]);
+                offset = lfo_offset +
+                    slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
+                if (offset != state->engines[v].pitch_offset) {
+                    slopsix_voice_engine_update_frequency(state,
+                        &state->voices[v], &state->engines[v]);
+                }
             }
         }
 
