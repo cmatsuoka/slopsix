@@ -53,6 +53,17 @@ ifeq ($(HAVE_FLOAT_WARNINGS),yes)
   WARNINGS += $(FLOAT_WARNINGS)
 endif
 
+# C never needs exception unwinding, and the compiler-identification
+# string is dead weight in the archive.  Drop both when the compiler
+# understands the options.
+NO_UNWIND_FLAGS := -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                   -fno-ident
+HAVE_NO_UNWIND := $(shell $(CC) $(NO_UNWIND_FLAGS) -E -x c /dev/null \
+                    >/dev/null 2>&1 && echo yes)
+ifeq ($(HAVE_NO_UNWIND),yes)
+  WARNINGS += $(NO_UNWIND_FLAGS)
+endif
+
 OPT_SIZE := -Os
 OPT_FAST := -O2
 
