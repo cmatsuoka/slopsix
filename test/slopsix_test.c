@@ -18,6 +18,7 @@
  *   bend        the pitch bend: the curve, its quantisation and its scale
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
+ *   ctrl        the controllers: scaling, routes and both registers
  *   output      the output stages: compander, DAC step, pan law and master
  *   extras      the pan is an extra: available or a no-op by build
  *   render      the live voice path: patch parse, note render and release
@@ -2768,7 +2769,271 @@ static void stage_lfo(void)
     slopsix_destroy_context(ctx);
 }
 
-/* --------------------------------------------------- extras: the pan */
+/* ------------------------------------------------------------ controllers */
+
+/*
+ * The controller stage (research fw MOD_PROCESS_INPUT_SOURCES, ROM $E208;
+ * MOD_AMP_LOAD_TO_EGS and MOD_PITCH_LOAD_TO_EGS per tick).
+ *
+ * The LFO is frozen per case: phase increments 0 (a stable wave), the
+ * delay increment 0 with the accumulator at its ceiling (a stable fade),
+ * and a wave phase the tests set per case.  Both registers' compositions
+ * are recomputed in the stage from the algorithm page's recipes and the
+ * checked-in tables, over the controller-route matrix.
+ */
+static void stage_ctrl(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    slopsix_lfo *lfo;
+    unsigned amp_depth;
+    unsigned pitch_depth;
+
+    printf("stage ctrl\n");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+    lfo = &state->lfo;
+
+    /* The freeze: a stable wave and a stable fade, the square wave's
+     * amplitude following the phase's top bit only. */
+    lfo->waveform = 3u;
+    lfo->phase_increment = 0u;
+    lfo->delay_increment = 0u;
+    lfo->delay_acc = 0xFFFFu;
+    lfo->fade = 0xFFu;
+
+    /* The defaults: nothing routed, so the cached factors and the
+     * EG-bias total are all zero, and the register composition runs
+     * without any controller share. */
+    check(state->mod_amp_factor == 0u && state->mod_eg_bias_inv == 0u &&
+          state->ctrl_scaled_input[0] == 0u &&
+          state->ctrl_scaled_input[1] == 0u &&
+          state->ctrl_scaled_input[2] == 0u &&
+          state->ctrl_scaled_input[3] == 0u,
+          "the reset context carries the neutral controller arithmetic");
+
+    /* The scaled input: the analog input times the range's scaled high
+     * byte (660*range)>>8, MUL-style, the high byte kept. */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_MOD_WHEEL,
+                            SLOPSIX_ASSIGN_AMP);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 50u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 127u);
+    check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 63u,
+          "the scaled input is the mul pair's high byte at range 50");
+    check(state->mod_amp_factor == 63u,
+          "the amp factor carries the amp-routed source's scaled input");
+    check(state->mod_eg_bias_inv == 0u,
+          "an amp route alone leaves the EG-bias total at its neutral");
+
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 0u &&
+          state->mod_amp_factor == 0u,
+          "a zero input leaves no scaled input and no amp factor");
+
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 127u);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 1u);
+    check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 0u &&
+          state->mod_amp_factor == 0u,
+          "the small range's 2-unit high byte floors the scaled input away");
+
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 99u);
+    check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 126u,
+          "the full range scales the full input to 126 of 127");
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 64u);
+    check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 63u,
+          "the mid input scales to the value scale's own quantisation");
+
+    /* The amp-mod register through the route (research V-03): the amp
+     * factor joins the LFO's depth term before the byte's clamp, and the
+     * EG-bias total folds in its inverted domain.  With the square's
+     * negative half the wave form is 255, so the multiply keeps almost
+     * all of the value; with the positive half it is 0 and only the
+     * folds survive to the table. */
+    amp_depth = 0xFFu;
+    lfo->amp_mod_depth = (uint8_t)amp_depth;
+
+    /* Nothing routed: the register is the LFO's own composition. */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    {
+        unsigned factor = (amp_depth * 0xFFu) >> 8;
+        unsigned wave = 255u;   /* the square's negative half */
+
+        lfo->phase = 0x8000u;
+        slopsix_lfo_tick(state);
+        check(lfo->amp_mod_register ==
+                  slopsix_amp_mod_table[0xFFu - ((factor * wave) >> 8)],
+              "no routes: the register is the LFO's own composition");
+    }
+
+    /* The amp route: the source's scaled input raises the factor. */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_MOD_WHEEL,
+                            SLOPSIX_ASSIGN_AMP);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 99u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 127u);
+    {
+        unsigned base = ((amp_depth * 0xFFu) >> 8) + 126u;
+        unsigned factor = base > 0xFFu ? 0xFFu : base;
+        unsigned wave = 255u;   /* the square's negative half */
+
+        lfo->phase = 0x8000u;
+        slopsix_lfo_tick(state);
+        check(lfo->amp_mod_register ==
+                  slopsix_amp_mod_table[0xFFu - ((factor * wave) >> 8)],
+              "the amp-routed factor joins the LFO's depth term");
+    }
+
+    /* The EG-bias route, the composition's inverted domain.  With no
+     * input the total is the range's own scaled value; pushing the
+     * controller moves the register the loud way (less attenuation). */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_MOD_WHEEL,
+                            SLOPSIX_ASSIGN_EG);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 20u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    check(state->mod_eg_bias_inv == 51u &&
+          state->mod_amp_factor == 0u,
+          "the EG-bias total is the range's own scaled value at rest");
+
+    lfo->amp_mod_depth = 0u;
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amp_mod_register == slopsix_amp_mod_table[0xFFu - 51u] &&
+          lfo->amp_mod_register != 0u,
+          "the resting bias pushes the register off its neutral entry");
+
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 127u);
+    check(state->mod_eg_bias_inv == 26u,
+          "the EG-bias total is the range's value minus the routed sum");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amp_mod_register == slopsix_amp_mod_table[0xFFu - 26u] &&
+          lfo->amp_mod_register < slopsix_amp_mod_table[0xFFu - 51u],
+          "pushing the biased controller lowers the register - louder");
+
+    /* The range-check pair: a full depth term gets trimmed to the
+     * non-inverted total when it pushes past the byte. */
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 0u);
+    lfo->amp_mod_depth = 0xFFu;
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amp_mod_register == slopsix_amp_mod_table[1u] &&
+          lfo->amp_mod_register == 0xFFu,
+          "the range-check pair trims the factor past the byte's range");
+
+    /* The range total's own saturation: the range total clamps at $FF,
+     * its complement is 0, and the resting total is the byte's top (the
+     * firmware's own arithmetic, byte-verified at 0xE208/0xE222). */
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 99u);
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_BREATH, SLOPSIX_ASSIGN_EG);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_BREATH, 60u);
+    check(state->mod_eg_bias_inv == 0xFFu,
+          "the range total's saturation leaves the complement at $FF");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amp_mod_register == slopsix_amp_mod_table[0u] &&
+          lfo->amp_mod_register == 0xFFu,
+          "the saturated range total rests the register on the table's top");
+
+    /* The multi-source sums, with the range total inside the byte: the
+     * amp factor sums the amp-routed sources, the EG-bias total is the
+     * range total minus the EG-routed inputs' sum, and the pitch factor
+     * sums the pitch-routed sources. */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_MOD_WHEEL,
+                            SLOPSIX_ASSIGN_EG);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_MOD_WHEEL, 20u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 100u);   /* 19 */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_BREATH,
+                            SLOPSIX_ASSIGN_AMP | SLOPSIX_ASSIGN_PITCH);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_BREATH, 99u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_BREATH, 64u);       /* 63 */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_FOOT,
+                            SLOPSIX_ASSIGN_AMP);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_FOOT, 33u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_FOOT, 127u);        /* 42 */
+    slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_AFTERTOUCH,
+                            SLOPSIX_ASSIGN_EG);
+    slopsix_set_ctrl_range(ctx, SLOPSIX_CTRL_AFTERTOUCH, 30u);
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_AFTERTOUCH, 127u);  /* 38 */
+    {
+        unsigned scaled_wheel = ((660u * 20u) >> 8) * 100u >> 8;  /* 19 */
+        unsigned scaled_breath = (255u * 64u) >> 8;               /* 63 */
+        unsigned scaled_foot = ((660u * 33u) >> 8) * 127u >> 8;   /* 42 */
+        unsigned scaled_at = ((660u * 30u) >> 8) * 127u >> 8;     /* 38 */
+
+        check((660u * 20u) >> 8 == 51u && scaled_wheel == 19u &&
+              (660u * 33u) >> 8 == 85u && scaled_foot == 42u &&
+              (660u * 30u) >> 8 == 77u && scaled_at == 38u &&
+              scaled_breath == 63u,
+              "the stage's own scaled inputs sit where they should");
+        check(state->ctrl_scaled_input[SLOPSIX_CTRL_MOD_WHEEL] == 19u &&
+              state->ctrl_scaled_input[SLOPSIX_CTRL_BREATH] == 63u &&
+              state->ctrl_scaled_input[SLOPSIX_CTRL_FOOT] == 42u &&
+              state->ctrl_scaled_input[SLOPSIX_CTRL_AFTERTOUCH] == 38u,
+              "each source keeps its own scaled input");
+        check(state->mod_amp_factor == scaled_breath + scaled_foot,
+              "the amp factor sums the amp-routed sources");
+        check(state->mod_eg_bias_inv == (51u + 77u) - (scaled_wheel +
+                                                       scaled_at),
+              "the EG-bias total is the range total minus the EG-routed sum");
+    }
+
+    /* The pitch composition: the pitch-routed sources' scaled inputs
+     * join the LFO's depth term before the byte's clamp, and the term is
+     * that factor times the sensitivity-scaled amplitude's high byte,
+     * right by one. */
+    pitch_depth = 100u;
+    lfo->pitch_mod_depth = (uint8_t)pitch_depth;
+    lfo->pitch_mod_sens = 255u;
+    lfo->phase = 0x0000u;         /* the square's positive half */
+    slopsix_lfo_tick(state);
+    {
+        /* The breath's 63 is the only pitch-routed source. */
+        unsigned base = ((pitch_depth * 0xFFu) >> 8) + 63u;
+        unsigned factor = base > 0xFFu ? 0xFFu : base;
+        int32_t product = (int32_t)factor *
+                          (int32_t)((255u * 127u) >> 8);
+
+        check(state->lfo.pitch_mod_term ==
+                  (int16_t)slopsix_floor_div(product, 1u),
+              "the pitch factor carries the pitch-routed source");
+        check(state->lfo.pitch_mod_word == state->lfo.pitch_mod_term,
+              "the recomposed word is the recomposed term");
+    }
+
+    /* The setter recomposes the word immediately, without a tick: the
+     * term follows the last tick's amplitude. */
+    slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_BREATH, 0u);
+    check(state->lfo.pitch_mod_word ==
+              (int16_t)slopsix_floor_div((int32_t)((pitch_depth * 0xFFu) >>
+                                                   8) *
+                                             (int32_t)((255u * 127u) >> 8),
+                                         1u),
+          "a controller change recomposes the pitch word at once");
+
+    /* The bend setter's path still recomposes beside the term. */
+    slopsix_set_pitch_bend(ctx, 0x2000u);
+    check(state->lfo.pitch_mod_word ==
+              (int16_t)slopsix_floor_div((int32_t)((pitch_depth * 0xFFu) >>
+                                                   8) *
+                                             (int32_t)((255u * 127u) >> 8),
+                                         1u),
+          "the centred bend leaves the recomposed word unchanged");
+
+    /* Reset returns the controller arithmetic to its zeros. */
+    slopsix_reset(ctx);
+    check(state->mod_amp_factor == 0u && state->mod_eg_bias_inv == 0u,
+          "the reset clears the controller arithmetic");
+
+    slopsix_destroy_context(ctx);
+}
+
+/* ------------------------------------------------------------ extras: the pan */
 
 static void stage_extras(void)
 {
@@ -2866,6 +3131,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--lfo") == 0) {
             stage_lfo();
             ran = 1;
+        } else if (strcmp(argv[i], "--ctrl") == 0) {
+            stage_ctrl();
+            ran = 1;
         } else if (strcmp(argv[i], "--output") == 0) {
             stage_output();
             ran = 1;
@@ -2897,6 +3165,7 @@ int main(int argc, char **argv)
         stage_bend();
         stage_pitcheg();
         stage_lfo();
+        stage_ctrl();
         stage_output();
         stage_extras();
         stage_render();

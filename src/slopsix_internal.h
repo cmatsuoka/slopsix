@@ -672,10 +672,19 @@ typedef struct {
     uint8_t mono_dir;    /* the legato direction: 1 = up, 0 = down */
     uint8_t mono_last_key;
 
-    /* Controllers. */
+    /* Controllers.  The value/range/routing triples are the host-side
+     * state; the three fields below are the cached arithmetic the
+     * firmware keeps in its page zero (M_MOD_*_SCALED_INPUT,
+     * M_MOD_AMP_FACTOR, M_MOD_AMP_EG_BIAS_TOTAL).  They are recomputed
+     * when a controller value, range or routing changes and at reset,
+     * never on the sample path (research fw MOD_PROCESS_INPUT_SOURCES,
+     * Phase 4 step 4). */
     uint8_t ctrl_value[SLOPSIX_CTRL_SRC_COUNT];  /* 0..127 */
     uint8_t ctrl_range[SLOPSIX_CTRL_SRC_COUNT];  /* 0..99 */
     unsigned ctrl_assign[SLOPSIX_CTRL_SRC_COUNT];
+    uint8_t ctrl_scaled_input[SLOPSIX_CTRL_SRC_COUNT];
+    uint8_t mod_amp_factor;     /* the amp-routed sources' clamped sum */
+    uint8_t mod_eg_bias_inv;    /* the EG-bias total, inverted polarity */
 
     /* Voices and the live patch block.  engines[i] renders voices[i];
      * the two arrays are index-paired. */
@@ -1085,6 +1094,30 @@ uint16_t slopsix_lfo_delay_increment(uint8_t delay);
  * setters recompute it so a bend change is audible without waiting for
  * the next tick. */
 int16_t slopsix_mod_pitch_word(const slopsix_context_state *state);
+
+/* The controller arithmetic: the four input sources' scaled inputs, the
+ * amplitude-modulation factor and the EG-bias total, recomputed whenever
+ * a controller value, range or routing changes and at reset - never on
+ * the sample path (research fw MOD_PROCESS_INPUT_SOURCES, ROM $E208).
+ *
+ * The scaled input keeps the MUL pair's high byte: the analog input
+ * (0..127) times the range's scaled high byte, (660*range) >> 8 from the
+ * shared value scale.  The amp-routed sources' scaled inputs sum, clamped
+ * at $FF, into the amplitude-modulation factor.  The EG-bias total is
+ * inverted polarity: the EG-routed ranges' scaled values first sum (clamped
+ * at $FF) and are complemented once, then the EG-routed inputs' clamped sum
+ * is added (clamped at $FF again) and the total is complemented for the
+ * amp-mod register's composition.  With 0..127 inputs this total is the
+ * range's sum minus the inputs' sum, so nothing routed leaves it at 0. */
+void slopsix_mod_process_input_sources(slopsix_context_state *state);
+
+/* The pitch-modification word's wave term: the factor is the pitch-routed
+ * sources' scaled inputs added to the LFO's own depth term (clamped at
+ * $FF); the term is that factor times one byte of the sensitivity-scaled
+ * amplitude.  The tick recomputes it with the fresh amplitude; the
+ * controller setters recompose it with the last tick's amplitude, so a
+ * controller change is audible without waiting for the next tick. */
+void slopsix_mod_pitch_term_update(slopsix_context_state *state);
 
 /* The composed register word's contribution to the voice's log-frequency
  * word, in the engine's 4096-per-octave units (floor division by the

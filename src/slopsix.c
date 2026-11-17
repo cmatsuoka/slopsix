@@ -28,6 +28,11 @@ static void slopsix_context_defaults(slopsix_context_state *state)
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, state->sample_rate);
+    /* The controller arithmetic's cached values: the memset leaves all
+     * inputs, ranges and routings at zero, and nothing routed is the
+     * neutral total - the routine still runs once, as the firmware's
+     * reset path does. */
+    slopsix_mod_process_input_sources(state);
 }
 
 slopsix_context slopsix_create_context(uint32_t sample_rate)
@@ -588,6 +593,22 @@ void slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
     slopsix_refresh_pitch(state);
 }
 
+/*
+ * The recompose the three controller setters share (the firmware recomputes
+ * MOD_PROCESS_INPUT_SOURCES on every controller event): the scaled inputs
+ * and the two factors, then the pitch-modification word with the term
+ * recomposed from the last tick's wave amplitude, so a controller change
+ * to the pitch register is audible without waiting for the next LFO tick.
+ * The amp-mod register itself follows on the next tick, as the firmware's
+ * per-tick MOD_AMP_LOAD_TO_EGS pushes it.
+ */
+static void slopsix_mod_refresh(slopsix_context_state *state)
+{
+    slopsix_mod_process_input_sources(state);
+    slopsix_mod_pitch_term_update(state);
+    state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
+}
+
 void slopsix_set_ctrl_value(slopsix_context ctx,
                             slopsix_ctrl_source src, uint8_t value_0_127)
 {
@@ -597,6 +618,7 @@ void slopsix_set_ctrl_value(slopsix_context ctx,
         return;
     }
     state->ctrl_value[src] = value_0_127 > 127u ? 127u : value_0_127;
+    slopsix_mod_refresh(state);
 }
 
 void slopsix_set_ctrl_range(slopsix_context ctx,
@@ -608,6 +630,7 @@ void slopsix_set_ctrl_range(slopsix_context ctx,
         return;
     }
     state->ctrl_range[src] = range_0_99 > 99u ? 99u : range_0_99;
+    slopsix_mod_refresh(state);
 }
 
 void slopsix_set_ctrl_assign(slopsix_context ctx,
@@ -618,7 +641,12 @@ void slopsix_set_ctrl_assign(slopsix_context ctx,
     if (state == NULL || (unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
         return;
     }
-    state->ctrl_assign[src] = flags;
+    /* The hardware's routing byte holds the three bits: pitch,
+     * amplitude and EG bias (the firmware's M_MOD_WHEEL_ASSIGN_FLAGS). */
+    state->ctrl_assign[src] = flags & (SLOPSIX_ASSIGN_PITCH |
+                                       SLOPSIX_ASSIGN_AMP |
+                                       SLOPSIX_ASSIGN_EG);
+    slopsix_mod_refresh(state);
 }
 
 void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
