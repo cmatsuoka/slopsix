@@ -21,7 +21,10 @@ static void slopsix_context_defaults(slopsix_context_state *state)
     state->bend_step = 0u;
     state->master_tune_q16 = 0;
     state->pan_q16 = SLOPSIX_Q16_ONE / 2;
-    state->master_volume = 4u;
+    /* The hardware's own reset value: P_DAC = 7, the top tap of the DAC
+     * reference ladder, until MIDI volume changes it (dx7-output
+     * research, the volume section). */
+    state->master_volume = 7u;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
 }

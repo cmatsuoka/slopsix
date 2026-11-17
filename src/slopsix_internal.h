@@ -162,6 +162,39 @@ extern const int16_t slopsix_fine_offset[100];
 #define SLOPSIX_BUS_FIRST 1u
 #define SLOPSIX_BUS_SECOND 2u
 
+/* Evidence grade: bit-synchronous OPS model (research OU-01), matching
+ * the output-quantization section of the algorithm page.  The per-voice
+ * compander's shift selection: the 14-bit voice word's magnitude decides
+ * how many low bits the transmitted 12-bit mantissa drops - three at or
+ * above 0x1000, two at or above 0x800, one at or above 0x400, none
+ * below.  The word's value is the mantissa shifted back up: the dropped
+ * low bits are the quantization error.
+ *
+ * The exact SF-code numbering and the overflow behaviour of the
+ * hardware's shifter are open (research OU-02); the engine pins the
+ * overflow as a clamp to the mantissa's 12-bit two's-complement window,
+ * which keeps the word's value inside the 14-bit range a single voice's
+ * output can reach. */
+#define SLOPSIX_COMPANDER_THRESHOLD_1 0x400u
+#define SLOPSIX_COMPANDER_THRESHOLD_2 0x800u
+#define SLOPSIX_COMPANDER_THRESHOLD_3 0x1000u
+#define SLOPSIX_COMPANDER_SHIFT_MAX 3u
+#define SLOPSIX_COMPANDER_MANTISSA_MAX 2047
+#define SLOPSIX_COMPANDER_MANTISSA_MIN (-2048)
+
+/* Evidence grade: the engine's V1 model of an open analog question
+ * (research OU-02, OQ-24).  The mixed bus's master DAC stage reduces the
+ * bus to the hardware's 12-bit DAC code grid.  The bus's unit is a
+ * quantized voice's value (mantissa << shift), whose full scale is
+ * 8 * 2047, so the code grid sits at one eighth of the bus unit - the
+ * same domain the compander's 12-bit datum occupies - and the sum is
+ * saturated at the code window's rails instead of wrapping.  The
+ * hardware's true saturation level is set by the board's analog stage
+ * and stays open; the rails are the engine's pinning. */
+#define SLOPSIX_DAC_GRID_SHIFT 3u
+#define SLOPSIX_DAC_CODE_MAX 2047
+#define SLOPSIX_DAC_CODE_MIN (-2048)
+
 /* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
  * every second OCF tick (about 187.6 Hz), as the firmware does (research
  * E-04, plan decision D-1).  The level is held in the firmware's 16-bit
@@ -682,6 +715,102 @@ static inline int32_t slopsix_floor_div(int32_t value, unsigned shift)
     }
     return -(((-value) + (int32_t)((1u << shift) - 1u)) >> shift);
 }
+
+/* ----------------------------------------------------- output (Phase 5) */
+
+/* The output chain mirrors the hardware's (algorithm page §8, plan
+ * decision D-5): the per-voice carrier sum is quantized by the compander
+ * into a 12-bit mantissa plus a 3-bit shift, the quantized voices sum on
+ * a wide bus, the sum passes the master DAC's 12-bit code step with
+ * saturation, the optional pan splits the mono result (SLOPSIX_EXTRAS),
+ * and the 3-bit master volume scales the DAC's reference before the
+ * int16 conversion.  The stages are distinct functions with their own
+ * fixed widths, so a later extension can replace the quantization or the
+ * conversion without touching the mixer (plan decision D-15).
+ *
+ * The compander runs per voice, so it is inline here like the operator
+ * core; the once-per-sample stages live in src/slopsix_output.c. */
+
+/* One transmitted compander word: the 12-bit two's-complement datum the
+ * DAC converts, plus the shift whose analog scale the board applies. */
+typedef struct {
+    int16_t mantissa;   /* the 12-bit datum, -2048..2047 */
+    uint8_t shift;      /* the SF shift code, 0..3 */
+} slopsix_compander_word;
+
+/* Quantize one voice's carrier sum into the compander word.
+ *
+ * The word's value (mantissa << shift) is the input truncated to the
+ * mantissa's 12-bit window; the dropped low bits are the quantization
+ * error, and the floor direction for negative inputs is towards minus
+ * infinity.  `sample` is a voice word as the graph walk produces it; the
+ * mantissa's clamp covers anything beyond a single voice's reach. */
+static inline void slopsix_compander_quantize(int32_t sample,
+    slopsix_compander_word *word)
+{
+    uint32_t magnitude = sample < 0 ? 0u - (uint32_t)sample : (uint32_t)sample;
+    unsigned shift;
+    int32_t mantissa;
+
+    if (magnitude < SLOPSIX_COMPANDER_THRESHOLD_1) {
+        shift = 0;
+    } else if (magnitude < SLOPSIX_COMPANDER_THRESHOLD_2) {
+        shift = 1;
+    } else if (magnitude < SLOPSIX_COMPANDER_THRESHOLD_3) {
+        shift = 2;
+    } else {
+        shift = SLOPSIX_COMPANDER_SHIFT_MAX;
+    }
+
+    mantissa = slopsix_floor_div(sample, shift);
+
+    if (mantissa > SLOPSIX_COMPANDER_MANTISSA_MAX) {
+        mantissa = SLOPSIX_COMPANDER_MANTISSA_MAX;
+    } else if (mantissa < SLOPSIX_COMPANDER_MANTISSA_MIN) {
+        mantissa = SLOPSIX_COMPANDER_MANTISSA_MIN;
+    }
+
+    word->mantissa = (int16_t)mantissa;
+    word->shift = (uint8_t)shift;
+}
+
+/* The quantized word's value, in the bus's unit (the truncated input). */
+static inline int32_t slopsix_compander_value(const slopsix_compander_word *word)
+{
+    return (int32_t)word->mantissa << word->shift;
+}
+
+/* The master DAC step: the mixed bus reduced to the 12-bit code grid,
+ * saturated at the rails (the constants above carry the model's grade). */
+int32_t slopsix_dac_step(int32_t bus);
+
+/* The master volume's gain: the hardware's 8-level DAC reference ladder,
+ * level 0 the quietest tap, level 7 the top tap, as a Q16 fraction of
+ * the top tap. */
+int32_t slopsix_master_gain_q16(unsigned level);
+
+/* The final conversion: one DAC code times a Q16 gain, rounded and
+ * mapped onto int16.  With the DAC's rails in front of it the conversion
+ * itself cannot overflow int16: the chain's single saturation is the DAC
+ * step's. */
+int16_t slopsix_output_scale(int32_t code, int32_t gain_q16);
+
+#if defined(SLOPSIX_EXTRAS)
+/* The extras pan law: split the mono signal across the two channels.
+ * Unity gain at centre (each channel carries the mono signal exactly),
+ * fading linearly to silence on the far half of the travel; the law's
+ * shape beyond that is an open extras question (research X-06) - the
+ * centre's faithfulness is what is pinned (plan decision D-21). */
+void slopsix_pan_split(int32_t pan_q16, int32_t mono, int32_t *left,
+                       int32_t *right);
+#endif
+
+/* The once-per-sample composite the render call uses: the DAC step, the
+ * compile-time-selected pan and the master conversion, from the mixed
+ * bus into the two int16 channels.  No runtime mode flag, no branch per
+ * personality (plan decision D-18's rule on the output path). */
+void slopsix_output_mix(const slopsix_context_state *state, int32_t bus,
+                        int16_t *left, int16_t *right);
 
 /* The pitch bend (Phase 4). */
 

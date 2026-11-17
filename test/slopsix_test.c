@@ -16,6 +16,7 @@
  *   graph       the operator-graph walk
  *   bend        the pitch bend: the curve, its quantisation and its scale
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
+ *   output      the output stages: compander, DAC step, pan law and master
  *   extras      the pan is an extra: available or a no-op by build
  *
  * The harness is a host tool, not the library: it may use whatever it
@@ -1587,6 +1588,271 @@ static void stage_pitcheg(void)
     }
 }
 
+/* --------------------------------------------- Phase 5: the output stages
+ *
+ * The reference forms live in this stage: the compander's shift
+ * thresholds and clamps, the DAC step's grid and rails and the master
+ * ladder's tap gains are written out here so the library is checked
+ * against the documented recipes and not against itself. */
+
+static void compander_expect(int32_t sample, int32_t mantissa,
+                             unsigned shift, const char *what)
+{
+    slopsix_compander_word w;
+
+    slopsix_compander_quantize(sample, &w);
+    check(w.mantissa == mantissa && w.shift == shift, what);
+    if (w.mantissa == mantissa && w.shift == shift) {
+        check(slopsix_compander_value(&w) ==
+              (int32_t)mantissa << shift, "the word's value is mantissa << shift");
+    }
+}
+
+static void stage_output(void)
+{
+    static const int32_t ladder[8] = {
+        1340, 2680, 4021, 6433, 10856, 19969, 36052, 65536
+    };
+    const int32_t canaries[][3] = {
+        /* sample, mantissa, shift - both signs of every band */
+        { 0, 0, 0 },
+        { 1, 1, 0 },
+        { 1023, 1023, 0 },          /* 0x3FF: the last one-band value */
+        { 1024, 512, 1 },           /* 0x400: the first two-band value */
+        { 1025, 512, 1 },
+        { 2047, 1023, 1 },
+        { -1023, -1023, 0 },
+        { -1024, -512, 1 },
+        { 2048, 512, 2 },           /* 0x800 */
+        { 4095, 1023, 2 },
+        { -2048, -512, 2 },
+        { 4096, 512, 3 },           /* 0x1000 */
+        { 8191, 1023, 3 },
+        { 8192, 1024, 3 },          /* the 14-bit boundary, no clamp yet */
+        { 16383, 2047, 3 },         /* the mantissa window's top */
+        { 16384, 2047, 3 },         /* clamped: floor(16384/8) is one over */
+        { 32767, 2047, 3 },
+        { 262016, 2047, 3 },        /* a full 16-voice bus word */
+        { -4096, -512, 3 },
+        { -16383, -2048, 3 },       /* the window's floor is exact */
+        { -16384, -2048, 3 },
+        { -16385, -2048, 3 },       /* clamped */
+        { -262144, -2048, 3 }
+    };
+    size_t i;
+    int monotonic = 1;
+    int in_window = 1;
+
+    printf("stage output\n");
+
+    /* The compander staircase: the mantissa/shift transitions at the
+     * documented thresholds, the 12-bit window's clamp beyond a single
+     * voice's reach and the floor direction for negative inputs. */
+    for (i = 0; i < sizeof(canaries) / sizeof(canaries[0]); i++) {
+        compander_expect(canaries[i][0], canaries[i][1],
+                         (unsigned)canaries[i][2], "the compander canary holds");
+    }
+
+    /* The sweep: the word's value never falls as the input rises and
+     * never leaves the word's reach, and it always matches the
+     * documented rule - the shift from the magnitude's thresholds, the
+     * floor onto that grid, and the 12-bit window's clamp beyond it. */
+    {
+        int32_t previous = -40000;
+
+        for (i = 0; i < 80000u; i++) {
+            int32_t s = (int32_t)i - 40000;
+            uint32_t magnitude = s < 0 ? (uint32_t)-s : (uint32_t)s;
+            unsigned expect_shift = magnitude < 0x400u ? 0u
+                                  : magnitude < 0x800u ? 1u
+                                  : magnitude < 0x1000u ? 2u : 3u;
+            int32_t expect_mantissa = slopsix_floor_div(s, expect_shift);
+            slopsix_compander_word w;
+            int32_t value;
+
+            if (expect_mantissa > 2047) {
+                expect_mantissa = 2047;
+            } else if (expect_mantissa < -2048) {
+                expect_mantissa = -2048;
+            }
+
+            slopsix_compander_quantize(s, &w);
+            value = slopsix_compander_value(&w);
+
+            if (w.shift != expect_shift || w.mantissa != expect_mantissa) {
+                in_window = 0;
+            }
+            if (value < previous) {
+                monotonic = 0;
+            }
+            if (value > 16376 || value < -16384) {
+                in_window = 0;
+            }
+            previous = value;
+        }
+    }
+    check(monotonic, "the compander's value is monotone in the input");
+    check(in_window, "the compander's value is its grid floor and stays in reach");
+
+    /* The DAC step: the 12-bit grid at one eighth of the bus unit and
+     * the rails' saturation. */
+    check(slopsix_dac_step(0) == 0, "the DAC step maps zero to zero");
+    check(slopsix_dac_step(7) == 0, "the DAC step floors below the grid");
+    check(slopsix_dac_step(8) == 1, "the DAC step's grid is 8 bus units");
+    check(slopsix_dac_step(15) == 1 && slopsix_dac_step(16) == 2,
+          "the DAC step floors negative and positive alike");
+    check(slopsix_dac_step(-7) == -1 && slopsix_dac_step(-8) == -1 &&
+          slopsix_dac_step(-9) == -2,
+          "the DAC step floors negative and positive alike");
+    check(slopsix_dac_step(16376) == 2047,
+          "one full-scale voice is the code window's top");
+    check(slopsix_dac_step(16377) == 2047 && slopsix_dac_step(16384) == 2047,
+          "the positive rail saturates at 2047");
+    check(slopsix_dac_step(-16376) == -2047 &&
+          slopsix_dac_step(-16377) == -2048 &&
+          slopsix_dac_step(-16384) == -2048,
+          "the negative rail saturates at -2048");
+    check(slopsix_dac_step(262016) == 2047 && slopsix_dac_step(-262144) == -2048,
+          "a full 16-voice bus saturates instead of wrapping");
+    {
+        int monotone = 1;
+
+        for (i = 0; i < 80000u; i++) {
+            int32_t bus = (int32_t)i - 40000;
+            int32_t code = slopsix_dac_step(bus);
+            int32_t lower = slopsix_dac_step(bus - 1);
+
+            if (code < lower) {
+                monotone = 0;
+            }
+            if (code > 2047 || code < -2048) {
+                monotone = 0;
+            }
+        }
+        check(monotone == 1, "the DAC step is monotone and stays in the window");
+    }
+
+    /* The master ladder: the resistor string's taps as exact Q16 gains. */
+    for (i = 0; i < 8u; i++) {
+        if (slopsix_master_gain_q16((unsigned)i) != ladder[i]) {
+            break;
+        }
+    }
+    check(i == 8u, "the ladder's eight taps match the resistor string");
+    check(slopsix_master_gain_q16(8u) == ladder[7],
+          "a level past the top of the ladder clamps to it");
+
+    /* The final conversion: rounding to the int16 grid at unity gain. */
+    check(slopsix_output_scale(2047, SLOPSIX_Q16_ONE) == 32752,
+          "the code window's top lands on 32752 at unity gain");
+    check(slopsix_output_scale(-2048, SLOPSIX_Q16_ONE) == -32768,
+          "the code window's floor lands on -32768");
+    check(slopsix_output_scale(2046, SLOPSIX_Q16_ONE) == 32736,
+          "unity gain keeps the int16 output on the 12-bit grid");
+    check(slopsix_output_scale(100, SLOPSIX_Q16_ONE) == 1600,
+          "unity gain keeps the int16 output on the 12-bit grid");
+    check(slopsix_output_scale(2047, 36052) == 18017,
+          "a ladder tap scales the code");
+    check(slopsix_output_scale(-2048, 1340) == -670,
+          "the quietest tap scales the code");
+
+    {
+        slopsix_context ctx;
+        slopsix_context_state *state;
+        int16_t l1, r1, l2, r2;
+
+        ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+        if (ctx == NULL) {
+            check(0, "create_context returns a context");
+            return;
+        }
+        state = SLOPSIX_CONTEXT(ctx);
+
+        /* The default context: the hardware's reset volume. */
+        check(state->master_volume == 7u,
+              "the default master volume is the hardware's reset value");
+
+        /* The composite at default settings: full scale in, one voice's
+         * window top out, left and right identical. */
+        slopsix_output_mix(state, 16376, &l1, &r1);
+        check(l1 == 32752 && r1 == 32752,
+              "the mixed bus's full scale lands on the code window's top");
+        slopsix_output_mix(state, 16384, &l1, &r1);
+        check(l1 == 32752 && r1 == 32752,
+              "a bus past one voice's window saturates instead of growing");
+        slopsix_output_mix(state, -16384, &l1, &r1);
+        check(l1 == -32768 && r1 == -32768,
+              "the negative rail saturates at -32768");
+
+        /* Determinism: the same state and input produce the same output. */
+        slopsix_output_mix(state, 12345, &l1, &r1);
+        slopsix_output_mix(state, 12345, &l2, &r2);
+        check(l1 == l2 && r1 == r2, "the mix is deterministic");
+
+        /* The volume ladder through the composite. */
+        slopsix_set_master_volume(ctx, 0u);
+        slopsix_output_mix(state, 16376, &l1, &r1);
+        check(l1 == 670 && r1 == 670,
+              "volume 0 is the ladder's bottom tap, not silence");
+        slopsix_set_master_volume(ctx, 3u);
+        slopsix_output_mix(state, 16376, &l1, &r1);
+        check(l1 == 3215 && r1 == 3215,
+              "volume 3's tap scales the mixed code");
+        slopsix_set_master_volume(ctx, 7u);
+
+#if SLOPSIX_HAS_EXTRAS
+        /* The pan law through the composite: centre is bit-identical
+         * mono-in-both-channels, the extremes are hard splits.  The bus
+         * 8000 maps to code 1000, which at unity gain is 16000. */
+        slopsix_output_mix(state, -12800, &l1, &r1);
+        check(l1 == -25600 && r1 == -25600,
+              "the default centre keeps both channels identical");
+        slopsix_set_pan(ctx, 0);
+        slopsix_output_mix(state, 8000, &l1, &r1);
+        check(l1 == 16000 && r1 == 0, "hard left carries the mono signal alone");
+        slopsix_set_pan(ctx, SLOPSIX_Q16_ONE);
+        slopsix_output_mix(state, 8000, &l1, &r1);
+        check(l1 == 0 && r1 == 16000, "hard right carries the mono signal alone");
+        slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 4);
+        slopsix_output_mix(state, 8000, &l1, &r1);
+        check(l1 == 16000 && r1 == 8000,
+              "the left half keeps the mono level, the right fades");
+        slopsix_set_pan(ctx, 3 * SLOPSIX_Q16_ONE / 4);
+        slopsix_output_mix(state, 8000, &l1, &r1);
+        check(l1 == 8000 && r1 == 16000,
+              "the right half keeps the mono level, the left fades");
+        slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 2);
+        slopsix_output_mix(state, -12800, &l1, &r1);
+        check(l1 == -25600 && r1 == -25600,
+              "centre is bit-identical, negative codes included");
+
+        /* The pan law's own clamps, called directly on a code. */
+        {
+            int32_t l, r;
+
+            slopsix_pan_split(SLOPSIX_Q16_ONE + 5, 100, &l, &r);
+            check(l == 0 && r == 100, "the pan law clamps past hard right");
+            slopsix_pan_split(-5, 100, &l, &r);
+            check(l == 100 && r == 0, "the pan law clamps past hard left");
+            slopsix_pan_split(SLOPSIX_Q16_ONE / 2, -12345, &l, &r);
+            check(l == -12345 && r == -12345,
+                  "the pan law's centre is exact for negative values");
+            slopsix_pan_split(SLOPSIX_Q16_ONE / 4, -12345, &l, &r);
+            check(l == -12345 && r == -6173,
+                  "the pan law's Q15 amounts floor the negative half");
+        }
+#else
+        /* Without the extras the mono code lands in both channels
+         * whatever a host stores in the state. */
+        slopsix_output_mix(state, 8000, &l1, &r1);
+        check(l1 == 16000 && r1 == 16000,
+              "without the extras both channels carry the mono signal");
+#endif
+
+        slopsix_destroy_context(ctx);
+    }
+}
+
 /* --------------------------------------------------- extras: the pan */
 
 static void stage_extras(void)
@@ -1679,6 +1945,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--pitcheg") == 0) {
             stage_pitcheg();
             ran = 1;
+        } else if (strcmp(argv[i], "--output") == 0) {
+            stage_output();
+            ran = 1;
         } else if (strcmp(argv[i], "--extras") == 0) {
             stage_extras();
             ran = 1;
@@ -1702,6 +1971,7 @@ int main(int argc, char **argv)
         stage_com();
         stage_bend();
         stage_pitcheg();
+        stage_output();
         stage_extras();
     }
 
