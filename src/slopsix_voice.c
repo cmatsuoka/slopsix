@@ -33,6 +33,10 @@
  * A fixed-frequency operator ignores the pitch offset, as the frequency
  * path states; the voice-floor clamp applies to the composed word in
  * the same place the firmware clamps its own.
+ *
+ * The note word, pitch offset, floor clamp and master tune are the same
+ * for every ratio-mode operator, so they are composed once per voice and
+ * each operator then adds only its own ratio and detune.
  */
 void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     const slopsix_voice *slot, slopsix_voice_engine *engine)
@@ -45,11 +49,13 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     int32_t pitch_offset = slopsix_mod_pitch_offset(state) +
         slopsix_pitch_eg_offset(&engine->pitch_eg);
     int32_t note = slopsix_effective_note(slot->note, slot->transpose);
+    int32_t voice = slopsix_voice_word((uint8_t)note,
+        state->master_tune_q16, pitch_offset);
     unsigned op;
 
     for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
-        int32_t word = slopsix_op_freq_word((uint8_t)note,
-            &engine->params[op], state->master_tune_q16, pitch_offset);
+        int32_t word =
+            slopsix_op_freq_from_voice(&engine->params[op], voice);
 
         engine->ops[op].increment =
             slopsix_increment_from_word(word, state->sample_rate);

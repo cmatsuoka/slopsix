@@ -90,16 +90,51 @@ static int32_t slopsix_detune_offset(uint8_t detune)
  * ratio.  The clamp below is that floor, in the engine's pre-bias word
  * units.  The master tune is added after the clamp, as on the hardware.
  */
-int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
-                             int32_t master_tune_q16, int32_t pitch_offset)
+/*
+ * The voice's frequency word, shared by every ratio-mode operator of a
+ * voice and therefore composed once per frequency rewrite rather than
+ * once per operator.
+ *
+ * It is the note's word plus the voice's pitch offset (the
+ * pitch-modification register's word - the bend and the LFO's per-tick
+ * wave term - and the pitch EG level).  The firmware clamps this word at
+ * the floor before the master tune and the operator's own frequency are
+ * added; the engine's offsets arrive as one, so the clamp covers them all
+ * (the register's own hardware path is the EGS's pitch-modification
+ * register, which the firmware does not clamp - a model-level deviation,
+ * noted above).  The master tune is added after the clamp, as on the
+ * hardware.
+ */
+int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
+                           int32_t pitch_offset)
 {
-    int32_t word;
-    int32_t tune;
-    uint8_t detune;
-
     /* The master tune, in Q16 cents, becomes the word's units: 4096
      * units per octave is 1200 cents, so one cent is 4096/1200 units. */
-    tune = master_tune_q16 / 19200;
+    int32_t tune = master_tune_q16 / 19200;
+    int32_t voice = (int32_t)slopsix_note_word[note & 127u];
+
+    voice += pitch_offset;
+    if (voice < SLOPSIX_FREQ_VOICE_FLOOR) {
+        voice = SLOPSIX_FREQ_VOICE_FLOOR;
+    }
+
+    return voice + tune;
+}
+
+/*
+ * One operator's frequency word from its voice's precomposed word.
+ *
+ * Ratio mode adds the operator's coarse and fine ratios, which the EGS
+ * adds after the voice word; fixed-frequency mode ignores the voice and
+ * uses the operator's own frequency.  Both modes add the same detune law,
+ * so the fixed mode's detune is antisymmetric around the neutral value
+ * too.
+ */
+int32_t slopsix_op_freq_from_voice(const slopsix_op_params *params,
+                                   int32_t voice_word)
+{
+    int32_t word;
+    uint8_t detune;
 
     /* The hardware's detune is a four-bit signed field, 0..14; a value
      * outside it is out of contract and is clipped here, once, so the
@@ -110,27 +145,9 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
     }
 
     if (params->mode == 0u) {
-        /* The voice's frequency word: the note's word plus the voice's
-         * pitch offset (the pitch-modification register's word - the
-         * bend and the LFO's per-tick wave term - and the pitch EG
-         * level).  The firmware clamps this word at the floor before the
-         * master tune and the operator's own frequency are added; the
-         * engine's offsets arrive as one, so the clamp covers them all
-         * (the register's own hardware path is the EGS's
-         * pitch-modification register, which the firmware does not
-         * clamp - a model-level deviation, noted in the comment
-         * above). */
-        int32_t voice = (int32_t)slopsix_note_word[note & 127u];
-
-        voice += pitch_offset;
-        if (voice < SLOPSIX_FREQ_VOICE_FLOOR) {
-            voice = SLOPSIX_FREQ_VOICE_FLOOR;
-        }
-
-        /* The master tune is added after the clamp, as on the hardware,
-         * and the operator's own frequency (the coarse and fine ratios)
-         * is added by the EGS after that. */
-        word = voice + tune;
+        /* The operator's own frequency (the coarse and fine ratios) is
+         * added by the EGS after the voice word. */
+        word = voice_word;
         word += slopsix_coarse_offset[params->coarse & 31u];
         word += (int32_t)slopsix_fine_offset[params->fine % 100u];
     } else {
@@ -155,8 +172,6 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
                (SLOPSIX_LOG2_440_Q10 * 4) + SLOPSIX_WORD_A4;
     }
 
-    /* Both modes share the one detune law, so the fixed mode's detune is
-     * antisymmetric around the neutral value too. */
     word += slopsix_detune_offset(detune);
 
     /* The voice pitch - the note, master tune, pitch bend and pitch EG -
@@ -165,6 +180,19 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
      * bit-synchronous EGS model). */
 
     return word;
+}
+
+/*
+ * The per-operator composition for callers that hold a note rather than a
+ * voice word: the voice word is composed first and then handed to the
+ * operator law.  The render path composes the voice word once per voice
+ * and calls slopsix_op_freq_from_voice() directly.
+ */
+int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
+                             int32_t master_tune_q16, int32_t pitch_offset)
+{
+    return slopsix_op_freq_from_voice(params,
+        slopsix_voice_word(note, master_tune_q16, pitch_offset));
 }
 
 /*

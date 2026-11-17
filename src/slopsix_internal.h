@@ -1155,7 +1155,18 @@ void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg);
 
 /* The frequency path.  `pitch_offset` is the voice's total log-frequency
  * offset (the pitch bend and the pitch EG), which the EGS applies to a
- * ratio-mode operator only. */
+ * ratio-mode operator only.
+ *
+ * The voice's word - the note, the pitch offset, the floor clamp and the
+ * master tune - is shared by every ratio-mode operator, so the render path
+ * composes it once per voice (slopsix_voice_word) and then applies each
+ * operator's own ratio and detune (slopsix_op_freq_from_voice).  The
+ * note-taking form below does both steps for a single operator and is the
+ * convenience entry for direct callers. */
+int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
+                           int32_t pitch_offset);
+int32_t slopsix_op_freq_from_voice(const slopsix_op_params *params,
+                                   int32_t voice_word);
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
                              int32_t master_tune_q16, int32_t pitch_offset);
 uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate);
