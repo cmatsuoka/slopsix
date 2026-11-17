@@ -79,18 +79,6 @@ static const uint8_t slopsix_pitch_eg_level[100] = {
 #define SLOPSIX_PITCH_EG_DONE    5u
 
 /*
- * Advance the step counter.
- *
- * The counter never runs past the finished state: the finished step is
- * not processed again, and a key-off sets the release step, so the
- * largest value the counter can hold is the finished one.
- */
-static void slopsix_pitch_eg_next_step(slopsix_pitch_eg *eg)
-{
-    eg->step++;
-}
-
-/*
  * One pitch-EG update: the firmware's stage walk, in its 16-bit level
  * domain.
  *
@@ -121,7 +109,7 @@ void slopsix_pitch_eg_update(slopsix_pitch_eg *eg)
     level = eg->level;
 
     if (level == target) {
-        slopsix_pitch_eg_next_step(eg);
+        eg->step++;
         return;
     }
 
@@ -130,7 +118,7 @@ void slopsix_pitch_eg_update(slopsix_pitch_eg *eg)
         if ((level >> 8) >= (target >> 8)) {
             /* The high byte reached the target's: the stage is done. */
             level = target;
-            slopsix_pitch_eg_next_step(eg);
+            eg->step++;
         }
     } else {
         level -= eg->increment[index];
@@ -138,7 +126,7 @@ void slopsix_pitch_eg_update(slopsix_pitch_eg *eg)
             /* A negative result is the firmware's underflow finish; a
              * high byte at or below the target's is the normal one. */
             level = target;
-            slopsix_pitch_eg_next_step(eg);
+            eg->step++;
         }
     }
 
