@@ -73,6 +73,12 @@ extern const uint8_t slopsix_com_log[6];
 extern const int32_t slopsix_coarse_offset[32];
 extern const int16_t slopsix_fine_offset[100];
 
+/* The ROM's tables the modulation paths read (checked in verbatim;
+ * src/slopsix_lfo.c). */
+extern const uint8_t slopsix_lfo_sin_table[64];     /* the sine LFO's wave */
+extern const uint8_t slopsix_amp_mod_table[256];    /* the amp-mod curve */
+extern const uint8_t slopsix_pitch_mod_sens[8];     /* the PMS table */
+
 /* ------------------------------------------------- operator core (Phase 2) */
 
 /* The OPS's phase adder is 23 bits wide and the sine circuit consumes
@@ -281,6 +287,86 @@ static inline int slopsix_pitch_eg_cadence_tick(slopsix_pitch_eg_cadence *cadenc
  * word is its distance from that value. */
 #define SLOPSIX_PITCH_EG_NEUTRAL_WORD 0x4000
 
+/* ------------------------------------------------------------- LFO state */
+
+/* The LFO is CPU-side and global to the instrument (research E-04/L-01,
+ * plan decision D-1): the hardware's interrupt handler advances the LFO
+ * and pushes the two modulation registers once per OCF tick, about
+ * 375.3 Hz, so both register staircases step at that cadence.
+ *
+ * All state fields mirror the firmware's own variables; the patch block's
+ * activated values (the two increments, the depths, the sensitivity and
+ * the waveform) are stored with the runtime state, exactly as the
+ * firmware's activation writes its registers at patch load. */
+typedef struct {
+    /* The activated parameters (the ROM's own scaling at patch load). */
+    uint16_t phase_increment;   /* the speed law's 16-bit increment */
+    uint16_t delay_increment;   /* the delay law's 16-bit increment */
+    uint8_t waveform;           /* the raw wave byte, 0..5 (+ fall-through) */
+    uint8_t pitch_mod_depth;    /* (660 * PMD) >> 8 */
+    uint8_t amp_mod_depth;      /* (660 * AMD) >> 8 */
+    uint8_t pitch_mod_sens;     /* the PMS table's value, 0..255 */
+
+    /* The runtime state. */
+    uint16_t phase;             /* the 16-bit phase accumulator */
+    uint16_t delay_acc;         /* the 16-bit delay accumulator */
+    uint8_t fade;               /* the delay's fade-in factor, 0..255 */
+    uint8_t sh_acc;             /* the S&H wave's LCG holder */
+    int8_t amplitude;           /* the current 8-bit wave value, signed */
+
+    /* The per-tick push values. */
+    uint8_t amp_mod_register;   /* the value at the EGS's amp-mod register */
+    int16_t pitch_mod_term;     /* the wave's own share of the pitch word */
+    int16_t pitch_mod_word;     /* term + bend: the register's 16-bit word */
+} slopsix_lfo;
+
+/* The LFO's update cadence.
+ *
+ * The hardware's one OCF timer drives everything: the LFO advances (and
+ * both registers are pushed) on every tick, the pitch EG walks on every
+ * second tick.  The engine realizes the same real-time cadence with two
+ * 32-bit accumulators whose periods are exact multiples of each other, so
+ * the pitch EG's gate lands exactly on every second LFO tick, as on the
+ * hardware (see the pitch EG's cadence above). */
+typedef struct {
+    uint32_t sample_rate;
+    uint32_t acc;               /* the sub-tick cadence accumulator */
+} slopsix_lfo_cadence;
+
+/* The cadence's constants: one OCF tick spans 8 * 3140 = 25,120 master
+ * clocks and a sample spans 192 of them, so the LFO's period is
+ * 25,120 / 192 = 785 / 6 samples at the anchor rate.  For a host rate the
+ * same real-time interval is 785 * rate / (6 * 49,096) samples, which the
+ * accumulator realizes in 32-bit integer arithmetic (the pitch EG's
+ * constants are the doubled period). */
+#define SLOPSIX_LFO_TICK_NUM 785u
+#define SLOPSIX_LFO_TICK_ACC (6u * SLOPSIX_DEFAULT_SAMPLE_RATE)
+
+/* The cadence gate: call once per sample; it returns nonzero on the
+ * samples where the firmware's OCF handler runs the LFO. */
+static inline int slopsix_lfo_cadence_tick(slopsix_lfo_cadence *cadence)
+{
+    uint32_t rate = cadence->sample_rate;
+    uint32_t threshold;
+
+    if (rate == 0u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
+    }
+    if (rate > SLOPSIX_DEFAULT_SAMPLE_RATE * 8u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
+    }
+
+    threshold = SLOPSIX_LFO_TICK_NUM * rate;
+    cadence->acc += SLOPSIX_LFO_TICK_ACC;
+
+    if (cadence->acc >= threshold) {
+        cadence->acc -= threshold;
+        return 1;
+    }
+
+    return 0;
+}
+
 /* ------------------------------------------------------------ voice state */
 
 typedef enum {
@@ -322,9 +408,18 @@ typedef struct {
 #define SLOPSIX_DUMP_ALGORITHM 134
 #define SLOPSIX_DUMP_FEEDBACK 135
 #define SLOPSIX_DUMP_OSC_SYNC 136
-/* Bytes 137..143 are the LFO block (speed, delay, depths, sync, waveform,
- * pitch-mod sensitivity); they are parsed with the LFO (Phase 4 step 3).
- * Byte 144 is the key transpose, as its value plus 24. */
+/* Bytes 137..143 are the LFO block: speed 137, delay 138, pitch-mod
+ * depth 139, amp-mod depth 140, sync 141, waveform 142, pitch-mod
+ * sensitivity 143.  The block's activation (its scaling and its note-on
+ * read-back) is the LFO's own (src/slopsix_lfo.c); byte 144 is the key
+ * transpose, as its value plus 24. */
+#define SLOPSIX_DUMP_LFO_SPEED 137
+#define SLOPSIX_DUMP_LFO_DELAY 138
+#define SLOPSIX_DUMP_LFO_PMD 139
+#define SLOPSIX_DUMP_LFO_AMD 140
+#define SLOPSIX_DUMP_LFO_SYNC 141
+#define SLOPSIX_DUMP_LFO_WAVE 142
+#define SLOPSIX_DUMP_LFO_PMS 143
 #define SLOPSIX_DUMP_TRANSPOSE 144
 
 /* One operator's parsed patch data.  The values keep the hardware's own
@@ -359,6 +454,14 @@ typedef struct {
     slopsix_patch_op ops[SLOPSIX_OP_COUNT];  /* index 0 == operator 1 */
     uint8_t peg_rates[4];   /* the pitch EG's stage rates, 0..99 */
     uint8_t peg_levels[4];  /* the pitch EG's stage levels, 0..99 */
+    /* The LFO block's own bytes (the dump's 137..143); the activations
+     * (the two increments, the depths, the sensitivity and the waveform)
+     * live in the context's LFO state, exactly as the firmware's
+     * activation ships them to its registers at patch load.  These two
+     * stay raw because the note-on path reads them from the patch buffer,
+     * not from a register (research fw VOICE_ADD). */
+    uint8_t lfo_sync;       /* the dump's LFO SYNC byte, any value != 0 syncs */
+    uint8_t lfo_delay;      /* the dump's LFO DELAY byte, 0..99 */
 } slopsix_patch_state;
 
 /* The note the firmware hands to its note-table conversion: the dump's
@@ -533,8 +636,9 @@ typedef struct {
     int32_t fb_prev2;               /* the feedback path's sum before it */
     int32_t fb_delay;               /* the feedback path's delayed value */
     uint8_t feedback_level;         /* the OPS's 3-bit feedback field */
-    int32_t ams_amount_q8;          /* the LFO's amplitude modulation
-                                     * amount (Q8); Phase 4 fills it */
+    /* The LFO's amplitude modulation reaches the walk as a per-tick,
+     * instrument-wide register value (src/slopsix_lfo.c), so it is not
+     * cached per voice. */
 } slopsix_voice_engine;
 
 /* --------------------------------------------------------- context state */
@@ -584,6 +688,13 @@ typedef struct {
     /* The pitch envelope's global update cadence.  The firmware's toggle
      * is global, so the cadence belongs here rather than in a voice. */
     slopsix_pitch_eg_cadence pitch_cadence;
+
+    /* The LFO: one per instrument, advanced once per OCF tick on the
+     * render path (research E-04/L-01).  The activated parameters are
+     * recomputed at each patch load; the runtime state runs
+     * continuously. */
+    slopsix_lfo lfo;
+    slopsix_lfo_cadence lfo_cadence;
 } slopsix_context_state;
 
 /* The context handle is the context state; the public API uses void *. */
@@ -774,35 +885,29 @@ static inline int32_t slopsix_com_q8(uint8_t com)
     return -((int32_t)slopsix_com_log[com] << 4);
 }
 
-/* The amplitude modulation's depth table: the model's depth per
- * sensitivity step, as a fraction of the amount (research L-05). */
-static const uint32_t slopsix_ams_depth[4] = {
-    0, 4342338, 7171437, 16777216
-};
-
 /*
  * The amplitude modulation's reduction, in the Q8 domain: the amount by
- * which the LFO lowers an operator's level.  The reduction never raises
- * the level (research L-05).  It is inline for the same reason as the
- * helpers above.
+ * which the LFO lowers an operator's level.  The EGS form is an
+ * attenuation addition, `a += amp_mod << ams` (algorithm page §4.5); in
+ * the engine's gain direction the same quantity is this subtraction, the
+ * 12-bit attenuation unit and the Q8 unit being the same 1/256-octave
+ * step with opposite sign.  The reduction never raises the level; the
+ * caller's clamp at the 12-bit envelope floor (silence) bounds it.
+ * `amp_mod_register` is the per-tick value of the EGS's amp-mod register
+ * (src/slopsix_lfo.c); the shift is the whole depth law, and sensitivity
+ * 0 disables the path (an operator without sensitivity is never
+ * modulated).  Inline for the same reason as the helpers above.
  */
 static inline int32_t slopsix_ams_reduction_q8(uint8_t ams_sens,
-    int32_t amount_q8)
+    uint8_t amp_mod_register)
 {
-    uint8_t sens = ams_sens > 3u ? 3u : ams_sens;
-    int64_t reduction;
-
-    if (amount_q8 <= 0) {
+    if (ams_sens == 0u) {
         return 0;
     }
-
-    reduction = ((int64_t)amount_q8 * (int64_t)slopsix_ams_depth[sens]) >> 24;
-
-    if (reduction < 0) {
-        reduction = 0;
+    if (ams_sens > 3u) {
+        ams_sens = 3u;
     }
-
-    return (int32_t)reduction;
+    return (int32_t)amp_mod_register << ams_sens;
 }
 
 /* Floor division by a power of two, defined for negative values.  C leaves
@@ -936,6 +1041,56 @@ int32_t slopsix_bend_log_offset(uint16_t bend14, uint8_t range, uint8_t step);
  * are global, as on the hardware. */
 int32_t slopsix_bend_context_offset(const slopsix_context_state *state);
 
+/* ----------------------------------------- the LFO and the EGS registers */
+
+/* One LFO update: the hardware's per-tick routine (the algorithm page
+ * §6.6), advancing the delay/fade pair, the 16-bit phase accumulator and
+ * the S&H holder, computing the wave amplitude, and composing both
+ * registers' values - the amp-mod register (§4.5) and the LFO's own share
+ * of the pitch-modification word (§6.5).  The bend's part of the word is
+ * added here from the context's current bend, so the register's word is
+ * always current.
+ *
+ * The caller runs this on the samples where the cadence gate fires, once
+ * per render call; the state itself carries no cadence. */
+void slopsix_lfo_tick(slopsix_context_state *state);
+
+/* The LFO's life cycle: the cadence's initialization (the gate reads the
+ * host rate) and the note-on hook - the firmware's VOICE_ADD side, which
+ * clears the delay accumulator and the fade factor when the patch's
+ * delay is not 0, and seeds the phase accumulator to 0x7FFF when the
+ * patch's LFO SYNC is set.  The LFO state is global, so the hook runs on
+ * every note-on, as the firmware's voice-add paths do. */
+void slopsix_lfo_cadence_init(slopsix_lfo_cadence *cadence,
+    uint32_t sample_rate);
+void slopsix_lfo_note_on(slopsix_context_state *state);
+
+/* The patch activation's LFO parse: the dump's bytes 137..143 through the
+ * firmware's own activation scaling - the two closed laws for the
+ * increments, the shared value scale's high bytes for the depths, the
+ * PMS table for the sensitivity and the raw byte for the waveform (the
+ * algorithm page §6.6). */
+void slopsix_lfo_patch_activate(slopsix_context_state *state,
+    const uint8_t *dump);
+
+/* The two activation laws, exposed for the harness's checks: the speed
+ * parameter's increment (speed 0 seeds the accumulator with 11) and the
+ * delay parameter's counter increment. */
+uint16_t slopsix_lfo_speed_increment(uint8_t speed);
+uint16_t slopsix_lfo_delay_increment(uint8_t delay);
+
+/* The pitch-modification register's word for a context: the LFO's
+ * per-tick share plus the current bend, wrapped at 16 bits (the
+ * firmware's ADD; the wrap is the word's only saturation).  The bend
+ * setters recompute it so a bend change is audible without waiting for
+ * the next tick. */
+int16_t slopsix_mod_pitch_word(const slopsix_context_state *state);
+
+/* The composed register word's contribution to the voice's log-frequency
+ * word, in the engine's 4096-per-octave units (floor division by the
+ * domain conversion's shift, as the bend's alone does). */
+int32_t slopsix_mod_pitch_offset(const slopsix_context_state *state);
+
 /* One pitch-EG update (the firmware's PITCH_EG_PROCESS, per voice).
  *
  * The caller runs this on the samples where the context's cadence gate
@@ -970,6 +1125,7 @@ const slopsix_algorithm *slopsix_algorithm_get(unsigned index);
 uint8_t slopsix_algorithm_feedback_operator(unsigned index);
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
+                                  uint8_t amp_mod_register,
                                   int32_t *voice_out);
 
 /* The voice path (Phase 5).  The note-on fills one voice's engine from

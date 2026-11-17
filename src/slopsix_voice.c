@@ -12,11 +12,12 @@
  *   bus sum (wide accumulator, plan decision D-15)
  *   output stages -> int16 L/R
  *
- * The pitch EG is a CPU-side process on a global cadence (plan decision
- * D-1): the context's gate fires at the firmware's every-second-tick
- * rate, advances every sounding voice's staircase, and rewrites the
- * voices' phase increments - the firmware's PORTA_PROCESS does the same
- * rewrite at the same cadence.
+ * The pitch EG and the LFO are CPU-side processes on global cadences
+ * (plan decision D-1): the context's gates fire at the firmware's tick
+ * rates (the LFO and its register pushes on every OCF tick, the pitch EG
+ * on every second tick), advance the respective staircases for the whole
+ * instrument, and rewrite the voices' phase increments - the firmware's
+ * PORTA_PROCESS does the same rewrite at the same ticks.
  *
  * This translation unit is on the per-sample render path and is compiled
  * speed-first (-O2); the rest of the library is compiled size-first.
@@ -36,7 +37,12 @@
 void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     const slopsix_voice *slot, slopsix_voice_engine *engine)
 {
-    int32_t pitch_offset = slopsix_bend_context_offset(state) +
+    /* The pitch-modification register's word (the bend plus the LFO's
+     * per-tick wave term) enters the word converted into the engine's
+     * 4096-per-octave units, beside the pitch EG's staircase level: the
+     * chip adds the register's word to each voice's frequency, while the
+     * pitch EG's level is folded into the voice-frequency word itself. */
+    int32_t pitch_offset = slopsix_mod_pitch_offset(state) +
         slopsix_pitch_eg_offset(&engine->pitch_eg);
     int32_t note = slopsix_effective_note(slot->note, slot->transpose);
     unsigned op;
@@ -103,13 +109,16 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
     }
 
     engine->feedback_level = state->patch.feedback;
-    engine->ams_amount_q8 = 0;
 
     /* The pitch EG: the patch's rate/level pairs, started at the final
      * (release) level, as the firmware's VOICE_ADD_MONO does. */
     slopsix_pitch_eg_init(&engine->pitch_eg, state->patch.peg_rates,
         state->patch.peg_levels);
     slopsix_pitch_eg_note_on(&engine->pitch_eg);
+
+    /* The LFO's note-on side: the global delay/fade and sync resets, as
+     * the firmware's voice-add paths run them on every key event. */
+    slopsix_lfo_note_on(state);
 
     if (state->patch.osc_sync) {
         for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
@@ -159,11 +168,17 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
 /*
  * The render call.
  *
- * Per sample: the pitch EG's cadence gate (one global toggle for the
- * whole instrument, as on the hardware), then every sounding voice's
- * graph walk, compander word and bus contribution, and finally the
- * output stages.  A free voice renders nothing; its operators keep the
- * increments they were last keyed with.
+ * Per sample: the two CPU-side cadence gates (one global OCF timer on the
+ * hardware drives both - the LFO and its two register pushes on every
+ * tick, the pitch EG on every second tick; the two accumulators'
+ * periods are exact multiples, so the pitch EG's walk lands on every
+ * second LFO tick, as the hardware's toggle does), then every sounding
+ * voice's graph walk, compander word and bus contribution, and finally
+ * the output stages.  A tick that reaches either gate rewrites the
+ * sounding voices' phase increments, the way the hardware's portamento
+ * process carries the composed pitch offset; a free voice renders
+ * nothing and its operators keep the increments they were last keyed
+ * with.
  */
 void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 {
@@ -188,14 +203,24 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 
     for (sample = 0; sample < frames; sample++) {
         int32_t bus = 0;
+        int lfo_tick;
+        int peg_tick;
         unsigned v;
 
-        if (slopsix_pitch_eg_cadence_tick(&state->pitch_cadence)) {
+        lfo_tick = slopsix_lfo_cadence_tick(&state->lfo_cadence);
+        peg_tick = slopsix_pitch_eg_cadence_tick(&state->pitch_cadence);
+
+        if (lfo_tick) {
+            slopsix_lfo_tick(state);
+        }
+        if (lfo_tick || peg_tick) {
             for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
                 if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
                     continue;
                 }
-                slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
+                if (peg_tick) {
+                    slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
+                }
                 slopsix_voice_engine_update_frequency(state,
                     &state->voices[v], &state->engines[v]);
             }
@@ -209,7 +234,8 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
                 continue;
             }
 
-            slopsix_voice_render_sample(&state->engines[v], alg, &out);
+            slopsix_voice_render_sample(&state->engines[v], alg,
+                state->lfo.amp_mod_register, &out);
             slopsix_compander_quantize(out, &word);
             bus += slopsix_compander_value(&word);
         }

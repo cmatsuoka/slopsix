@@ -249,6 +249,7 @@ static int32_t slopsix_bus_sum(const int32_t *bus, const int32_t *bus_writer)
  */
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
+                                  uint8_t amp_mod_register,
                                   int32_t *voice_out)
 {
     int32_t bus[2];
@@ -316,9 +317,11 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
         log_amp_q8 += slopsix_com_q8(conn->com);
 
         /* The amplitude modulation lowers the level of the operators
-         * that are sensitive to it; it never raises it. */
+         * that are sensitive to it; it never raises it.  The register's
+         * value arrives from the context's per-tick composition (the
+         * LFO's push); the shift is the whole depth law. */
         log_amp_q8 -= slopsix_ams_reduction_q8(voice->params[op].ams_sens,
-            voice->ams_amount_q8);
+            amp_mod_register);
 
         if (log_amp_q8 < 0) {
             /* The compensation can mute a carrier at full level. */

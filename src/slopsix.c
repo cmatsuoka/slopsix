@@ -27,6 +27,7 @@ static void slopsix_context_defaults(slopsix_context_state *state)
     state->master_volume = 7u;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
+    slopsix_lfo_cadence_init(&state->lfo_cadence, state->sample_rate);
 }
 
 slopsix_context slopsix_create_context(uint32_t sample_rate)
@@ -42,6 +43,7 @@ slopsix_context slopsix_create_context(uint32_t sample_rate)
     if (sample_rate != 0u) {
         state->sample_rate = sample_rate;
         slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
+        slopsix_lfo_cadence_init(&state->lfo_cadence, sample_rate);
     }
 
     return (slopsix_context)state;
@@ -63,6 +65,7 @@ void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
     }
     state->sample_rate = sample_rate;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
+    slopsix_lfo_cadence_init(&state->lfo_cadence, sample_rate);
 
     /* The sounding voices re-anchor: the envelopes take the host rate
      * (a stage already in progress keeps its current timing until the
@@ -92,6 +95,7 @@ void slopsix_reset(slopsix_context ctx)
     slopsix_context_defaults(state);
     state->sample_rate = rate;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
+    slopsix_lfo_cadence_init(&state->lfo_cadence, rate);
 }
 
 /* The per-sample render lives in src/slopsix_voice.c (the per-sample
@@ -203,15 +207,18 @@ static void slopsix_patch_parse(slopsix_context_state *state)
         state->patch.transpose = (int8_t)transpose;
     }
 
-    /* The pitch EG's rate/level pairs.
-     * Bytes 137..143, the LFO block, are parsed with the LFO (Phase 4
-     * step 3) and stay unread until then. */
+    /* The pitch EG's rate/level pairs and the LFO block's activation:
+     * the pitch EG parses its four pairs; the LFO's bytes go through the
+     * firmware's own activation scaling into the context's LFO state,
+     * whose parameters are per-patch exactly as the hardware's
+     * registers are. */
     for (i = 0; i < 4u; i++) {
         state->patch.peg_rates[i] =
             slopsix_param99(dump[SLOPSIX_DUMP_PEG_RATE + i]);
         state->patch.peg_levels[i] =
             slopsix_param99(dump[SLOPSIX_DUMP_PEG_LEVEL + i]);
     }
+    slopsix_lfo_patch_activate(state, dump);
 }
 
 /* ------------------------------------------------------- voice management
@@ -547,6 +554,10 @@ void slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
         return;
     }
     state->pitch_bend = bend;
+    /* The bend is part of the pitch-modification register's word: the
+     * context recomposes it so the change is audible without waiting for
+     * the next LFO tick. */
+    state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
     slopsix_refresh_pitch(state);
 }
 
@@ -562,6 +573,7 @@ void slopsix_set_pitch_bend_range(slopsix_context ctx,
     /* The hardware validates both to 0..12 and clears larger values. */
     state->bend_range = range_semitones > 12u ? 0u : range_semitones;
     state->bend_step = step > 12u ? 0u : step;
+    state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
     slopsix_refresh_pitch(state);
 }
 

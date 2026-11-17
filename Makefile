@@ -6,6 +6,7 @@
 #   check-dx7      the default configuration (feature macros off)
 #   check-dx100    the DX100 personality build
 #   check-extras   the extras build (conveniences beyond the original hardware)
+#   example        build the OpenAL terminal keyboard player
 #   tables         regenerate the generated tables under build/tables/
 #   tables-install regenerate the tables and write src/slopsix_tables.c
 #   clean          remove the build products
@@ -43,6 +44,13 @@ endif
 
 BUILD := build/$(CONFIG)
 
+# The example streams the engine through OpenAL; it is a host program, not
+# part of the library.  pkg-config locates the headers and libraries when it
+# can, otherwise the usual -lopenal link is tried.
+OPENAL_CFLAGS := $(shell pkg-config --cflags openal 2>/dev/null)
+OPENAL_LIBS   := $(shell pkg-config --libs openal 2>/dev/null || echo -lopenal)
+EXAMPLE       := $(BUILD)/examples/play_keys
+
 # -Wfloat-conversion and -Wdouble-promotion are where the compiler has
 # them; a floating-point operation anywhere in the library is an error.
 FLOAT_WARNINGS := -Wfloat-conversion -Wdouble-promotion
@@ -72,7 +80,7 @@ INCLUDES := -Iinclude -Isrc
 # The core: context, API glue, the generated tables and the control-rate
 # DX7 sources (size-first).
 CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c \
-             src/slopsix_pitch_eg.c
+             src/slopsix_pitch_eg.c src/slopsix_lfo.c
 # The per-sample render path (speed-first).  The operator core is inline in
 # src/slopsix_internal.h so it compiles into these translation units.
 PERF_SRCS := src/slopsix_eg.c \
@@ -95,8 +103,8 @@ TABLES := build/tables/logsin_table.c \
           build/tables/com_table.c \
           build/tables/freq_table.c
 
-.PHONY: all check check-dx7 check-dx100 check-extras tables tables-install \
-        check-tables clean
+.PHONY: all check check-dx7 check-dx100 check-extras example tables \
+        tables-install check-tables clean
 
 all: $(ARCHIVE) $(TESTBIN)
 
@@ -116,6 +124,15 @@ $(ARCHIVE): $(OBJS)
 $(TESTBIN): test/slopsix_test.c $(ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) $< $(ARCHIVE) -o $@
+
+# --- example ----------------------------------------------------------------
+
+example: $(EXAMPLE)
+
+$(EXAMPLE): examples/play_keys.c $(ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) \
+	    $(OPENAL_CFLAGS) $< $(ARCHIVE) $(OPENAL_LIBS) -o $@
 
 # --- generated tables -------------------------------------------------------
 

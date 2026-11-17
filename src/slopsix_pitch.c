@@ -111,13 +111,15 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
 
     if (params->mode == 0u) {
         /* The voice's frequency word: the note's word plus the voice's
-         * pitch offset (the pitch bend and the pitch EG).  The firmware
-         * clamps this word at the floor before the master tune and the
-         * operator's own frequency are added; the engine's bend and
-         * pitch EG arrive as one offset, so the clamp covers both (the
-         * bend's own hardware path is the EGS's pitch-modification
-         * register, which the firmware does not clamp - a model-level
-         * deviation, noted in the comment above). */
+         * pitch offset (the pitch-modification register's word - the
+         * bend and the LFO's per-tick wave term - and the pitch EG
+         * level).  The firmware clamps this word at the floor before the
+         * master tune and the operator's own frequency are added; the
+         * engine's offsets arrive as one, so the clamp covers them all
+         * (the register's own hardware path is the EGS's
+         * pitch-modification register, which the firmware does not
+         * clamp - a model-level deviation, noted in the comment
+         * above). */
         int32_t voice = (int32_t)slopsix_note_word[note & 127u];
 
         voice += pitch_offset;

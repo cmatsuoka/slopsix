@@ -17,6 +17,7 @@
  *   graph       the operator-graph walk
  *   bend        the pitch bend: the curve, its quantisation and its scale
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
+ *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   output      the output stages: compander, DAC step, pan law and master
  *   extras      the pan is an extra: available or a no-op by build
  *   render      the live voice path: patch parse, note render and release
@@ -911,9 +912,10 @@ static void stage_graph(void)
         int32_t plain_out;
 
         slopsix_voice_render_sample(&voice,
-                                    slopsix_algorithm_get(0), &out);
+                                    slopsix_algorithm_get(0), 0u, &out);
         slopsix_voice_render_sample(&plain,
-                                    slopsix_algorithm_get(0), &plain_out);
+                                    slopsix_algorithm_get(0), 0u,
+                                    &plain_out);
         samples[i] = out;
 
         if (out != 0) {
@@ -940,7 +942,8 @@ static void stage_graph(void)
             int32_t out;
 
             slopsix_voice_render_sample(&again,
-                                        slopsix_algorithm_get(0), &out);
+                                        slopsix_algorithm_get(0), 0u,
+                                        &out);
             if (out != samples[i]) {
                 deterministic = 0;
             }
@@ -958,7 +961,8 @@ static void stage_graph(void)
         build_voice(&other, 6, 60, 4095);   /* algorithm 7 */
         for (i = 0; i < 256; i++) {
             slopsix_voice_render_sample(&other,
-                                        slopsix_algorithm_get(6), &out);
+                                        slopsix_algorithm_get(6), 0u,
+                                        &out);
             sum += out;
         }
         check(sum != 0,
@@ -1326,15 +1330,18 @@ static void stage_level(void)
         check(full > none, "the operator output level raises the level");
     }
 
-    /* The amplitude modulation: it lowers the level of the sensitive
-     * operators and never raises it. */
-    check(slopsix_ams_reduction_q8(0, 512) == 0,
+    /* The amplitude modulation: the EGS form is an attenuation addition,
+     * `a += amp_mod << ams` (the register value times the sensitivity's
+     * shift); in the engine's gain direction this file checks the same
+     * quantity as the subtraction the walk applies.  The register value
+     * arrives from the LFO's per-tick composition. */
+    check(slopsix_ams_reduction_q8(0, 16) == 0,
           "an operator without amplitude modulation is not affected");
-    check(slopsix_ams_reduction_q8(3, 512) > 0,
-          "the amplitude modulation lowers the level");
+    check(slopsix_ams_reduction_q8(3, 16) == 16 << 3,
+          "the amplitude modulation lowers the level by the shifted amount");
     check(slopsix_ams_reduction_q8(3, 0) == 0,
-          "the amplitude modulation does nothing without an amount");
-    check(slopsix_ams_reduction_q8(1, 512) < slopsix_ams_reduction_q8(3, 512),
+          "the amplitude modulation does nothing with an empty register");
+    check(slopsix_ams_reduction_q8(1, 16) < slopsix_ams_reduction_q8(3, 16),
           "the amplitude modulation's depth grows with the sensitivity");
 
     /* The carrier-count compensation: every carrier of an algorithm is
@@ -1421,7 +1428,7 @@ static void stage_level(void)
 
         for (i = 0; i < 512; i++) {
             slopsix_voice_render_sample(&voice, slopsix_algorithm_get(0),
-                                        &out);
+                                        0u, &out);
             if (out != 0) {
                 nonzero++;
             }
@@ -1458,7 +1465,8 @@ static void stage_com(void)
     for (i = 0; i < 512; i++) {
         int32_t out = 0;
 
-        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(31), &out);
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(31), 0u,
+                                    &out);
         if (out > peak_many) {
             peak_many = out;
         }
@@ -1480,7 +1488,8 @@ static void stage_com(void)
     for (i = 0; i < 512; i++) {
         int32_t out = 0;
 
-        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(15), &out);
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(15), 0u,
+                                    &out);
         if (out > peak_one) {
             peak_one = out;
         }
@@ -2379,6 +2388,386 @@ static void stage_render(void)
     slopsix_destroy_context(ctx);
 }
 
+/* -------------------------------------------------------- the LFO */
+
+static void stage_lfo(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    slopsix_lfo *lfo;
+    uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+    slopsix_op_params params;
+    int intervals[8];
+    int updates;
+    int previous;
+    int i;
+    unsigned char lfo_seen[4200];
+    unsigned char peg_seen[4200];
+
+    printf("stage lfo\n");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+    lfo = &state->lfo;
+
+    /* The speed law: algebraic, with the zero speed's accumulator seed.
+     * 660 * v >> 8 times its own multiplier; the samples come from the
+     * law's own steps (the kinks sit at the speed whose high byte passes
+     * 160). */
+    check(slopsix_lfo_speed_increment(0u) == 11u,
+          "speed 0 seeds the accumulator with 11");
+    check(slopsix_lfo_speed_increment(1u) == 22u &&
+          slopsix_lfo_speed_increment(3u) == 77u,
+          "the low speeds are the high byte times eleven");
+    check(slopsix_lfo_speed_increment(10u) == 275u &&
+          slopsix_lfo_speed_increment(62u) == 1749u,
+          "the speeds below the kink follow the law");
+    check(slopsix_lfo_speed_increment(63u) == 1782u &&
+          slopsix_lfo_speed_increment(64u) == 1980u,
+          "the law's multiplier grows past the high byte's 160");
+    check(slopsix_lfo_speed_increment(99u) == 8670u,
+          "speed 99 is the law's top (255 * 34)");
+
+    /* The delay law: the 99-minus-delay value's nibbles. */
+    check(slopsix_lfo_delay_increment(99u) == 64u,
+          "delay 99 is the slowest delay counter");
+    check(slopsix_lfo_delay_increment(0u) == 4864u,
+          "delay 0 is the fastest delay counter");
+    check(slopsix_lfo_delay_increment(95u) == 80u &&
+          slopsix_lfo_delay_increment(60u) == 368u &&
+          slopsix_lfo_delay_increment(16u) == 2432u,
+          "the delay law follows the nibbles");
+
+    /* The patch activation: the dump bytes through the scaling. */
+    memset(dump, 0, sizeof(dump));
+    dump[SLOPSIX_DUMP_LFO_SPEED] = 50u;
+    dump[SLOPSIX_DUMP_LFO_DELAY] = 50u;
+    dump[SLOPSIX_DUMP_LFO_PMD] = 99u;
+    dump[SLOPSIX_DUMP_LFO_AMD] = 99u;
+    dump[SLOPSIX_DUMP_LFO_WAVE] = 3u;
+    dump[SLOPSIX_DUMP_LFO_PMS] = 7u;
+    slopsix_lfo_patch_activate(state, dump);
+    check(lfo->phase_increment == 1408u,
+          "speed 50 parses to the law's increment");
+    check(lfo->delay_increment == 544u,
+          "delay 50 parses to the law's increment");
+    check(lfo->pitch_mod_depth == 255u && lfo->amp_mod_depth == 255u,
+          "the depths are the value scale's high bytes");
+    check(lfo->waveform == 3u && lfo->pitch_mod_sens == 255u,
+          "the wave byte passes raw and the sensitivity takes the table");
+    check(state->patch.lfo_delay == 50u && state->patch.lfo_sync == 0u,
+          "the note-on path's own bytes stay raw");
+    dump[SLOPSIX_DUMP_LFO_SYNC] = 5u;
+    dump[SLOPSIX_DUMP_LFO_PMS] = 200u;
+    dump[SLOPSIX_DUMP_LFO_SPEED] = 255u;
+    slopsix_lfo_patch_activate(state, dump);
+    check(state->patch.lfo_sync != 0u, "any sync byte value enables sync");
+    check(lfo->pitch_mod_sens == 255u,
+          "the sensitivity clamps to the table's last entry");
+    check(lfo->phase_increment == 8670u,
+          "the speed clamps to the law's top");
+
+    /* The waveforms.  The phase is held (a zero increment) so each tick
+     * reads one exact phase. */
+    lfo->phase_increment = 0u;
+    lfo->waveform = 0u;                    /* triangle */
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the triangle starts at its trough");
+    lfo->phase = 0x4000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 0, "the triangle's quarter is neutral");
+    lfo->phase = 0x7F80u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 127, "the triangle peaks before the midpoint");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 127,
+          "the triangle rides its peak across the midpoint");
+    lfo->phase = 0xC000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -1, "the triangle's last quarter falls");
+    lfo->phase = 0xFF80u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the triangle closes its cycle");
+
+    lfo->waveform = 2u;                    /* saw up */
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 0, "the rising saw reads the high byte");
+    lfo->phase = 0x7F80u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 127, "the rising saw peaks at the midpoint");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the rising saw resets at the midpoint");
+
+    lfo->waveform = 1u;                    /* saw down */
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -1, "the falling saw is the complement");
+    lfo->phase = 0x7F80u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the falling saw troughs at the midpoint");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 127, "the falling saw resets at the midpoint");
+
+    lfo->waveform = 3u;                    /* square */
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 127, "the square's first half is positive");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the square's second half is negative");
+
+    lfo->waveform = 4u;                    /* sine */
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 2, "the sine starts at its table's first entry");
+    lfo->phase = 0x2000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 91, "the sine reads the table directly");
+    lfo->phase = 0x6000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 89, "the sine mirrors its index");
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -3, "the sine inverts its negative half");
+    lfo->phase = 0xC000u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -128, "the sine troughs");
+
+    lfo->waveform = 5u;                    /* sample and hold */
+    lfo->phase = 0x7F00u;
+    lfo->phase_increment = 0x0100u;        /* the add crosses 0x7FFF */
+    lfo->sh_acc = 0u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 11, "the S&H resamples on the phase's overflow");
+    lfo->phase = 0x8000u;                  /* the next add does not overflow */
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == 11, "the S&H holds between resamples");
+    lfo->phase = 0x7F80u;
+    slopsix_lfo_tick(state);
+    check(lfo->amplitude == -68,
+          "the S&H's LCG steps its holder (179x + 11)");
+    lfo->phase_increment = 0u;
+
+    /* The delay and the fade: delay 0's increment overflows the 16-bit
+     * accumulator on the fourteenth tick and locks it; the fade then
+     * grows by the increment's high byte (19) per tick. */
+    memset(dump, 0, sizeof(dump));
+    dump[SLOPSIX_DUMP_LFO_SPEED] = 50u;
+    dump[SLOPSIX_DUMP_LFO_DELAY] = 0u;
+    dump[SLOPSIX_DUMP_LFO_PMD] = 99u;
+    dump[SLOPSIX_DUMP_LFO_AMD] = 99u;
+    dump[SLOPSIX_DUMP_LFO_WAVE] = 3u;
+    dump[SLOPSIX_DUMP_LFO_PMS] = 7u;
+    slopsix_lfo_patch_activate(state, dump);
+    lfo->phase_increment = 0u;
+    lfo->phase = 0x8000u;                  /* the square's negative half */
+    lfo->delay_acc = 0u;                   /* a fresh counter for the drive */
+    lfo->fade = 0u;
+    for (i = 1; i <= 13; i++) {
+        slopsix_lfo_tick(state);
+    }
+    check(lfo->fade == 0u,
+          "the delay accumulator has not overflowed in 13 ticks");
+    slopsix_lfo_tick(state);
+    check(lfo->fade == 19u && lfo->delay_acc == 0xFFFFu,
+          "the overflow tick locks the accumulator and starts the fade");
+    for (i = 14; i < 27; i++) {
+        slopsix_lfo_tick(state);
+    }
+    check(lfo->fade == 255u, "the fade fills in thirteen more ticks");
+
+    /* The amp-mod register: the inverted-polarity wave form.  With the
+     * square's negative half and the full factor ((255*255)>>8 = 254,
+     * times the inverted wave's 255 >> 8 = 253), the register sits at the
+     * table's third entry; the positive half gives none. */
+    check(lfo->amp_mod_register == 0xE0u,
+          "the amp-mod register follows the table's third entry");
+    lfo->phase = 0x0000u;                  /* the positive half */
+    slopsix_lfo_tick(state);
+    check(lfo->amp_mod_register == 0u,
+          "the amp-mod route uses the wave's inverted polarity");
+
+    /* The pitch-modification word: the factor, the sensitivity-scaled
+     * wave and the halving.  At the full depth the negative half swings
+     * the word down and the positive half up. */
+    lfo->phase = 0x8000u;
+    slopsix_lfo_tick(state);
+    check(lfo->pitch_mod_word == -16129,
+          "the full pitch term is the product's signed halving");
+    check(slopsix_mod_pitch_offset(state) == -4033,
+          "the word converts to the engine's floor division");
+    lfo->phase = 0x0000u;
+    slopsix_lfo_tick(state);
+    check(lfo->pitch_mod_word == 16002 && lfo->amplitude == 127,
+          "the positive half swings the word up");
+    check(slopsix_mod_pitch_offset(state) == 4000,
+          "the upward conversion floors the same way");
+
+    /* The frequency path: the composed word moves a ratio operator; a
+     * fixed-frequency one ignores it; and the pitch-EG offset composes
+     * into the same word beside it. */
+    params.mode = 0u;
+    params.coarse = 1u;
+    params.fine = 0u;
+    params.detune = 7u;
+    check(slopsix_op_freq_word(69, &params, 0, 4000) ==
+          slopsix_op_freq_word(69, &params, 0, 0) + 4000,
+          "the LFO's converted word is one octave per 4096 units");
+    params.mode = 1u;
+    check(slopsix_op_freq_word(69, &params, 0, -4033) ==
+          slopsix_op_freq_word(69, &params, 0, 0),
+          "a fixed-frequency operator ignores the LFO");
+    params.mode = 0u;
+    check(slopsix_op_freq_word(69, &params, 0,
+                               slopsix_mod_pitch_offset(state) + 4096) ==
+          slopsix_op_freq_word(69, &params, 0,
+                               slopsix_mod_pitch_offset(state)) + 4096,
+          "the LFO and the pitch EG share one log-frequency word");
+
+    /* The note-on hook: delay reset only with a delay, sync seeding only
+     * with sync. */
+    lfo->phase = 0x1234u;
+    lfo->delay_acc = 5000u;
+    lfo->fade = 9u;
+    state->patch.lfo_delay = 0u;
+    state->patch.lfo_sync = 0u;
+    slopsix_lfo_note_on(state);
+    check(lfo->phase == 0x1234u && lfo->delay_acc == 5000u && lfo->fade == 9u,
+          "a delay of 0 resets neither the delay nor the phase");
+    state->patch.lfo_delay = 50u;
+    slopsix_lfo_note_on(state);
+    check(lfo->phase == 0x1234u && lfo->delay_acc == 0u && lfo->fade == 0u,
+          "a delay clears the delay accumulator and the fade");
+    state->patch.lfo_sync = 1u;
+    slopsix_lfo_note_on(state);
+    check(lfo->phase == 0x7FFFu, "sync seeds the phase at 0x7FFF");
+
+    /* The cadence: one tick every 785/6 anchor-rate samples, five
+     * intervals of 131 and one of 130 per cycle; and at twice the anchor
+     * rate the first interval is double. */
+    {
+        slopsix_lfo_cadence cadence;
+
+        slopsix_lfo_cadence_init(&cadence, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        updates = 0;
+        previous = 0;
+        for (i = 1; i <= 1000; i++) {
+            if (slopsix_lfo_cadence_tick(&cadence)) {
+                if (updates < 6) {
+                    intervals[updates] = i - previous;
+                }
+                previous = i;
+                updates++;
+            }
+        }
+        check(updates >= 6 && intervals[0] == 131 && intervals[1] == 131 &&
+              intervals[2] == 131 && intervals[3] == 131 &&
+              intervals[4] == 131 && intervals[5] == 130,
+              "the LFO ticks at the 375.3 Hz staircase");
+        check(intervals[0] + intervals[1] + intervals[2] + intervals[3] +
+              intervals[4] + intervals[5] == 785,
+              "six ticks span exactly 785 samples");
+
+        for (i = 0; i < 6; i++) {
+            intervals[i] = 0;
+        }
+        slopsix_lfo_cadence_init(&cadence,
+                                 SLOPSIX_DEFAULT_SAMPLE_RATE * 2u);
+        for (i = 1; i <= 600; i++) {
+            if (slopsix_lfo_cadence_tick(&cadence)) {
+                break;
+            }
+        }
+        check(i == 262, "the cadence scales with the host sample rate");
+
+        /* The two cadences are phase-locked: the pitch EG's gate (the
+         * doubled period) lands exactly on every second LFO tick. */
+        {
+            slopsix_lfo_cadence lfo_c;
+            slopsix_pitch_eg_cadence peg_c;
+            int locked = 1;
+            int lfo_fires = 0;
+            int peg_fires = 0;
+
+            slopsix_lfo_cadence_init(&lfo_c, SLOPSIX_DEFAULT_SAMPLE_RATE);
+            slopsix_pitch_eg_cadence_init(&peg_c,
+                                          SLOPSIX_DEFAULT_SAMPLE_RATE);
+            memset(lfo_seen, 0, sizeof(lfo_seen));
+            memset(peg_seen, 0, sizeof(peg_seen));
+            for (i = 1; i < 4200; i++) {
+                if (slopsix_lfo_cadence_tick(&lfo_c)) {
+                    lfo_seen[i] = 1;
+                    lfo_fires++;
+                }
+                if (slopsix_pitch_eg_cadence_tick(&peg_c)) {
+                    peg_seen[i] = 1;
+                    peg_fires++;
+                    if (!lfo_seen[i]) {
+                        locked = 0;
+                    }
+                }
+            }
+            check(locked && lfo_fires == 32 && peg_fires == 16,
+                  "the pitch EG walks on every second LFO tick");
+        }
+    }
+
+    /* The context creation carries both cadences to a non-default host
+     * rate, and they stay phase-locked there: the pitch EG's gate lands
+     * on every second LFO tick at any rate (one shared threshold, the
+     * pitch EG's step half of the LFO's). */
+    {
+        slopsix_context host_ctx;
+        slopsix_context_state *host_state;
+        int lfo_fires = 0;
+        int peg_fires = 0;
+        int locked = 1;
+
+        host_ctx = slopsix_create_context(44100u);
+        if (host_ctx == NULL) {
+            check(0, "create_context returns a context");
+        } else {
+            host_state = SLOPSIX_CONTEXT(host_ctx);
+            check(host_state->sample_rate == 44100u &&
+                  host_state->lfo_cadence.sample_rate == 44100u &&
+                  host_state->pitch_cadence.sample_rate == 44100u,
+                  "create_context takes the requested rate for both"
+                  " cadences");
+
+            memset(lfo_seen, 0, sizeof(lfo_seen));
+            for (i = 1; i < 4200; i++) {
+                if (slopsix_lfo_cadence_tick(&host_state->lfo_cadence)) {
+                    lfo_seen[i] = 1;
+                    lfo_fires++;
+                }
+                if (slopsix_pitch_eg_cadence_tick(
+                        &host_state->pitch_cadence)) {
+                    peg_fires++;
+                    if (!lfo_seen[i]) {
+                        locked = 0;
+                    }
+                }
+            }
+            check(locked && lfo_fires > 0 && peg_fires > 0 &&
+                  lfo_fires <= 2 * peg_fires + 1 &&
+                  2 * peg_fires <= lfo_fires,
+                  "the creation-rate cadences stay phase-locked");
+            slopsix_destroy_context(host_ctx);
+        }
+    }
+
+    slopsix_destroy_context(ctx);
+}
+
 /* --------------------------------------------------- extras: the pan */
 
 static void stage_extras(void)
@@ -2474,6 +2863,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--pitcheg") == 0) {
             stage_pitcheg();
             ran = 1;
+        } else if (strcmp(argv[i], "--lfo") == 0) {
+            stage_lfo();
+            ran = 1;
         } else if (strcmp(argv[i], "--output") == 0) {
             stage_output();
             ran = 1;
@@ -2504,6 +2896,7 @@ int main(int argc, char **argv)
         stage_com();
         stage_bend();
         stage_pitcheg();
+        stage_lfo();
         stage_output();
         stage_extras();
         stage_render();
