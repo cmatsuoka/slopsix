@@ -15,6 +15,7 @@
  *   algorithms  the 32 algorithms' decoded connections
  *   graph       the operator-graph walk
  *   bend        the pitch bend: the curve, its quantisation and its scale
+ *   pitcheg     the pitch envelope: its tables, stage walk and cadence
  *   extras      the pan is an extra: available or a no-op by build
  *
  * The harness is a host tool, not the library: it may use whatever it
@@ -1352,6 +1353,240 @@ static void stage_bend(void)
     slopsix_destroy_context(ctx);
 }
 
+/* -------------------------------------------------- the pitch EG */
+
+static void stage_pitcheg(void)
+{
+    slopsix_pitch_eg eg;
+    slopsix_pitch_eg_cadence cadence;
+    slopsix_op_params params;
+    uint8_t rates[4];
+    uint8_t levels[4];
+    int intervals[3];
+    int updates;
+    int previous;
+    int i;
+    int32_t neutral;
+
+    printf("stage pitcheg\n");
+
+    /* The neutral level is 50 in the patch's units: its table entry is
+     * 0x80 and its 16-bit word is the firmware's 0x4000. */
+    rates[0] = rates[1] = rates[2] = rates[3] = 0u;
+    levels[0] = levels[1] = levels[2] = levels[3] = 50u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    neutral = slopsix_pitch_eg_offset(&eg);
+    check(neutral == 0, "level 50 is the neutral pitch-EG level");
+
+    /* The level table's endpoints and nonlinear top.  The table value
+     * becomes the level word by a left shift of seven, and the offset is
+     * the word's distance from 0x4000. */
+    levels[0] = levels[1] = levels[2] = levels[3] = 0u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == -16384,
+          "level 0 is four octaves below neutral");
+
+    levels[0] = levels[1] = levels[2] = levels[3] = 99u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 16256,
+          "level 99 is just under four octaves above neutral");
+
+    levels[0] = levels[1] = levels[2] = levels[3] = 51u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 128,
+          "level 51 is one table step above neutral");
+
+    levels[0] = levels[1] = levels[2] = levels[3] = 86u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 4864,
+          "level 86 follows the level table's nonlinear top");
+
+    /* The state walk.  The envelope starts at the release level (L4),
+     * walks L1, L2 and L3, holds there, and on key-off releases to L4
+     * again.  The full swing at rate 99 moves 255 units per update. */
+    rates[0] = rates[1] = rates[2] = rates[3] = 99u;
+    levels[0] = 99u;
+    levels[1] = 50u;
+    levels[2] = 50u;
+    levels[3] = 0u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == -16384,
+          "key-on starts at the final (release) level");
+
+    /* 0x0000 -> 0x7F00 is 128 increments of 255. */
+    for (i = 0; i < 127; i++) {
+        slopsix_pitch_eg_update(&eg);
+    }
+    check(slopsix_pitch_eg_offset(&eg) == 16001 && eg.step == 0u,
+          "the first stage has not finished one step early");
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 16256 && eg.step == 1u,
+          "the first stage snaps to its level and advances");
+
+    /* 0x7F00 -> 0x4000 is 63 increments of 255 (the last one snaps). */
+    for (i = 0; i < 62; i++) {
+        slopsix_pitch_eg_update(&eg);
+    }
+    check(slopsix_pitch_eg_offset(&eg) == 446 && eg.step == 1u,
+          "the second stage is still moving after 62 steps");
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 0 && eg.step == 2u,
+          "the second stage reaches neutral and advances");
+
+    /* L3 is also neutral, so the sustain is reached on the next tick. */
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 0 && eg.step == 3u,
+          "the sustain holds the neutral level");
+
+    /* The sustain ignores further updates until key-off. */
+    for (i = 0; i < 100; i++) {
+        slopsix_pitch_eg_update(&eg);
+    }
+    check(slopsix_pitch_eg_offset(&eg) == 0 && eg.step == 3u,
+          "the held sustain stops the envelope");
+
+    /* Key-off releases to L4 from the current level; the release needs
+     * 64 increments of 255 from 0x4000 to 0x0000. */
+    slopsix_pitch_eg_note_off(&eg);
+    check(eg.step == 4u, "key-off enters the release stage");
+    for (i = 0; i < 63; i++) {
+        slopsix_pitch_eg_update(&eg);
+    }
+    check(slopsix_pitch_eg_offset(&eg) == -16065 && eg.step == 4u,
+          "the release is still moving after 63 steps");
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == -16384 && eg.step == 5u,
+          "the release reaches the final level and finishes");
+
+    /* The firmware snaps a stage at the target's high byte, so a short
+     * move that crosses that byte finishes in one update, not at the
+     * exact target distance. */
+    rates[0] = 99u;
+    levels[0] = 51u;
+    levels[1] = 51u;
+    levels[2] = 51u;
+    levels[3] = 50u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 128 && eg.step == 1u,
+          "the high byte snaps a short rise to the target");
+
+    /* A stage whose target already equals the level advances instantly. */
+    levels[0] = 50u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    slopsix_pitch_eg_update(&eg);
+    check(slopsix_pitch_eg_offset(&eg) == 0 && eg.step == 1u,
+          "an equal target advances the stage");
+
+    /* The cadence: at the anchor rate the firmware's every-second-tick
+     * process is 785 / 3 samples, an interval of 262, 262, 261.  The
+     * gate is global, so it lives outside the envelope: it reports the
+     * samples on which every voice's envelope advances. */
+    rates[0] = rates[1] = rates[2] = rates[3] = 0u;
+    levels[0] = levels[1] = levels[2] = levels[3] = 50u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_cadence_init(&cadence, SLOPSIX_DEFAULT_SAMPLE_RATE);
+    updates = 0;
+    previous = 0;
+    for (i = 1; i <= 1000; i++) {
+        if (slopsix_pitch_eg_cadence_tick(&cadence)) {
+            if (updates < 3) {
+                intervals[updates] = i - previous;
+            }
+            previous = i;
+            updates++;
+        }
+    }
+    check(updates >= 3 && intervals[0] == 262 && intervals[1] == 262 &&
+          intervals[2] == 261,
+          "the pitch EG updates at the 187.6 Hz staircase");
+
+    /* The gate advances only the cadence: the envelope's level is
+     * unchanged by it, so the two cannot step an envelope twice. */
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    slopsix_pitch_eg_cadence_init(&cadence, SLOPSIX_DEFAULT_SAMPLE_RATE);
+    for (i = 1; i <= 1000; i++) {
+        if (slopsix_pitch_eg_cadence_tick(&cadence)) {
+            break;
+        }
+    }
+    check(slopsix_pitch_eg_offset(&eg) == 0 && eg.step == 0u,
+          "the cadence gate does not step the envelope itself");
+
+    /* A host rate scales the update's real-time period: at twice the
+     * anchor rate the first interval is twice the anchor's. */
+    slopsix_pitch_eg_cadence_init(&cadence,
+                                  SLOPSIX_DEFAULT_SAMPLE_RATE * 2u);
+    for (i = 1; i <= 2000; i++) {
+        if (slopsix_pitch_eg_cadence_tick(&cadence)) {
+            break;
+        }
+    }
+    check(i == 524, "the cadence scales with the host sample rate");
+
+    /* The frequency path takes the pitch EG's offset in the same word
+     * as the note, and the fixed-frequency mode ignores it. */
+    params.mode = 0u;
+    params.coarse = 1u;
+    params.fine = 0u;
+    params.detune = 7u;
+    check(slopsix_op_freq_word(69, &params, 0, 4096) ==
+          slopsix_op_freq_word(69, &params, 0, 0) + 4096,
+          "the pitch-EG offset is one octave per 4096 word units");
+    params.mode = 1u;
+    check(slopsix_op_freq_word(69, &params, 0, 4096) ==
+          slopsix_op_freq_word(69, &params, 0, 0),
+          "a fixed-frequency operator ignores the pitch EG");
+
+    /* A sweep: from L4 = 0 (-4 octaves) to L1 = 99 (+3.97 octaves) the
+     * rendered frequency rises by almost eight octaves, monotonically. */
+    params.mode = 0u;
+    rates[0] = rates[1] = rates[2] = rates[3] = 99u;
+    levels[0] = levels[1] = levels[2] = levels[3] = 0u;
+    levels[0] = 99u;
+    slopsix_pitch_eg_init(&eg, rates, levels);
+    slopsix_pitch_eg_note_on(&eg);
+    {
+        int64_t previous = 0;
+        int64_t first = 0;
+        int64_t last = 0;
+        int monotonic = 1;
+
+        for (i = 0; i <= 128; i++) {
+            int32_t word = slopsix_op_freq_word(69, &params, 0,
+                                                slopsix_pitch_eg_offset(&eg));
+            uint32_t increment = slopsix_increment_from_word(
+                word, SLOPSIX_DEFAULT_SAMPLE_RATE);
+            int64_t freq = increment_millihertz(increment,
+                                                SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+            if (i == 0) {
+                first = freq;
+            }
+            if (freq < previous) {
+                monotonic = 0;
+            }
+            previous = freq;
+            last = freq;
+            slopsix_pitch_eg_update(&eg);
+        }
+
+        check(monotonic, "the pitch-EG sweep rises monotonically");
+        check(first > 0 && last * 100 > first * 24000 &&
+              last * 100 < first * 26000,
+              "the sweep rises by almost eight octaves");
+    }
+}
+
 /* --------------------------------------------------- extras: the pan */
 
 static void stage_extras(void)
@@ -1441,6 +1676,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--bend") == 0) {
             stage_bend();
             ran = 1;
+        } else if (strcmp(argv[i], "--pitcheg") == 0) {
+            stage_pitcheg();
+            ran = 1;
         } else if (strcmp(argv[i], "--extras") == 0) {
             stage_extras();
             ran = 1;
@@ -1463,6 +1701,7 @@ int main(int argc, char **argv)
         stage_level();
         stage_com();
         stage_bend();
+        stage_pitcheg();
         stage_extras();
     }
 

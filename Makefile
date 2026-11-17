@@ -71,7 +71,8 @@ INCLUDES := -Iinclude -Isrc
 
 # The core: context, API glue, the generated tables and the control-rate
 # DX7 sources (size-first).
-CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c
+CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c \
+             src/slopsix_pitch_eg.c
 # The per-sample render path (speed-first).  The operator core is inline in
 # src/slopsix_internal.h so it compiles into these translation units.
 PERF_SRCS := src/slopsix_eg.c \

@@ -22,6 +22,8 @@ static void slopsix_context_defaults(slopsix_context_state *state)
     state->master_tune_q16 = 0;
     state->pan_q16 = SLOPSIX_Q16_ONE / 2;
     state->master_volume = 4u;
+    slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
+        state->sample_rate);
 }
 
 slopsix_context slopsix_create_context(uint32_t sample_rate)
@@ -36,6 +38,7 @@ slopsix_context slopsix_create_context(uint32_t sample_rate)
     slopsix_context_defaults(state);
     if (sample_rate != 0u) {
         state->sample_rate = sample_rate;
+        slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
     }
 
     return (slopsix_context)state;
@@ -54,6 +57,7 @@ void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
         return;
     }
     state->sample_rate = sample_rate;
+    slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
 }
 
 void slopsix_reset(slopsix_context ctx)
@@ -67,6 +71,7 @@ void slopsix_reset(slopsix_context ctx)
     rate = state->sample_rate;
     slopsix_context_defaults(state);
     state->sample_rate = rate;
+    slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
 }
 
 void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)

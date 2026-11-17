@@ -61,15 +61,37 @@ static int32_t slopsix_detune_offset(uint8_t detune)
  * Ratio mode (mode 0) composes the note's word with the coarse ratio,
  * the fine ratio and the detune term.  Fixed-frequency mode (mode 1)
  * ignores the note and uses the operator's fixed frequency (research
- * P-03, hypothesis-grade); it still receives the master tune.
+ * P-03, hypothesis-grade); it receives neither the master tune nor the
+ * voice's pitch.
  *
- * The voice's pitch contributions - the master tune and the pitch bend -
- * reach the operator in ratio mode only: the EGS adds them to the voice
- * frequency, which a fixed-frequency operator does not read (research
- * P-03, a bit-synchronous EGS model).
+ * The voice's pitch contributions - the master tune, the pitch bend and
+ * the pitch EG - reach the operator in ratio mode only: the EGS adds
+ * them to the voice frequency, which a fixed-frequency operator does not
+ * read (research P-03, a bit-synchronous EGS model).  The bend and the
+ * pitch EG arrive as one log-frequency offset; both denote a change in
+ * the same voice pitch.
+ *
+ * The word's width.
+ *
+ * The engine's word is the firmware's own 16-bit, 4096-per-octave word
+ * (plan decision D-12), but the engine composes the whole operator
+ * frequency in one accumulator and quantizes the result once, at the
+ * EGS's 14-bit frequency field (D-16).  The composed word is therefore
+ * a model-domain quantity, not a hardware register: the coarse and fine
+ * ratios are msfa-derived offsets (P-02, model-grade) that the hardware
+ * keeps in the EGS's own operator-frequency register, so the hardware's
+ * 16-bit voice register does not bound them either.
+ *
+ * What the hardware does bound is the *voice* word, and the engine
+ * models that: the firmware clamps the voice-frequency word at its floor
+ * before the master tune and the EGS's operator frequency are added
+ * (research P-01's composition chain), so a voice that pitches far
+ * below its note stops at the floor while its operator keeps its own
+ * ratio.  The clamp below is that floor, in the engine's pre-bias word
+ * units.  The master tune is added after the clamp, as on the hardware.
  */
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
-                             int32_t master_tune_q16, int32_t bend_offset)
+                             int32_t master_tune_q16, int32_t pitch_offset)
 {
     int32_t word;
     int32_t tune;
@@ -88,7 +110,25 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
     }
 
     if (params->mode == 0u) {
-        word = (int32_t)slopsix_note_word[note & 127u];
+        /* The voice's frequency word: the note's word plus the voice's
+         * pitch offset (the pitch bend and the pitch EG).  The firmware
+         * clamps this word at the floor before the master tune and the
+         * operator's own frequency are added; the engine's bend and
+         * pitch EG arrive as one offset, so the clamp covers both (the
+         * bend's own hardware path is the EGS's pitch-modification
+         * register, which the firmware does not clamp - a model-level
+         * deviation, noted in the comment above). */
+        int32_t voice = (int32_t)slopsix_note_word[note & 127u];
+
+        voice += pitch_offset;
+        if (voice < SLOPSIX_FREQ_VOICE_FLOOR) {
+            voice = SLOPSIX_FREQ_VOICE_FLOOR;
+        }
+
+        /* The master tune is added after the clamp, as on the hardware,
+         * and the operator's own frequency (the coarse and fine ratios)
+         * is added by the EGS after that. */
+        word = voice + tune;
         word += slopsix_coarse_offset[params->coarse & 31u];
         word += (int32_t)slopsix_fine_offset[params->fine % 100u];
     } else {
@@ -117,14 +157,10 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
      * antisymmetric around the neutral value too. */
     word += slopsix_detune_offset(detune);
 
-    /* The EGS adds the voice pitch - the note, master tune, pitch bend
-     * and pitch EG - only in ratio mode.  A fixed-frequency operator
+    /* The voice pitch - the note, master tune, pitch bend and pitch EG -
+     * is already in the word in ratio mode; a fixed-frequency operator
      * uses its own frequency register plus detune (research P-03, a
      * bit-synchronous EGS model). */
-    if (params->mode == 0u) {
-        word += tune;
-        word += bend_offset;
-    }
 
     return word;
 }
@@ -152,10 +188,11 @@ uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
     int32_t datum;
     uint32_t increment;
 
-    /* The firmware's composition: the note's word plus the pitch EG's
-     * level, minus the pitch EG's neutral constant (the bias), clamped
-     * at zero, with the master tune added afterwards (research P-01).  The engine adds the master tune into the word itself,
-     * so only the bias subtraction and the clamp remain here. */
+    /* The hardware's composition: the voice's 16-bit word minus the
+     * frequency bias, clamped at zero, then handed to the EGS's
+     * 1024-per-octave field (research P-01).  The master tune and the
+     * pitch offsets are already in the word, so only the bias
+     * subtraction, the field truncation and the clamp remain here. */
     datum = slopsix_floor_div(word - SLOPSIX_FREQ_BIAS, 2) +
             SLOPSIX_EGS_OCTAVE_OFFSET;
 

@@ -35,6 +35,22 @@
  * before the master tune is added (research P-01). */
 #define SLOPSIX_FREQ_BIAS 0x1BA8
 
+/* The voice-frequency word's floor.
+ *
+ * The firmware clamps its voice-frequency word at zero before it adds
+ * the master tune: `clamp(f_note + pitch_EG_level - 0x1BA8, 0, ...)`
+ * (research P-01, the firmware's composition chain).  The pitch-EG level
+ * there is the absolute 16-bit level word, whose neutral value is 0x4000,
+ * so the clamp reads
+ *
+ *   f_note + level_offset >= 0x1BA8 - 0x4000 = -9304
+ *
+ * in the engine's 4096-per-octave word.  A voice whose pitch falls below
+ * the floor therefore stops at it: the operator's own frequency (the
+ * coarse and fine ratios) is added by the EGS afterwards and is not
+ * dragged down with the voice word. */
+#define SLOPSIX_FREQ_VOICE_FLOOR (-9304)
+
 /* One unit of the Q16 public scales is 65536. */
 #define SLOPSIX_Q16_ONE 65536
 
@@ -146,6 +162,88 @@ extern const int16_t slopsix_fine_offset[100];
 #define SLOPSIX_BUS_FIRST 1u
 #define SLOPSIX_BUS_SECOND 2u
 
+/* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
+ * every second OCF tick (about 187.6 Hz), as the firmware does (research
+ * E-04, plan decision D-1).  The level is held in the firmware's 16-bit
+ * domain, where the patch's level quantizes through the ROM's table and
+ * the neutral value is 0x4000.
+ *
+ * The envelope itself carries no cadence: the update is driven by the
+ * context's global toggle (below), so every voice's envelope steps on the
+ * same samples, as on the hardware. */
+typedef struct {
+    uint8_t increment[4];   /* the ROM rate table's increments, 1..255 */
+    int32_t target[4];      /* the ROM level table's words: value << 7 */
+    int32_t level;          /* the current level, 0..0x7F80 */
+    uint8_t step;           /* 0..2 held stages, 3 sustain, 4 release,
+                             * 5 finished */
+} slopsix_pitch_eg;
+
+/* The pitch envelope's update cadence.
+ *
+ * The firmware's update is driven by a global toggle, not by a per-voice
+ * one: the pitch EG process runs every second OCF tick for the whole
+ * instrument, so every voice's envelope steps on the same samples.  The
+ * accumulator therefore belongs to the context, not to the voice; a voice
+ * that starts between two ticks waits for the next one, exactly as on the
+ * hardware. */
+typedef struct {
+    uint32_t sample_rate;
+    uint32_t acc;           /* the sub-tick cadence accumulator */
+} slopsix_pitch_eg_cadence;
+
+/* The cadence's constants.
+ *
+ * The serial rate is the 9.4265 MHz master clock divided by 192, so a
+ * sample spans 192 master clocks.  The OCF timer reloads 3140 E-clock
+ * cycles and the E-clock is the master clock divided by 8, so one tick
+ * spans 8 * 3140 = 25,120 master clocks; the pitch EG advances on every
+ * second tick, 50,240 master clocks.  At the engine's anchor rate that is
+ * 50,240 / 192 = 785 / 3 samples per update.  For a host rate the same
+ * real-time interval is 785 * rate / (3 * 49,096) samples, which the
+ * accumulator below realizes in 32-bit integer arithmetic. */
+#define SLOPSIX_PITCH_EG_TICK_NUM 785u
+#define SLOPSIX_PITCH_EG_TICK_ACC (3u * SLOPSIX_DEFAULT_SAMPLE_RATE)
+
+/* The cadence gate: call once per sample; it returns nonzero on the
+ * samples where the firmware's pitch-EG process runs.
+ *
+ * The gate advances the cadence only: it never touches an envelope, so it
+ * cannot advance one twice.  The caller advances every sounding voice's
+ * envelope with slopsix_pitch_eg_update() on the samples where the gate
+ * fires, which is what makes every voice's staircase land on the same
+ * samples, as on the hardware.
+ *
+ * The rate is capped like the frequency path's, so the products stay
+ * inside 32 bits. */
+static inline int slopsix_pitch_eg_cadence_tick(slopsix_pitch_eg_cadence *cadence)
+{
+    uint32_t rate = cadence->sample_rate;
+    uint32_t threshold;
+
+    if (rate == 0u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
+    }
+    if (rate > SLOPSIX_DEFAULT_SAMPLE_RATE * 8u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
+    }
+
+    threshold = SLOPSIX_PITCH_EG_TICK_NUM * rate;
+    cadence->acc += SLOPSIX_PITCH_EG_TICK_ACC;
+
+    if (cadence->acc >= threshold) {
+        cadence->acc -= threshold;
+        return 1;
+    }
+
+    return 0;
+}
+
+/* The pitch-EG level's neutral word: the firmware initializes an idle
+ * voice's level to 0x4000, so the level's contribution to the frequency
+ * word is its distance from that value. */
+#define SLOPSIX_PITCH_EG_NEUTRAL_WORD 0x4000
+
 /* ------------------------------------------------------------ voice state */
 
 typedef enum {
@@ -188,6 +286,10 @@ typedef struct {
     /* Voices and the live patch block. */
     slopsix_voice voices[SLOPSIX_VOICE_COUNT];
     uint8_t voice_dump[SLOPSIX_VOICE_DUMP_SIZE];
+
+    /* The pitch envelope's global update cadence.  The firmware's toggle
+     * is global, so the cadence belongs here rather than in a voice. */
+    slopsix_pitch_eg_cadence pitch_cadence;
 } slopsix_context_state;
 
 /* The context handle is the context state; the public API uses void *. */
@@ -343,6 +445,7 @@ typedef struct {
     slopsix_operator ops[SLOPSIX_OP_COUNT];
     slopsix_op_params params[SLOPSIX_OP_COUNT];
     slopsix_eg eg[SLOPSIX_OP_COUNT];  /* the operators' envelopes */
+    slopsix_pitch_eg pitch_eg;        /* the voice's pitch envelope */
     int32_t out[SLOPSIX_OP_COUNT];  /* the operators' last samples */
     int32_t reg_delay;              /* the register's previous sample */
     int32_t fb_prev;                /* the feedback path's last sum */
@@ -604,9 +707,33 @@ int32_t slopsix_bend_log_offset(uint16_t bend14, uint8_t range, uint8_t step);
  * are global, as on the hardware. */
 int32_t slopsix_bend_context_offset(const slopsix_context_state *state);
 
-/* The frequency path. */
+/* One pitch-EG update (the firmware's PITCH_EG_PROCESS, per voice).
+ *
+ * The caller runs this on the samples where the context's cadence gate
+ * fires, once per sounding voice; the envelope itself carries no cadence,
+ * so the step and the gate cannot double-step an envelope. */
+void slopsix_pitch_eg_update(slopsix_pitch_eg *eg);
+
+/* The current level as a contribution to the log-frequency word, in the
+ * engine's 4096-per-octave units (neutral 0, about -4..+3.97 octaves). */
+int32_t slopsix_pitch_eg_offset(const slopsix_pitch_eg *eg);
+
+/* The pitch envelope's life cycle. */
+void slopsix_pitch_eg_init(slopsix_pitch_eg *eg, const uint8_t rates[4],
+    const uint8_t levels[4]);
+void slopsix_pitch_eg_note_on(slopsix_pitch_eg *eg);
+void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg);
+
+/* The cadence's own initialization: the gate reads the host rate from the
+ * cadence, so the context sets it once. */
+void slopsix_pitch_eg_cadence_init(slopsix_pitch_eg_cadence *cadence,
+    uint32_t sample_rate);
+
+/* The frequency path.  `pitch_offset` is the voice's total log-frequency
+ * offset (the pitch bend and the pitch EG), which the EGS applies to a
+ * ratio-mode operator only. */
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
-                             int32_t master_tune_q16, int32_t bend_offset);
+                             int32_t master_tune_q16, int32_t pitch_offset);
 uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate);
 
 /* The operator graph. */
