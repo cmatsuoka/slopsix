@@ -78,7 +78,8 @@ CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c \
 PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_pitch.c \
              src/slopsix_algorithm.c \
-             src/slopsix_output.c
+             src/slopsix_output.c \
+             src/slopsix_voice.c
 
 CORE_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRCS))
 PERF_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(PERF_SRCS))

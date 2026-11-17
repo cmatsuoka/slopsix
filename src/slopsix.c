@@ -55,12 +55,29 @@ void slopsix_destroy_context(slopsix_context ctx)
 void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+    unsigned i;
+    unsigned k;
 
     if (state == NULL || sample_rate == 0u) {
         return;
     }
     state->sample_rate = sample_rate;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
+
+    /* The sounding voices re-anchor: the envelopes take the host rate
+     * (a stage already in progress keeps its current timing until the
+     * next stage change), and the phase increments are recomposed from
+     * the voices' current pitch state. */
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        if (state->voices[i].state == SLOPSIX_VOICE_FREE) {
+            continue;
+        }
+        for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
+            state->engines[i].eg[k].sample_rate = sample_rate;
+        }
+        slopsix_voice_engine_update_frequency(state, &state->voices[i],
+            &state->engines[i]);
+    }
 }
 
 void slopsix_reset(slopsix_context ctx)
@@ -77,23 +94,11 @@ void slopsix_reset(slopsix_context ctx)
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
 }
 
-void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
-{
-    size_t i;
+/* The per-sample render lives in src/slopsix_voice.c (the per-sample
+ * path is compiled speed-first); this file owns the context, the patch
+ * and the note events. */
 
-    (void)ctx;
-
-    if (stereo_out == NULL) {
-        return;
-    }
-
-    /* The voice path arrives in Phase 3; until then the output is
-     * silence.  The buffer is filled even without a context, so that the
-     * render call always writes deterministic output. */
-    for (i = 0; i < frames * 2u; i++) {
-        stereo_out[i] = 0;
-    }
-}
+static void slopsix_patch_parse(slopsix_context_state *state);
 
 bool slopsix_set_voice(slopsix_context ctx, const uint8_t *voice_156)
 {
@@ -103,6 +108,7 @@ bool slopsix_set_voice(slopsix_context ctx, const uint8_t *voice_156)
         return false;
     }
     memcpy(state->voice_dump, voice_156, SLOPSIX_VOICE_DUMP_SIZE);
+    slopsix_patch_parse(state);
     return true;
 }
 
@@ -117,74 +123,340 @@ bool slopsix_get_voice(const void *ctx, uint8_t *out_voice_156)
     return true;
 }
 
-/* The release modes of the voice release helper. */
-typedef enum {
-    SLOPSIX_REL_NOTE,   /* the voices of one note */
-    SLOPSIX_REL_ALL,    /* every sounding voice */
-    SLOPSIX_REL_PEDAL   /* the voices the pedal holds */
-} slopsix_release_mode;
+/* ------------------------------------------------------- patch activation */
+
+/* Clamp a dump byte onto the 0..99 parameter range. */
+static uint8_t slopsix_param99(uint8_t value)
+{
+    return value > 99u ? 99u : value;
+}
 
 /*
- * Release voices.
+ * Patch activation: parse the dump into the live patch.
  *
- * A released voice that the sustain pedal holds stays in the ON state
- * with its key marked as lifted; the pedal's release (the pedal-up
- * case) frees the voices it holds.
+ * The firmware's own activation (PATCH_ACTIVATE and its per-operator
+ * calls) walks the six operator blocks and ships each one's values to
+ * the EGS; the keyboard level scaling's 6 x 43 curve is built once per
+ * patch into RAM at the same point (research E-05).  The engine parses
+ * the block into the patch state and builds the KLS curve here, so a
+ * note-on composes the per-voice values from a ready patch.
+ *
+ * The out-of-range dump bytes are clamped onto their parameter's range;
+ * the coarse/fine/detune fields need no clamp here because the
+ * frequency path clips them to the hardware's field widths already.
  */
-static void slopsix_release_voices(slopsix_context_state *state,
-    slopsix_release_mode mode, uint8_t note)
+static void slopsix_patch_parse(slopsix_context_state *state)
 {
-    size_t i;
+    const uint8_t *dump = state->voice_dump;
+    unsigned block;
+    unsigned i;
+
+    for (block = 0; block < SLOPSIX_OP_COUNT; block++) {
+        /* Block order: operator 6 first, operator 1 last; the engine's
+         * op index runs operator 1 first. */
+        const uint8_t *src =
+            dump + (unsigned)block * SLOPSIX_DUMP_OP_BLOCK;
+        slopsix_patch_op *op =
+            &state->patch.ops[SLOPSIX_OP_COUNT - 1u - block];
+
+        for (i = 0; i < 4u; i++) {
+            op->rates[i] = slopsix_param99(src[i]);
+            op->levels[i] = slopsix_param99(src[4u + i]);
+        }
+        op->rate_scaling = src[13] & 7u;
+        op->ams_sens = src[14] & 3u;
+        op->velocity_sens = src[15] & 7u;
+        op->out_level = slopsix_param99(src[16]);
+        op->mode = src[17] != 0u ? 1u : 0u;
+        op->coarse = src[18];
+        op->fine = src[19];
+        op->detune = src[20] > 14u ? 14u : src[20];
+
+        /* The keyboard level scaling curve; the depths and the two
+         * curve fields are the hardware's own 0..99 resp. 0..3 fields. */
+        slopsix_kls_build(op->kls, src[8], src[9], src[10],
+            src[11] & 3u, src[12] & 3u);
+    }
+
+    /* Algorithm 1..32 -> the graph index 0..31; the firmware's algorithm
+     * register is a three-bit-of-anything field, so the wrap mirrors it. */
+    {
+        unsigned value = dump[SLOPSIX_DUMP_ALGORITHM];
+
+        if (value == 0u) {
+            value = 1u;
+        }
+        state->patch.algorithm = (uint8_t)((value - 1u) & 31u);
+    }
+    state->patch.feedback = dump[SLOPSIX_DUMP_FEEDBACK] & 7u;
+    state->patch.osc_sync = dump[SLOPSIX_DUMP_OSC_SYNC] != 0u;
+
+    /* The transpose byte counts from 24 (its neutral value); the dump's
+     * 0..48 byte covers -24..+24 semitones and anything outside it is
+     * clamped. */
+    {
+        int32_t transpose = (int32_t)dump[SLOPSIX_DUMP_TRANSPOSE] - 24;
+
+        if (transpose > 24) {
+            transpose = 24;
+        }
+        state->patch.transpose = (int8_t)transpose;
+    }
+
+    /* The pitch EG's rate/level pairs.
+     * Bytes 137..143, the LFO block, are parsed with the LFO (Phase 4
+     * step 3) and stay unread until then. */
+    for (i = 0; i < 4u; i++) {
+        state->patch.peg_rates[i] =
+            slopsix_param99(dump[SLOPSIX_DUMP_PEG_RATE + i]);
+        state->patch.peg_levels[i] =
+            slopsix_param99(dump[SLOPSIX_DUMP_PEG_LEVEL + i]);
+    }
+}
+
+/* ------------------------------------------------------- voice management
+ *
+ * The voices follow the firmware's own bookkeeping (research fw
+ * VOICE_ADD / VOICE_REMOVE and their mono paths):
+ *
+ *   - Polyphonic: a note-on takes an inactive voice, oldest first when
+ *     all sixteen are in use (the library page §4's allocation rule).
+ *     A key release reaches only the voices whose key is still down; a
+ *     voice the sustain pedal holds is marked and keeps ringing until
+ *     pedal-up, exactly as the firmware's VOICE_STATUS bit does.
+ *   - Monophonic: one sounding voice, always voices[0].  The first key
+ *     after silence is a full trigger (pitch EG reset, envelopes out of
+ *     silence, velocity applied).  An overlapping key press is legato:
+ *     the voice re-pitches in place and no envelope is touched, with
+ *     the legato direction deciding which remaining key sounds when
+ *     one is released.  The sustain pedal defers only the final
+ *     release; the key events it holds keep leaving the list.
+ *
+ * In both modes a true release - the one that actually sends the key
+ * off - runs the engine's release once: the operator envelopes' key-up
+ * jump to the release stage and the pitch EG takes its release step.
+ */
+
+/* A voice's true release: the key-off event. */
+static void slopsix_release_voice(slopsix_voice *slot,
+    slopsix_voice_engine *engine)
+{
+    slot->held = false;
+    slot->state = SLOPSIX_VOICE_RELEASED;
+    slopsix_voice_engine_release(engine);
+}
+
+/* Polyphonic key release: every still-held voice of that note. */
+static void slopsix_poly_release_note(slopsix_context_state *state,
+    uint8_t note)
+{
+    unsigned i;
 
     for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
         slopsix_voice *voice = &state->voices[i];
 
-        if (voice->state != SLOPSIX_VOICE_ON) {
+        if (voice->state != SLOPSIX_VOICE_ON || !voice->held ||
+            voice->note != note) {
             continue;
         }
 
-        switch (mode) {
-        case SLOPSIX_REL_NOTE:
-            if (voice->note != note) {
-                continue;
-            }
-            break;
-        case SLOPSIX_REL_ALL:
-            break;
-        case SLOPSIX_REL_PEDAL:
-            if (voice->held) {
-                continue;
-            }
-            break;
+        if (state->sustain) {
+            /* The pedal holds the note: mark it and keep ringing. */
+            voice->held = false;
+        } else {
+            slopsix_release_voice(voice, &state->engines[i]);
+        }
+    }
+}
+
+/* Polyphonic all-notes-off / pedal-up: every matching voice releases. */
+static void slopsix_poly_release_all(slopsix_context_state *state,
+    bool only_held)
+{
+    unsigned i;
+
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        slopsix_voice *voice = &state->voices[i];
+
+        if (voice->state != SLOPSIX_VOICE_ON || voice->held != only_held) {
+            continue;
         }
 
-        voice->held = false;
-
-        if (!state->sustain) {
-            voice->state = SLOPSIX_VOICE_RELEASED;
+        /* The pedal defers a held key exactly as a single release does. */
+        if (state->sustain && only_held) {
+            voice->held = false;
+        } else {
+            slopsix_release_voice(voice, &state->engines[i]);
         }
+    }
+}
+
+/* The voice allocation: the first free voice, else the oldest one. */
+static unsigned slopsix_poly_pick(slopsix_context_state *state)
+{
+    unsigned i;
+    unsigned oldest = 0;
+
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        if (state->voices[i].state == SLOPSIX_VOICE_FREE) {
+            return i;
+        }
+    }
+
+    for (i = 1; i < SLOPSIX_VOICE_COUNT; i++) {
+        if (state->voices[i].seq < state->voices[oldest].seq) {
+            oldest = i;
+        }
+    }
+    return oldest;
+}
+
+/* Mono mode's active-key list: a key event in, a slot found. */
+static int slopsix_mono_find_key(const slopsix_context_state *state,
+    uint8_t note)
+{
+    int i;
+
+    for (i = 0; i < state->mono_count; i++) {
+        if (state->mono_keys[i] == note) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void slopsix_mono_remove_key(slopsix_context_state *state, int index)
+{
+    int i;
+
+    if (index < 0 || index >= state->mono_count) {
+        return;
+    }
+    for (i = index; i < state->mono_count - 1; i++) {
+        state->mono_keys[i] = state->mono_keys[i + 1];
+    }
+    state->mono_keys[state->mono_count - 1] = 0;
+    state->mono_count--;
+}
+
+/* Mono key-on: the full trigger, then the legato overlap. */
+static void slopsix_mono_note_on(slopsix_context_state *state,
+    uint8_t note, uint8_t velocity)
+{
+    slopsix_voice *slot = &state->voices[0];
+    int i;
+
+    if (state->mono_count >= SLOPSIX_VOICE_COUNT) {
+        /* The firmware's key-event buffer is full and takes no more. */
+        return;
+    }
+
+    /* The event joins the list whatever the legato decides. */
+    for (i = state->mono_count; i < SLOPSIX_VOICE_COUNT; i++) {
+        state->mono_keys[i] = 0;
+    }
+    state->mono_keys[state->mono_count++] = note;
+
+    if (state->mono_count == 1) {
+        /* The first key after silence: a full trigger, with the pitch
+         * EG reset and the velocity applied (VOICE_ADD_MONO's count-1
+         * path: key off, pitch EG reset, operator data, key on). */
+        slot->note = note;
+        slot->velocity = velocity;
+        slopsix_voice_engine_note_on(state, slot, &state->engines[0]);
+        state->mono_last_key = note;
+        return;
+    }
+
+    /* The legato direction: the second key sets it, later keys extend
+     * it.  A press that does not extend the direction leaves last key
+     * and sounding pitch untouched - the firmware's M_LEGATO_DIRECTION
+     * rule. */
+    if (state->mono_count == 2) {
+        state->mono_dir = (note >= state->mono_last_key) ? 1u : 0u;
+        state->mono_last_key = note;
+    } else if (state->mono_dir) {
+        if (note >= state->mono_last_key) {
+            state->mono_last_key = note;
+        }
+    } else {
+        if (note <= state->mono_last_key) {
+            state->mono_last_key = note;
+        }
+    }
+
+    /* The re-pitch: no envelope is touched and the old velocity stays. */
+    slot->note = state->mono_last_key;
+    slopsix_voice_engine_update_frequency(state, slot, &state->engines[0]);
+}
+
+/* Mono key-off: the release, or the legato fallback re-pitch. */
+static void slopsix_mono_note_off(slopsix_context_state *state, uint8_t note)
+{
+    slopsix_voice *slot = &state->voices[0];
+    int index = slopsix_mono_find_key(state, note);
+    int i;
+
+    if (index < 0) {
+        return;
+    }
+    slopsix_mono_remove_key(state, index);
+
+    if (state->mono_count == 0) {
+        if (state->sustain) {
+            /* The pedal defers the final release. */
+            slot->held = false;
+        } else {
+            slopsix_release_voice(slot, &state->engines[0]);
+        }
+        return;
+    }
+
+    /* The legato fallback: the direction picks the remaining key. */
+    {
+        uint8_t pick = state->mono_keys[0];
+
+        for (i = 1; i < state->mono_count; i++) {
+            if (state->mono_dir) {
+                if (state->mono_keys[i] > pick) {
+                    pick = state->mono_keys[i];
+                }
+            } else {
+                if (state->mono_keys[i] < pick) {
+                    pick = state->mono_keys[i];
+                }
+            }
+        }
+        state->mono_last_key = pick;
+        slot->note = pick;
+        slopsix_voice_engine_update_frequency(state, slot,
+            &state->engines[0]);
     }
 }
 
 void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-    size_t i;
 
     if (state == NULL || note > 127u) {
         return;
     }
+    if (velocity > 127u) {
+        velocity = 127u;
+    }
 
-    /* Voice allocation (oldest-note-first stealing) arrives with the
-     * voice path; for now the first free voice takes the note. */
-    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
-        if (state->voices[i].state == SLOPSIX_VOICE_FREE) {
-            state->voices[i].state = SLOPSIX_VOICE_ON;
-            state->voices[i].held = true;
-            state->voices[i].note = note;
-            state->voices[i].velocity = velocity;
-            return;
-        }
+    if (state->mono) {
+        slopsix_mono_note_on(state, note, velocity);
+        return;
+    }
+
+    {
+        unsigned index = slopsix_poly_pick(state);
+        slopsix_voice *slot = &state->voices[index];
+
+        slot->note = note;
+        slot->velocity = velocity;
+        slopsix_voice_engine_note_on(state, slot, &state->engines[index]);
     }
 }
 
@@ -196,7 +468,11 @@ void slopsix_note_off(slopsix_context ctx, uint8_t note)
         return;
     }
 
-    slopsix_release_voices(state, SLOPSIX_REL_NOTE, note);
+    if (state->mono) {
+        slopsix_mono_note_off(state, note);
+        return;
+    }
+    slopsix_poly_release_note(state, note);
 }
 
 void slopsix_all_notes_off(slopsix_context ctx)
@@ -210,7 +486,24 @@ void slopsix_all_notes_off(slopsix_context ctx)
      * Voices held by the sustain pedal keep ringing until pedal-up; this is
      * deliberately weaker than an all-sound-off, which would bypass the
      * pedal state machine entirely. */
-    slopsix_release_voices(state, SLOPSIX_REL_ALL, 0);
+    if (state->mono) {
+        int i;
+
+        if (state->mono_count == 0) {
+            return;
+        }
+        for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+            state->mono_keys[i] = 0;
+        }
+        state->mono_count = 0;
+        if (state->sustain) {
+            state->voices[0].held = false;
+        } else {
+            slopsix_release_voice(&state->voices[0], &state->engines[0]);
+        }
+        return;
+    }
+    slopsix_poly_release_all(state, true);
 }
 
 void slopsix_set_sustain(slopsix_context ctx, bool on)
@@ -222,7 +515,9 @@ void slopsix_set_sustain(slopsix_context ctx, bool on)
     }
     state->sustain = on;
     if (!on) {
-        slopsix_release_voices(state, SLOPSIX_REL_PEDAL, 0);
+        /* Pedal-up releases every voice the pedal was holding; the keys
+         * still down keep sounding. */
+        slopsix_poly_release_all(state, false);
     }
 }
 
@@ -234,6 +529,14 @@ void slopsix_set_mono_mode(slopsix_context ctx, bool mono)
         return;
     }
     state->mono = mono;
+    if (mono) {
+        /* The mode switch clears the key-event bookkeeping; the voices
+         * already sounding keep their envelopes, as the EGS slots do. */
+        memset(state->mono_keys, 0, sizeof(state->mono_keys));
+        state->mono_count = 0;
+        state->mono_dir = 0u;
+        state->mono_last_key = 0u;
+    }
 }
 
 void slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
@@ -244,6 +547,7 @@ void slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
         return;
     }
     state->pitch_bend = bend;
+    slopsix_refresh_pitch(state);
 }
 
 void slopsix_set_pitch_bend_range(slopsix_context ctx,
@@ -258,6 +562,7 @@ void slopsix_set_pitch_bend_range(slopsix_context ctx,
     /* The hardware validates both to 0..12 and clears larger values. */
     state->bend_range = range_semitones > 12u ? 0u : range_semitones;
     state->bend_step = step > 12u ? 0u : step;
+    slopsix_refresh_pitch(state);
 }
 
 void slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
@@ -268,6 +573,7 @@ void slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
         return;
     }
     state->master_tune_q16 = cents_q16;
+    slopsix_refresh_pitch(state);
 }
 
 void slopsix_set_ctrl_value(slopsix_context ctx,

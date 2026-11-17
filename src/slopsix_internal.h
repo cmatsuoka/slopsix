@@ -54,6 +54,10 @@
 /* One unit of the Q16 public scales is 65536. */
 #define SLOPSIX_Q16_ONE 65536
 
+/* The keyboard level scaling: 43 key-code groups of three semitones
+ * each, covering the whole keyboard (research E-05). */
+#define SLOPSIX_KLS_GROUPS 43
+
 /* ------------------------------------------------------- generated tables */
 
 /* The generated tables (shared const data, plan decision D-4).  They are
@@ -290,43 +294,91 @@ typedef struct {
     bool held;          /* key still down; false while pedal-sustained */
     uint8_t note;       /* 0..127 */
     uint8_t velocity;   /* 0..127 */
+    int8_t transpose;   /* the patch transpose keyed with the note */
+    uint32_t seq;       /* the voice allocation's sequence counter; the
+                         * stealing picks the lowest (the oldest note-on) */
 } slopsix_voice;
 
-/* --------------------------------------------------------- context state */
+/* --------------------------------------------------------- the live patch */
 
+/* The dump's byte layout: the firmware's own patch buffer (research V-01,
+ * offsets firmware-confirmed against PATCH_GET_PTR_TO_SELECTED_OP and the
+ * PATCH_* symbols of the listing).  Six operator blocks of 21 bytes come
+ * first and the global section follows at 126; bytes 145..154 are the
+ * patch name (a host concern) and byte 155 is the serialiser's per-op
+ * enable extension, which the engine takes as-is and reads none of (op
+ * on/off is not a dump parameter here - see the library page §3).
+ *
+ * The operator blocks are serialised operator 6 first: block 0 holds
+ * operator 6 and block 5 holds operator 1.  That mapping is the one both
+ * the firmware's own activation loop (selected operator 0..5 straight
+ * into the EGS's operator registers) and the algorithm walk agree with,
+ * and it is what makes a sounding INIT voice - whose only non-zero
+ * output level sits in its last block - come out of algorithm 1's
+ * operator 1. */
+#define SLOPSIX_DUMP_OP_BLOCK 21
+#define SLOPSIX_DUMP_PEG_RATE 126
+#define SLOPSIX_DUMP_PEG_LEVEL 130
+#define SLOPSIX_DUMP_ALGORITHM 134
+#define SLOPSIX_DUMP_FEEDBACK 135
+#define SLOPSIX_DUMP_OSC_SYNC 136
+/* Bytes 137..143 are the LFO block (speed, delay, depths, sync, waveform,
+ * pitch-mod sensitivity); they are parsed with the LFO (Phase 4 step 3).
+ * Byte 144 is the key transpose, as its value plus 24. */
+#define SLOPSIX_DUMP_TRANSPOSE 144
+
+/* One operator's parsed patch data.  The values keep the hardware's own
+ * ranges; out-of-contract dump bytes are clamped here, once, so the
+ * render and the note-on path never see one. */
 typedef struct {
-    uint32_t sample_rate;
+    uint8_t rates[4];       /* the four stage rates, 0..99 */
+    uint8_t levels[4];      /* the four stage levels, 0..99 */
+    uint8_t rate_scaling;   /* the hardware's 3-bit field, 0..7 */
+    uint8_t velocity_sens;  /* the hardware's 3-bit field, 0..7 */
+    uint8_t ams_sens;       /* the hardware's 2-bit field, 0..3 */
+    uint8_t out_level;      /* the operator output level, 0..99 */
+    uint8_t mode;           /* 0 = ratio, 1 = fixed frequency */
+    uint8_t coarse;         /* 0..31 */
+    uint8_t fine;           /* 0..99 */
+    uint8_t detune;         /* 0..14 (the hardware's 4-bit signed value) */
+    int8_t kls[SLOPSIX_KLS_GROUPS];
+    /* the keyboard level scaling's offsets, built at patch-load time
+     * exactly as the firmware builds its 6 x 43 RAM curve
+     * (research E-05) */
+} slopsix_patch_op;
 
-    /* Pitch. */
-    uint16_t pitch_bend;        /* 14-bit, 0x2000 centred */
-    uint8_t bend_range;         /* semitones, 0..12 */
-    uint8_t bend_step;          /* 0..15 */
-    int32_t master_tune_q16;    /* cents, 0 == shipped tuning */
+/* The live, parsed patch.  This is the engine's patch-activation state:
+ * a patch load re-parses it, and a note-on composes the per-voice values
+ * from it.  Sounding voices keep the values they were keyed with, as the
+ * chips' registers do. */
+typedef struct {
+    uint8_t algorithm;      /* the graph index, 0..31 */
+    uint8_t feedback;       /* the OPS's 3-bit field, 0..7 */
+    uint8_t osc_sync;       /* reset the operator phases at key-on */
+    int8_t transpose;       /* semitones, -24..+24; the dump byte minus 24 */
+    slopsix_patch_op ops[SLOPSIX_OP_COUNT];  /* index 0 == operator 1 */
+    uint8_t peg_rates[4];   /* the pitch EG's stage rates, 0..99 */
+    uint8_t peg_levels[4];  /* the pitch EG's stage levels, 0..99 */
+} slopsix_patch_state;
 
-    /* Mix. */
-    int32_t pan_q16;            /* 32768 == centre; SLOPSIX_EXTRAS only */
-    unsigned master_volume;     /* 0..7 */
+/* The note the firmware hands to its note-table conversion: the dump's
+ * transpose byte counts from 24, so its neutral value is 24 and the
+ * composed note is the key plus the transpose.  The firmware clamps the
+ * composed note at 127; the engine clamps it at zero too (the note
+ * table's safe default, T[0] = 0), where the firmware's own 8-bit
+ * arithmetic would wrap past the table. */
+static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
+{
+    int32_t composed = (int32_t)note + (int32_t)transpose;
 
-    /* Voice management. */
-    bool sustain;
-    bool mono;
-
-    /* Controllers. */
-    uint8_t ctrl_value[SLOPSIX_CTRL_SRC_COUNT];  /* 0..127 */
-    uint8_t ctrl_range[SLOPSIX_CTRL_SRC_COUNT];  /* 0..99 */
-    unsigned ctrl_assign[SLOPSIX_CTRL_SRC_COUNT];
-
-    /* Voices and the live patch block. */
-    slopsix_voice voices[SLOPSIX_VOICE_COUNT];
-    uint8_t voice_dump[SLOPSIX_VOICE_DUMP_SIZE];
-
-    /* The pitch envelope's global update cadence.  The firmware's toggle
-     * is global, so the cadence belongs here rather than in a voice. */
-    slopsix_pitch_eg_cadence pitch_cadence;
-} slopsix_context_state;
-
-/* The context handle is the context state; the public API uses void *. */
-#define SLOPSIX_CONTEXT(ctx) ((slopsix_context_state *)(ctx))
+    if (composed > 127) {
+        composed = 127;
+    }
+    if (composed < 0) {
+        composed = 0;
+    }
+    return composed;
+}
 
 /* -------------------------------------------- envelope and level (Phase 3) */
 
@@ -364,10 +416,6 @@ typedef struct {
 #define SLOPSIX_EG_MIN_Q8 16
 #define SLOPSIX_EG_JUMP_Q8 1716
 #define SLOPSIX_EG_MAX_Q8 4352
-
-/* The keyboard level scaling: 43 key-code groups of three semitones
- * each, covering the whole keyboard (research E-05). */
-#define SLOPSIX_KLS_GROUPS 43
 
 /* The envelope's block cadence: the reference model advances the
  * envelope once per 64-sample block and interpolates the gain across
@@ -488,6 +536,58 @@ typedef struct {
     int32_t ams_amount_q8;          /* the LFO's amplitude modulation
                                      * amount (Q8); Phase 4 fills it */
 } slopsix_voice_engine;
+
+/* --------------------------------------------------------- context state */
+
+typedef struct {
+    uint32_t sample_rate;
+
+    /* Pitch. */
+    uint16_t pitch_bend;        /* 14-bit, 0x2000 centred */
+    uint8_t bend_range;         /* semitones, 0..12 */
+    uint8_t bend_step;          /* 0..15 */
+    int32_t master_tune_q16;    /* cents, 0 == shipped tuning */
+
+    /* Mix. */
+    int32_t pan_q16;            /* 32768 == centre; SLOPSIX_EXTRAS only */
+    unsigned master_volume;     /* 0..7 */
+
+    /* Voice management. */
+    bool sustain;
+    bool mono;
+
+    /* Mono mode's bookkeeping, following the firmware's own: the active
+     * keys are a list of up to sixteen key events (duplicates included,
+     * as the firmware's 16-entry buffer holds them), the legato
+     * direction selects which remaining key the voice returns to, and
+     * M_NOTE_KEY_LAST is the key the next gesture compares against.
+     * The sounding voice is always voices[0], keyed and re-pitched in
+     * place (research fw VOICE_ADD_MONO / VOICE_REMOVE_MONO). */
+    uint8_t mono_keys[SLOPSIX_VOICE_COUNT]; /* the active keys, [0, mono_count) */
+    int mono_count;
+    uint8_t mono_dir;    /* the legato direction: 1 = up, 0 = down */
+    uint8_t mono_last_key;
+
+    /* Controllers. */
+    uint8_t ctrl_value[SLOPSIX_CTRL_SRC_COUNT];  /* 0..127 */
+    uint8_t ctrl_range[SLOPSIX_CTRL_SRC_COUNT];  /* 0..99 */
+    unsigned ctrl_assign[SLOPSIX_CTRL_SRC_COUNT];
+
+    /* Voices and the live patch block.  engines[i] renders voices[i];
+     * the two arrays are index-paired. */
+    slopsix_voice voices[SLOPSIX_VOICE_COUNT];
+    slopsix_voice_engine engines[SLOPSIX_VOICE_COUNT];
+    slopsix_patch_state patch;
+    uint8_t voice_dump[SLOPSIX_VOICE_DUMP_SIZE];
+    uint32_t voice_seq;  /* the allocation's sequence counter */
+
+    /* The pitch envelope's global update cadence.  The firmware's toggle
+     * is global, so the cadence belongs here rather than in a voice. */
+    slopsix_pitch_eg_cadence pitch_cadence;
+} slopsix_context_state;
+
+/* The context handle is the context state; the public API uses void *. */
+#define SLOPSIX_CONTEXT(ctx) ((slopsix_context_state *)(ctx))
 
 /* ------------------------------------------------------ internal API */
 
@@ -871,6 +971,21 @@ uint8_t slopsix_algorithm_feedback_operator(unsigned index);
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
                                   int32_t *voice_out);
+
+/* The voice path (Phase 5).  The note-on fills one voice's engine from
+ * the live patch, keying it as the firmware's VOICE_ADD does (envelopes
+ * out of silence, the pitch EG reset to its initial level, the phases
+ * reset when the patch's OSC KEY SYNC bit is set); the release does the
+ * VOICE_REMOVE side; the frequency rewrite composes the effective note,
+ * the master tune and the voice's current pitch offset into every
+ * operator's phase increment, as the firmware's PORTA_PROCESS does at
+ * its every-second-tick cadence. */
+void slopsix_voice_engine_note_on(slopsix_context_state *state,
+    slopsix_voice *slot, slopsix_voice_engine *engine);
+void slopsix_voice_engine_release(slopsix_voice_engine *engine);
+void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
+    const slopsix_voice *slot, slopsix_voice_engine *engine);
+void slopsix_refresh_pitch(slopsix_context_state *state);
 
 /* ------------------------------------------------- the envelope (Phase 3) */
 

@@ -9,7 +9,8 @@
  *   init     context creation, reset and destruction
  *   silence  the render path writes silence into a sentinel-filled buffer
  *   tables   the generated tables match their recipes (canary entries)
- *   voices      voice state transitions and sustain pedal logic
+ *   voices      voice state transitions, sustain pedal logic and stealing
+ *   monovoice   mono mode: last-key priority, legato, the key-event list
  *   operator    the operator core against the closed sine recipe
  *   freq        the frequency path: words, grid and pitch
  *   algorithms  the 32 algorithms' decoded connections
@@ -18,6 +19,7 @@
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
  *   output      the output stages: compander, DAC step, pan law and master
  *   extras      the pan is an extra: available or a no-op by build
+ *   render      the live voice path: patch parse, note render and release
  *
  * The harness is a host tool, not the library: it may use whatever it
  * likes, but it links the public library plus the internal declarations
@@ -213,6 +215,253 @@ static void stage_voices(void)
     slopsix_note_off(ctx, 60);
     check(count_voices(state, 60, SLOPSIX_VOICE_ON) == 0,
           "note_off without sustain releases the held voice");
+
+    slopsix_destroy_context(ctx);
+
+    /* A second note-off of a pedal-held note defers silently: the
+     * firmware's voice entries lose their active bit at the first
+     * release, so the second one finds nothing to release. */
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+
+    slopsix_note_on(ctx, 72, 100);
+    slopsix_set_sustain(ctx, true);
+    slopsix_note_off(ctx, 72);
+    check(count_voices(state, 72, SLOPSIX_VOICE_ON) == 1,
+          "the pedal holds the released voice");
+    slopsix_note_off(ctx, 72);
+    check(count_voices(state, 72, SLOPSIX_VOICE_ON) == 1,
+          "a second note-off under the pedal releases nothing");
+    slopsix_set_sustain(ctx, false);
+    check(count_voices(state, 72, SLOPSIX_VOICE_RELEASED) == 1,
+          "pedal-up releases the held voice");
+
+    /* All-notes-off acts as if every key were released: the pedal keeps
+     * the voice, without the pedal it releases. */
+    slopsix_note_on(ctx, 48, 100);
+    slopsix_note_on(ctx, 50, 100);
+    slopsix_set_sustain(ctx, true);
+    slopsix_note_off(ctx, 50);
+    slopsix_all_notes_off(ctx);
+    check(count_voices(state, 48, SLOPSIX_VOICE_ON) == 1 &&
+          count_voices(state, 50, SLOPSIX_VOICE_ON) == 1,
+          "all-notes-off under the pedal keeps both voices");
+    check(count_voices(state, 48, SLOPSIX_VOICE_RELEASED) == 0,
+          "all-notes-off does not release pedal-held voices");
+    slopsix_set_sustain(ctx, false);
+    check(count_voices(state, 48, SLOPSIX_VOICE_RELEASED) == 1,
+          "pedal-up after all-notes-off releases the voice");
+
+    /* Voice stealing: oldest-first, both over key-holding voices and
+     * over release tails.  A fresh context keeps the count exact. */
+    {
+        slopsix_context steal_ctx;
+        slopsix_context_state *steal_state;
+        unsigned n;
+
+        steal_ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+        if (steal_ctx == NULL) {
+            check(0, "create_context returns a context");
+            return;
+        }
+        steal_state = SLOPSIX_CONTEXT(steal_ctx);
+
+        for (n = 0; n < SLOPSIX_VOICE_COUNT; n++) {
+            slopsix_note_on(steal_ctx, (uint8_t)(40u + n), 100);
+        }
+        check(count_voices(steal_state, 40, SLOPSIX_VOICE_ON) == 1 &&
+              count_voices(steal_state, 55, SLOPSIX_VOICE_ON) == 1,
+              "sixteen notes fill the sixteen voices");
+        slopsix_note_on(steal_ctx, 70, 100);
+        check(steal_state->voices[0].note == 70 &&
+              steal_state->voices[0].state == SLOPSIX_VOICE_ON,
+              "the seventeenth note steals the oldest voice");
+        check(count_voices(steal_state, 41, SLOPSIX_VOICE_ON) == 1,
+              "the stolen voice released nothing else");
+
+        for (n = 0; n < SLOPSIX_VOICE_COUNT; n++) {
+            slopsix_note_off(steal_ctx, (uint8_t)(40u + n));
+        }
+        slopsix_note_off(steal_ctx, 70);
+        check(count_voices(steal_state, 41, SLOPSIX_VOICE_RELEASED) == 1,
+              "the release tails ring");
+
+        slopsix_note_on(steal_ctx, 72, 100);
+        check(steal_state->voices[1].note == 72 &&
+              steal_state->voices[1].state == SLOPSIX_VOICE_ON,
+              "a new note takes an old release tail");
+
+        slopsix_destroy_context(steal_ctx);
+    }
+
+    slopsix_destroy_context(ctx);
+}
+
+/* --------------------------------------------------------- mono mode
+ *
+ * The firmware's monophonic bookkeeping: a list of up to sixteen key
+ * events, one sounding voice (voice 0), a legato direction, and the
+ * last key the next gesture compares against.  The stage walks the
+ * gestures of the firmware's VOICE_ADD_MONO / VOICE_REMOVE_MONO and
+ * checks the sounding note and the untouched envelopes between them. */
+static void stage_monovoice(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    int32_t level_before;
+    uint8_t stage_before;
+    int i;
+
+    printf("stage monovoice\n");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_mono_mode(ctx, true);
+
+    /* The first key after silence is a full trigger on voice 0. */
+    slopsix_note_on(ctx, 60, 100);
+    check(state->voices[0].state == SLOPSIX_VOICE_ON &&
+          state->voices[0].held &&
+          state->voices[0].note == 60 &&
+          state->voices[0].velocity == 100,
+          "the first mono key full-triggers voice 0");
+    check(state->engines[0].eg[0].level == 0,
+          "the full trigger starts the envelope out of silence");
+    check(state->engines[0].pitch_eg.step == 0u,
+          "the full trigger resets the pitch EG");
+
+    /* Note 0 is a valid key: it must not match a free list slot. */
+    slopsix_note_off(ctx, 0);
+    check(state->mono_count == 1 &&
+          state->voices[0].note == 60 &&
+          state->voices[0].state == SLOPSIX_VOICE_ON,
+          "key-off 0 leaves a held key and the free slots alone");
+
+    /* The transpose is keyed with the note; a later patch change does
+     * not re-pitch the sounding voice. */
+    {
+        uint32_t inc = state->engines[0].ops[0].increment;
+
+        state->patch.transpose = 12;
+        slopsix_refresh_pitch(state);
+        check(state->engines[0].ops[0].increment == inc,
+              "a sounding voice keeps its keyed transpose");
+        state->patch.transpose = 0;
+        slopsix_refresh_pitch(state);
+    }
+
+    /* Walk the envelope by hand so it sits mid-flight; the legato check
+     * then means something (a retrigger would reset the level). */
+    for (i = 0; i < 20; i++) {
+        slopsix_eg_step(&state->engines[0].eg[0]);
+    }
+    level_before = state->engines[0].eg[0].level;
+    stage_before = state->engines[0].eg[0].stage;
+
+    /* The second key sets the legato direction and re-pitches. */
+    slopsix_note_on(ctx, 64, 100);
+    check(state->voices[0].note == 64,
+          "the second key re-pitches the sounding voice");
+    check(state->engines[0].eg[0].level == level_before &&
+          state->engines[0].eg[0].stage == stage_before,
+          "the legato re-pitch does not retrigger the envelope");
+    check(state->voices[0].velocity == 100,
+          "the legato re-pitch keeps the first key's velocity");
+
+    /* The direction extends upward: every higher key sounds. */
+    slopsix_note_on(ctx, 65, 100);
+    slopsix_note_on(ctx, 67, 100);
+    check(state->voices[0].note == 67, "an extending key sounds");
+    check(state->mono_count == 4, "every key event joins the list");
+
+    /* A non-extending key does not move the sounding pitch. */
+    slopsix_note_on(ctx, 63, 50);
+    check(state->voices[0].note == 67 &&
+          state->voices[0].velocity == 100,
+          "a non-extending key does not sound");
+
+    /* Key-off falls back along the legato direction: the highest of
+     * the remaining keys, here. */
+    slopsix_note_off(ctx, 67);
+    check(state->voices[0].note == 65, "key-off falls back to the highest");
+    slopsix_note_off(ctx, 65);
+    check(state->voices[0].note == 64, "the fallback walks down");
+    slopsix_note_off(ctx, 64);
+    check(state->voices[0].note == 63, "the fallback walks down");
+    slopsix_note_off(ctx, 63);
+    check(state->voices[0].note == 60, "the fallback walks down");
+    check(state->engines[0].eg[0].stage == stage_before,
+          "the fallbacks never retrigger the envelope");
+
+    /* The last key off sounds the release. */
+    slopsix_note_off(ctx, 60);
+    check(state->voices[0].state == SLOPSIX_VOICE_RELEASED &&
+          state->mono_count == 0,
+          "the last key off releases the voice");
+
+    /* Key-off 0 with an empty list is ignored, not a free-slot hit. */
+    slopsix_note_off(ctx, 0);
+    check(state->mono_count == 0 &&
+          state->voices[0].state == SLOPSIX_VOICE_RELEASED,
+          "key-off 0 with an empty list is ignored");
+
+    /* A release tail: the next first key re-triggers over it. */
+    slopsix_note_on(ctx, 60, 100);
+    check(state->engines[0].eg[0].level == 0,
+          "a retrigger after silence starts out of silence");
+
+    /* The sustain pedal defers only the final release; the intermediate
+     * keys leave the list all the same, and the fallback keeps walking. */
+    slopsix_note_on(ctx, 64, 100);
+    slopsix_set_sustain(ctx, true);
+    slopsix_note_off(ctx, 64);
+    check(state->voices[0].note == 60,
+          "the pedal-down key-off falls back to the held key");
+    slopsix_note_off(ctx, 60);
+    check(state->voices[0].state == SLOPSIX_VOICE_ON &&
+          !state->voices[0].held,
+          "the pedal defers the final release");
+    slopsix_set_sustain(ctx, false);
+    check(state->voices[0].state == SLOPSIX_VOICE_RELEASED,
+          "pedal-up releases the deferred voice");
+
+    /* The key-event list caps at sixteen events.  An ascending run
+     * sounds the highest key so far. */
+    slopsix_note_on(ctx, 40, 100);
+    for (i = 0; i < 15; i++) {
+        slopsix_note_on(ctx, (uint8_t)(41u + i), 100);
+    }
+    check(state->mono_count == 16 && state->voices[0].note == 55,
+          "sixteen key events fill the list, the run sounds its top");
+    slopsix_note_on(ctx, 80, 100);
+    check(state->mono_count == 16 && state->voices[0].note == 55,
+          "a key past the sixteenth event is ignored");
+    slopsix_set_sustain(ctx, true);
+    for (i = 15; i >= 0; i--) {
+        slopsix_note_off(ctx, (uint8_t)(40u + i));
+    }
+    check(state->voices[0].note == 40 && !state->voices[0].held,
+          "the pedal holds the last release");
+    slopsix_set_sustain(ctx, false);
+    check(state->voices[0].state == SLOPSIX_VOICE_RELEASED,
+          "pedal-up releases it");
+
+    /* All-notes-off in mono: the list clears, the voice releases
+     * (or defers under the pedal). */
+    slopsix_note_on(ctx, 55, 100);
+    slopsix_note_on(ctx, 57, 100);
+    slopsix_all_notes_off(ctx);
+    check(state->mono_count == 0 &&
+          state->voices[0].state == SLOPSIX_VOICE_RELEASED,
+          "all-notes-off clears the mono list and releases");
 
     slopsix_destroy_context(ctx);
 }
@@ -1853,6 +2102,283 @@ static void stage_output(void)
     }
 }
 
+/* --------------------------------------------------- Phase 5: the render
+ *
+ * The live voice path's checks: a parsed patch, a keyed note, the pitch
+ * it renders at, the level it holds, the release it falls into, the
+ * determinism of the whole chain, and a sixteen-voice soak.  The stage
+ * writes its takes into build/ as WAV files when it can, so a session
+ * can listen to them.
+ *
+ * The reference patch is the engine's own take on a minimal voice:
+ * algorithm 1, all operators ratio 1, only operator 1 (dump block 5)
+ * sounding, fast envelopes, L4 = 0 for a clean release.  With OSC KEY
+ * SYNC on the phases reset at key-on, so the take is deterministic from
+ * the phase up. */
+
+#define RENDER_FRAMES SLOPSIX_DEFAULT_SAMPLE_RATE
+
+/* The reference patch's name field width (the dump's name is ten bytes;
+ * the helper writes the first eight and leaves the padding zeroed). */
+#define RENDER_NAME_LEN 8
+
+static int16_t render_buf_a[RENDER_FRAMES * 2];
+static int16_t render_buf_b[RENDER_FRAMES * 2];
+
+static void write_wav(const char *path, const int16_t *stereo, size_t frames)
+{
+    uint8_t header[44];
+    uint32_t data_len = (uint32_t)(frames * 2u * 2u);
+    uint32_t riff_len = data_len + 36u;
+    uint32_t rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
+    uint32_t byte_rate = rate * 4u;
+    FILE *file;
+
+    header[0] = 'R'; header[1] = 'I'; header[2] = 'F'; header[3] = 'F';
+    header[4] = (uint8_t)riff_len; header[5] = (uint8_t)(riff_len >> 8);
+    header[6] = (uint8_t)(riff_len >> 16); header[7] = (uint8_t)(riff_len >> 24);
+    header[8] = 'W'; header[9] = 'A'; header[10] = 'V'; header[11] = 'E';
+    header[12] = 'f'; header[13] = 'm'; header[14] = 't'; header[15] = ' ';
+    header[16] = 16u; header[17] = 0u; header[18] = 0u; header[19] = 0u;
+    header[20] = 1u; header[21] = 0u;          /* PCM */
+    header[22] = 2u; header[23] = 0u;          /* stereo */
+    header[24] = (uint8_t)rate; header[25] = (uint8_t)(rate >> 8);
+    header[26] = (uint8_t)(rate >> 16); header[27] = (uint8_t)(rate >> 24);
+    header[28] = (uint8_t)byte_rate; header[29] = (uint8_t)(byte_rate >> 8);
+    header[30] = (uint8_t)(byte_rate >> 16); header[31] = (uint8_t)(byte_rate >> 24);
+    header[32] = 4u; header[33] = 0u;          /* block align */
+    header[34] = 16u; header[35] = 0u;         /* bits per sample */
+    header[36] = 'd'; header[37] = 'a'; header[38] = 't'; header[39] = 'a';
+    header[40] = (uint8_t)data_len; header[41] = (uint8_t)(data_len >> 8);
+    header[42] = (uint8_t)(data_len >> 16); header[43] = (uint8_t)(data_len >> 24);
+
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return;
+    }
+    if (fwrite(header, 1, sizeof(header), file) != sizeof(header) ||
+        fwrite(stereo, 2, frames * 2u, file) != frames * 2u) {
+        /* A check run without a writable build/ still checks. */
+    }
+    fclose(file);
+}
+
+/* The mean square of the left channel over one window. */
+static int64_t render_ms(const int16_t *stereo, size_t start, size_t len)
+{
+    int64_t sum = 0;
+    size_t i;
+
+    for (i = start; i < start + len; i++) {
+        int32_t s = stereo[i * 2u];
+
+        sum += (int64_t)s * s;
+    }
+    return sum / (int64_t)len;
+}
+
+static int32_t render_peak(const int16_t *stereo, size_t len)
+{
+    int32_t peak = 0;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        int32_t s = stereo[i * 2u];
+
+        if (s < 0) {
+            s = -s;
+        }
+        if (s > peak) {
+            peak = s;
+        }
+    }
+    return peak;
+}
+
+static int render_zerocross(const int16_t *stereo, size_t start, size_t len)
+{
+    int count = 0;
+    size_t i;
+
+    for (i = start + 1u; i < start + len; i++) {
+        if ((stereo[(i - 1u) * 2u] < 0) != (stereo[i * 2u] < 0)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void make_init_patch(uint8_t *dump)
+{
+    static const char name[RENDER_NAME_LEN + 1u] = "RENDRTST";
+    unsigned block;
+
+    memset(dump, 0, SLOPSIX_VOICE_DUMP_SIZE);
+
+    for (block = 0; block < 6u; block++) {
+        uint8_t *op = dump + block * SLOPSIX_DUMP_OP_BLOCK;
+
+        op[0] = 99u; op[1] = 99u; op[2] = 99u; op[3] = 99u;   /* rates */
+        op[4] = 99u; op[5] = 99u; op[6] = 99u; op[7] = 0u;    /* levels */
+        /* Block 5 is operator 1, the algorithm's own output operator:
+         * only it sounds. */
+        op[16] = (block == 5u) ? 99u : 0u;
+        op[18] = 1u;                                          /* coarse */
+        op[20] = 7u;                                          /* detune */
+    }
+
+    dump[126] = 99u; dump[127] = 99u; dump[128] = 99u; dump[129] = 99u;
+    dump[130] = 50u; dump[131] = 50u; dump[132] = 50u; dump[133] = 50u;
+    dump[134] = 1u;                       /* algorithm 1 */
+    dump[136] = 1u;                       /* OSC KEY SYNC on */
+    dump[144] = 24u;                      /* transpose neutral */
+    memcpy(dump + SLOPSIX_DUMP_TRANSPOSE + 1u, name, RENDER_NAME_LEN);
+}
+
+static void stage_render(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+    uint8_t dump2[SLOPSIX_VOICE_DUMP_SIZE];
+    size_t i;
+    int64_t ms_first = 0;
+    int32_t peak;
+    int steady = 1;
+    int crossings;
+
+    printf("stage render\n");
+
+    /* The dump round-trips before it is parsed, so the checked take is
+     * the parser's own reading. */
+    make_init_patch(dump);
+    check(memcmp(dump + SLOPSIX_DUMP_TRANSPOSE + 1u, "RENDRTST", 8) == 0,
+          "the reference patch's name sits in the name field");
+
+    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+
+    check(slopsix_set_voice(ctx, dump) &&
+          slopsix_get_voice(ctx, dump2) &&
+          memcmp(dump, dump2, sizeof(dump)) == 0,
+          "the voice dump round-trips");
+    check(state->patch.algorithm == 0u && state->patch.feedback == 0u &&
+          state->patch.transpose == 0,
+          "the parser reads the reference patch's globals");
+
+    /* One full second of A4: the note keys, the envelope attack, the
+     * sustain, then the release. */
+    memset(render_buf_a, 0x77, sizeof(render_buf_a));
+    slopsix_note_on(ctx, 69, 100);
+    slopsix_process(ctx, render_buf_a, RENDER_FRAMES);
+
+    /* One full-scale-ish carrier: the velocity route's own fixed
+     * attenuation and the algorithm's carrier-count compensation sit
+     * between the patch's level 99 and the compander's word, so the
+     * peak lands at half the single-voice window's top. */
+    peak = render_peak(render_buf_a, RENDER_FRAMES);
+    check(peak >= 3500 && peak <= 16376,
+          "one voice's peak sits in the compander's window");
+    check(render_ms(render_buf_a, 9000, 7000) > (int64_t)2 * 1000 * 1000,
+          "the sustained note renders an audible level");
+
+    /* The sustain is steady: five windows agree within three percent. */
+    ms_first = render_ms(render_buf_a, 9000, 7000);
+    for (i = 1; i < 5u; i++) {
+        int64_t ms = render_ms(render_buf_a, 9000u + 7000u * i, 7000);
+        int64_t hi = ms_first * 103;
+        int64_t lo = ms_first * 97;
+
+        if (ms * 100 < lo || ms * 100 > hi) {
+            steady = 0;
+        }
+    }
+    check(steady, "the sustain holds one level");
+    crossings = render_zerocross(render_buf_a, 9800, 39200);
+    check(crossings >= 686 && crossings <= 722,
+          "the note renders at 440 Hz (the zero crossings)");
+
+    {
+        int64_t sum = 0;
+
+        for (i = 9800u; i < 49000u; i++) {
+            sum += render_buf_a[i * 2u];
+        }
+        sum /= (int64_t)(49000u - 9800u);
+        if (sum < 0) {
+            sum = -sum;
+        }
+        check(sum < 100, "the rendered note carries no DC");
+    }
+
+    {
+        int both = 1;
+
+        for (i = 0; i < RENDER_FRAMES; i++) {
+            if (render_buf_a[i * 2u] != render_buf_a[i * 2u + 1u]) {
+                both = 0;
+            }
+        }
+        check(both, "the mono output lands in both channels");
+    }
+
+    write_wav("build/render_sine.wav", render_buf_a, RENDER_FRAMES);
+
+    /* The release: a half second after key-off the voice is silent. */
+    slopsix_note_off(ctx, 69);
+    memset(render_buf_b, 0x77, sizeof(render_buf_b));
+    slopsix_process(ctx, render_buf_b, RENDER_FRAMES / 2);
+    check(render_ms(render_buf_b, RENDER_FRAMES / 2 - 1000, 1000) == 0,
+          "the release ends in silence");
+    write_wav("build/render_release.wav", render_buf_b, RENDER_FRAMES / 2);
+
+    /* Determinism across a reset: the same calls render the same take. */
+    slopsix_reset(ctx);
+    check(slopsix_set_voice(ctx, dump), "the reset context takes the patch");
+    slopsix_note_on(ctx, 69, 100);
+    slopsix_process(ctx, render_buf_b, RENDER_FRAMES);
+    check(memcmp(render_buf_a, render_buf_b, sizeof(render_buf_a)) == 0,
+          "the reset context renders the identical take");
+
+    /* The sixteen-voice soak: sixteen notes of one patch, then a
+     * seventeenth that steals the oldest; the whole take is
+     * deterministic across a reset. */
+    slopsix_reset(ctx);
+    slopsix_set_voice(ctx, dump);
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        slopsix_note_on(ctx, (uint8_t)(48u + i), 100);
+    }
+    check(state->voices[SLOPSIX_VOICE_COUNT - 1u].note == 63u &&
+          state->voices[SLOPSIX_VOICE_COUNT - 1u].state ==
+              SLOPSIX_VOICE_ON,
+          "the sixteen voices hold sixteen notes");
+
+    slopsix_process(ctx, render_buf_a, 8000);
+    peak = render_peak(render_buf_a, 8000);
+    check(peak <= 32752, "the chord saturates inside the rails, not past");
+    write_wav("build/render_chord.wav", render_buf_a, 8000);
+
+    slopsix_note_on(ctx, 64, 100);
+    check(state->voices[0].note == 64u &&
+          state->voices[0].state == SLOPSIX_VOICE_ON,
+          "the chord's seventeenth note steals the oldest voice");
+
+    slopsix_reset(ctx);
+    slopsix_set_voice(ctx, dump);
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        slopsix_note_on(ctx, (uint8_t)(48u + i), 100);
+    }
+    slopsix_process(ctx, render_buf_b, 8000);
+    check(memcmp(render_buf_a, render_buf_b, 8000 * 2u * 2u) == 0,
+          "the chord render is deterministic across a reset");
+
+    slopsix_destroy_context(ctx);
+}
+
 /* --------------------------------------------------- extras: the pan */
 
 static void stage_extras(void)
@@ -1918,6 +2444,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--voices") == 0) {
             stage_voices();
             ran = 1;
+        } else if (strcmp(argv[i], "--monovoice") == 0) {
+            stage_monovoice();
+            ran = 1;
         } else if (strcmp(argv[i], "--operator") == 0) {
             stage_operator();
             ran = 1;
@@ -1951,6 +2480,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--extras") == 0) {
             stage_extras();
             ran = 1;
+        } else if (strcmp(argv[i], "--render") == 0) {
+            stage_render();
+            ran = 1;
         } else {
             fprintf(stderr, "unknown stage: %s\n", argv[i]);
             return 2;
@@ -1962,6 +2494,7 @@ int main(int argc, char **argv)
         stage_silence();
         stage_tables();
         stage_voices();
+        stage_monovoice();
         stage_operator();
         stage_freq();
         stage_algorithms();
@@ -1973,6 +2506,7 @@ int main(int argc, char **argv)
         stage_pitcheg();
         stage_output();
         stage_extras();
+        stage_render();
     }
 
     if (failures != 0) {
