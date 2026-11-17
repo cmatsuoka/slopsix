@@ -15,7 +15,7 @@ fraction bit being zero:
     carrier count 2 -> 01.000   = 010000b = 16  (x1/2)
     carrier count 3 -> 01.101   = 011010b = 26  (x1/3, approximated)
     carrier count 4 -> 10.000   = 100000b = 32  (x1/4)
-    carrier count 5 -> 10.011   = 100011b = 35  (x1/5, approximated)
+    carrier count 5 -> 10.011   = 100110b = 38  (x1/5, approximated)
     carrier count 6 -> 10.101   = 101010b = 42  (x1/6, approximated)
 
 The three approximated patterns are the hardware's own 6-bit
@@ -43,7 +43,7 @@ PATTERNS = [
     (0b010000, 2, False),   # 01.000 = log2(2)
     (0b011010, 3, True),    # 01.101 ~ log2(3)
     (0b100000, 4, False),   # 10.000 = log2(4)
-    (0b100011, 5, True),    # 10.011 ~ log2(5)
+    (0b100110, 5, True),    # 10.0110 ~ log2(5) (the trailing bit is zero)
     (0b101010, 6, True),    # 10.101 ~ log2(6)
 ]
 

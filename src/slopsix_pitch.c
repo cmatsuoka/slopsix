@@ -53,64 +53,16 @@ static int32_t slopsix_floor_div(int32_t value, unsigned shift)
 /*
  * The detune term.
  *
- * The working model (research P-04, hypothesis-grade): the detune offset
- * is proportional to the note's absolute log frequency and decays with
- * the pitch,
- *
- *   delta = 0.0209 * exp(-0.396 * log2(f)) / 7 * logfreq * (detune - 7)
- *
- * with the model's logfreq in its own 2^24-per-octave word.  The engine
- * works in 4096-per-octave units, so the model's offset is divided by
- * 4096.
- *
- * The exponential is evaluated with the hardware's own exp table: the
- * model's exp(-0.396 * x) is 2^(-0.396 * log2(e) * x), and
- * 0.396 * log2(e) is 0.5713, kept as 585/1024.
+ * The EGS applies the patch's detune as a signed 4-bit value added
+ * directly to its 14-bit frequency word (a bit-synchronous EGS model,
+ * research P-04).  One EGS unit is 1/1024 octave, about 1.17 cents, and
+ * the engine's word is four times finer, so one patch step is four word
+ * units.  The patch's neutral detune is 7 (0..14 -> -7..+7), and the
+ * offset is pitch-independent.
  */
-static int32_t slopsix_detune_offset(int32_t word, uint8_t detune)
+static int32_t slopsix_detune_offset(uint8_t detune)
 {
-    int32_t oct_q10;
-    int32_t exp_q10;
-    int32_t int_part;
-    int32_t frac;
-    uint32_t exp_q11;
-    int32_t t;
-    int32_t denominator;
-    int32_t delta;
-
-    if (detune == 7u) {
-        /* The hardware's neutral detune (the model's centre). */
-        return 0;
-    }
-
-    /* The absolute pitch in Q10: log2(f) = log2(440) + the word's offset
-     * from A4. */
-    oct_q10 = SLOPSIX_LOG2_440_Q10 +
-              slopsix_floor_div(word - SLOPSIX_WORD_A4, 2);
-
-    /* The exponent of the exponential: -0.5713 * log2(f), in Q10. */
-    exp_q10 = -((SLOPSIX_DETUNE_EXP_COEF * oct_q10) >> 10);
-
-    int_part = slopsix_floor_div(exp_q10, 10);
-    frac = exp_q10 - (int_part << 10);
-
-    /* The ROM's fraction value; the integer part of the exponent enters
-     * through the denominator below. */
-    exp_q11 = slopsix_exp_q11[frac];
-
-    /* The model's term: exp * logfreq * (detune - 7), converted to the
-     * engine's word.  The factor 172/2^22 folds the model's 0.0209 and
-     * the 4096-units-per-octave conversion. */
-    t = (int32_t)exp_q11 * oct_q10;
-    t *= (int32_t)detune - 7;
-
-    /* delta = 172 * t / (7 * 2^(22 - int_part)), computed in two steps to
-     * stay inside 32 bits. */
-    denominator = 7 << (14 - int_part);
-    delta = ((t >> 8) * (SLOPSIX_DETUNE_COEF_Q11 * 4) +
-             (denominator >> 1)) / denominator;
-
-    return delta;
+    return ((int32_t)detune - 7) * 4;
 }
 
 /*
@@ -168,9 +120,17 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
 
     /* Both modes share the one detune law, so the fixed mode's detune is
      * antisymmetric around the neutral value too. */
-    word += slopsix_detune_offset(word, detune);
+    word += slopsix_detune_offset(detune);
 
-    return word + tune;
+    /* The EGS adds the voice pitch - the note, master tune, pitch bend
+     * and pitch EG - only in ratio mode.  A fixed-frequency operator
+     * uses its own frequency register plus detune (research P-03, a
+     * bit-synchronous EGS model). */
+    if (params->mode == 0u) {
+        word += tune;
+    }
+
+    return word;
 }
 
 /*

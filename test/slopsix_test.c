@@ -149,7 +149,7 @@ static void stage_tables(void)
     check(slopsix_com_log[1] == 16, "com[1] == 16");
     check(slopsix_com_log[2] == 26, "com[2] == 26");
     check(slopsix_com_log[3] == 32, "com[3] == 32");
-    check(slopsix_com_log[4] == 35, "com[4] == 35");
+    check(slopsix_com_log[4] == 38, "com[4] == 38");
     check(slopsix_com_log[5] == 42, "com[5] == 42");
 }
 
@@ -307,6 +307,33 @@ static void stage_operator(void)
           "the operator matches the closed sine recipe sample for sample");
     check(peak > 16000,
           "a full-scale carrier reaches the 14-bit output's top (>= 16000)");
+
+    /* The modulation scale: a modulator's linear output is added to the
+     * sine phase index, where one period is 4096 units.  A 4096-unit
+     * modulation therefore repeats the wave, and 2048 units inverts it. */
+    {
+        slopsix_operator modop;
+        int32_t base;
+        int32_t one_period;
+        int32_t half_period;
+
+        memset(&modop, 0, sizeof(modop));
+        modop.increment = 0;
+        slopsix_op_render(&modop, params.log_amp_q10, 0, &base);
+
+        memset(&modop, 0, sizeof(modop));
+        modop.increment = 0;
+        slopsix_op_render(&modop, params.log_amp_q10, 4096, &one_period);
+
+        memset(&modop, 0, sizeof(modop));
+        modop.increment = 0;
+        slopsix_op_render(&modop, params.log_amp_q10, 2048, &half_period);
+
+        check(one_period == base,
+              "a 4096-unit modulation is one sine period");
+        check(half_period == -base,
+              "a 2048-unit modulation is half a sine period");
+    }
 }
 
 /* The frequency of a phase increment, in milli-hertz, computed with
@@ -535,6 +562,20 @@ static void stage_freq(void)
                       sharp_amount <= flat_amount + 2,
                       "the fixed mode's detune magnitudes are symmetric");
             }
+        }
+
+        /* The fixed mode uses its own frequency register: the voice
+         * pitch (and therefore the master tune) does not move it. */
+        {
+            slopsix_op_params fixed_tune = params;
+
+            fixed_tune.mode = 1;
+            fixed_tune.coarse = 2;
+            fixed_tune.fine = 0;
+            fixed_tune.detune = 7;
+            check(slopsix_op_freq_word(69, &fixed_tune, 0) ==
+                  slopsix_op_freq_word(69, &fixed_tune, 65536),
+                  "the fixed mode ignores the master tune");
         }
     }
 
