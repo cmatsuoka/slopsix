@@ -28,19 +28,20 @@ read together.
 | SC-05 | DX7-family delta map | **Decided:** velocity response, micro-tuning and aftertouch routing are in engine scope; panning is a convenience beyond the hardware and sits behind `SLOPSIX_EXTRAS`; storage/MIDI/panel are host-side. |
 | SC-06 | Third-party model evidence | **Partial:** model-derived facts are hypothesis-grade and must stay tagged; no DX100 model content. |
 | SC-07 | DX7 hardware facts | **Partial (hardware):** 49,096 Hz; 22/23-bit phase arithmetic; closed-form tables; 12-bit amplitude domain; DAC + compander; algorithm graph decoded. |
-| SC-08 | DX7 firmware facts | **Partial (firmware):** register map, note→frequency closed form, 660-unit value scale, LFO speed/delay laws, EG-bias composition, detune/bend/pitch-EG tables. |
-| SC-09 | Library topology | **Decided:** one library, one public header, one set of entry-point names; the personalities are macro-gated engines, not parallel API families. No separate DX100 library. Sources stay flat, with `_dx7` / `_dx100` filename suffixes. |
+| SC-08 | DX7 firmware facts | **Partial (firmware):** register map, note→frequency closed form, 660-unit value scale, LFO speed/delay laws, EG-bias composition, detune/bend/pitch-EG tables; EG rate/level registers are pre-quantized to 0..63 (`(rate·164)>>8`, `TABLE_LOG[level]>>1`). |
+| SC-09 | TX81Z / DX11 target | **Evaluation:** 4 ops, 8 algorithms, 8-voice poly, 8-part multitimbral performance mode, 8 sine-derived waveforms, PEG, stereo `panset` output and an HD6303-family CPU; a potential third personality behind `SLOPSIX_TX81Z`. The impact assessment and rows TX-01…TX-11 live on the TX81Z research page; the decision is open. |
 | SC-10 | Personality selection and dispatch | **Decided:** the engine is chosen by a parameter at context creation and never changes; the render entry point is resolved at creation and stored in the context, so the render call is one indirect call per buffer with no personality branch in the sample loop or the voice loop. An engine whose macro is off is rejected at creation. |
+| SC-11 | Library topology | **Decided:** one library, one public header, one set of entry-point names; the personalities are macro-gated engines, not parallel API families. No separate DX100 library. Sources live under `src/<personality>/` with the personality suffix dropped from the file names; genuinely shared sources stay at the top of `src/`. |
 
 ## Pitch and frequency generation
 
 | ID | Item | Resolution |
 |---|---|---|
 | P-01 | Note → frequency path | **Resolved:** closed-form note word; the per-key ±1¢ alternation is exact; engine works in the 4096-units-per-octave domain. Absolute Hz base remains inside the sound chip. |
-| P-02 | Ratio-mode operator frequency | **Partial:** coarse table is exact; the fine/detune composition is model-derived (hypothesis). |
-| P-03 | Fixed-frequency mode | **Partial:** fixed-frequency step tables are known; the Hz formula is model-derived. |
-| P-04 | Detune | **Partial:** register format pinned (3-bit magnitude + sign); the log-unit step size is chip-internal. |
-| P-05 | Pitch bend quantization | **Resolved (API):** 14-bit MIDI bend, hardware range and step, curve and quirks reproduced; one table-stride detail still provisional. |
+| P-02 | Ratio-mode operator frequency | **Partial (firmware + model):** coarse table is exact; the fine composition is model-derived. |
+| P-03 | Fixed-frequency mode | **Partial (firmware + model):** fixed-mode composition is pinned (`opPitch>>2` + detune; no voice pitch, master tune, bend, pitch EG or LFO); the Hz formula remains model-derived. |
+| P-04 | Detune | **Resolved (firmware + model):** 4-bit register (3-bit magnitude + sign), −7..+7; one step is 1/1024 octave ≈1.17 cents (4 units in the engine's 4096/octave word). |
+| P-05 | Pitch bend quantization | **Resolved (firmware):** 14-bit MIDI bend, hardware range and step, curve and quirks reproduced; the 48-byte step table is 16×3-byte groups with a big-endian word, stride confirmed. |
 | P-06 | Portamento | **Decided:** no engine portamento in v1; host glides. Rate law located for a later optional parameter. |
 | P-07 | Micro-tuning (MK2) | **Open / deferred:** kept in scope; implementation waits on a table format. |
 
@@ -48,24 +49,24 @@ read together.
 
 | ID | Item | Resolution |
 |---|---|---|
-| O-01 | Phase accumulator | **Partial:** 22-bit increments / 23-bit adder pinned; engine uses a 32-bit state; wrap emulation and note-on phase are open. |
+| O-01 | Phase accumulator | **Partial (hardware + design):** 22-bit increments / 23-bit adder pinned; engine uses a 32-bit state with an explicit 23-bit mask (D-6); note-on phase follows OSC KEY SYNC (OQ-05); the sync reset value is chip-internal. |
 | O-02 | Sine table contents | **Known (recipe):** exact closed-form recipe, generated and internally verified. |
-| O-03 | Amplitude application | **Partial:** 12-bit log₂ Q8 domain and 14-bit log word pinned; constants still to reconcile. |
+| O-03 | Amplitude application | **Partial (hardware + firmware + model):** 12-bit log₂ Q8 domain and 14-bit log word pinned; the EGS composes the target as attenuation `(level_reg<<6)+(op_level<<4)` (clamped `0xFF0`); the engine's gain form and 4256 offset are the translation. |
 | O-04 | Exponent conversion | **Known (recipe):** exact closed-form recipe, generated and verified. |
-| O-05 | Modulation input scaling | **Partial:** five modulation sources defined; deviation scaling still open. |
-| O-06 | Self-feedback | **Partial:** 3-bit parameter and feedback slot resolved; level→shift mapping is model-derived. |
-| O-07 | Output-level 0–99 mapping | **Partial:** firmware level table known; model constants remain hypothesis-grade. |
+| O-05 | Modulation input scaling | **Resolved (model):** the 14-bit modulator output is added directly to the 12-bit sine phase index (one period = 4096 units); full-scale deviation ≈±4 periods, no clamp. |
+| O-06 | Self-feedback | **Partial (firmware + hardware + model):** 3-bit parameter and feedback slot resolved; effective division `>>(1+(7−level))`; a capture is still the closing evidence. |
+| O-07 | Output-level 0–99 mapping | **Partial (firmware + model):** `TABLE_LOG` is the exact level curve; the firmware writes `TABLE_LOG[level]>>1` (0..63) as the EGS EG-level register and the EGS target uses it directly. The 4256 offset remains model-grade. |
 
 ## Envelopes and scaling
 
 | ID | Item | Resolution |
 |---|---|---|
-| E-01 | EG stage shape | **Partial:** 4 rates/levels; curve is chip-internal, model-derived only. |
-| E-02 | Rate → time mapping | **Partial:** model law only; chip-internal. |
-| E-03 | Rate scaling | **Partial:** applied inside the sound chip; curves chip-internal. |
-| E-04 | EG update cadence | **Partial:** operator EG is chip-internal; pitch EG is a ~159 Hz CPU staircase; LFO is a ~318 Hz static-level update. |
-| E-05 | Keyboard level scaling | **Partial:** the runtime scaling-curve builder is decoded and reimplemented (43 key-code groups, the two 36-entry ROM curves, the depth law); the curve's overrun and the keybed's own breakpoint range are still open. |
-| E-06 | Sustain / release details | **Partial:** edge cases (level 0 vs rate 0, mid-attack release) still model-derived. |
+| E-01 | EG stage shape | **Partial (firmware + model):** 4 rates/levels; the firmware pre-quantizes `rate_reg=(rate·164)>>8` and `level_reg=TABLE_LOG[level]>>1` (0..63); the EGS model uses an inverted 12-bit attenuation target, attack jump `0x94C`, slope `(level>>8)+2`, and delay compression. |
+| E-02 | Rate → time mapping | **Partial (firmware + model):** the EGS qrate/clock gate is model-derived: `qrate=rate_reg+rate_scaling` clamped to 63, `nshift=11−(qrate>>2)` below 44, `pshift=(qrate>>2)−11` above, fractional masks `0xAA/0xEA/0xEE/0xFE`; still model-grade. |
+| E-03 | Rate scaling | **Partial (firmware + model):** shipped as a register; the model law is `rs=round(clamp((voicePitch>>8)−16,0,27)·sens/7)` in qrate units. |
+| E-04 | EG update cadence | **Partial (firmware + hardware):** operator EG is chip-internal (model: one operator envelope per sample on a 16-bit master clock); pitch EG is a ~188 Hz CPU staircase; LFO is a ~375.3 Hz static-level update. |
+| E-05 | Keyboard level scaling | **Partial (firmware):** the runtime scaling-curve builder is decoded and reimplemented (43 key-code groups, the two 36-entry ROM curves, the depth law); the curve's overrun, the keybed's breakpoint range, and the exact mapping into the EGS amplitude domain remain open. |
+| E-06 | Sustain / release details | **Partial (model):** the model pins the stage machine (key-on S0, key-off S3 from the current level, stages 2/3 short-circuit at target, delay only in stages 0/1); still model-grade. |
 | E-07 | Velocity response | **Resolved:** the keybed is velocity sensitive (Mk1 included); velocity scales operator level; the direction is pinned (the operator volume register is an attenuation, so a harder key is louder); the keybed's own calibration is open. |
 | E-08 | The level curve | **Resolved:** the hardware's 100-entry table is an attenuation table and the exact inverse of the level law (the hardware's curve below parameter 20, `28 + parameter` above it); the engine implements the law. |
 
@@ -73,30 +74,30 @@ read together.
 
 | ID | Item | Resolution |
 |---|---|---|
-| L-01 | Speed 0–99 → increment | **Partial:** closed firmware law; tick↔Hz divisor still open. |
-| L-02 | Waveforms | **Partial:** six-wave enum and CPU-side waveform generation; byte selection provisional. |
-| L-03 | Delay 0–99 | **Partial:** law `(16+u)<<(k+2)` decoded; one transcription doubt to confirm. |
+| L-01 | Speed 0–99 → increment | **Resolved (firmware + model):** closed law; 16-bit accumulator advanced once per OCF tick; the tick is ≈375.3 Hz (9.4265 MHz/8, reload 3140), giving ≈0.063..49.7 Hz. |
+| L-02 | Waveforms | **Resolved (firmware):** six waves and the byte selection are decoded from the 16-bit phase. |
+| L-03 | Delay 0–99 | **Resolved (firmware):** `(16+u)<<(k+2)` with `u=(99−delay)&15`, `k=(99−delay)>>4`; the earlier transcription doubt was a misreading. |
 | L-04 | Pitch depth (PMS) | **Resolved:** eight-entry depth table known exactly. |
-| L-05 | Amplitude depth (AMD) | **Partial:** depth path and per-op reduction curve located; curve to be pinned. |
-| L-06 | Sync and cadence | **Partial:** sync phase reset confirmed; mode bits to finish. |
+| L-05 | Amplitude depth (AMD) | **Partial (firmware + model):** the depth path is at `$30F0`; the model applies an attenuation addition `a += amp_mod << ams` (ams 0..3, clamp `0xFFF`); the msfa depth table is superseded as the leading model. |
+| L-06 | Sync and cadence | **Resolved (firmware):** 16-bit phase; note-on sync seeds `0x7FFF`; the delay accumulator and fade-in factor reset. |
 
 ## Algorithms and routing
 
 | ID | Item | Resolution |
 |---|---|---|
-| A-01 | 32 algorithms as data | **Resolved:** alignment rule, carriers, feedback ops and COM counts verified; implementation-ready. |
-| A-02 | Modulator→carrier summing | **Partial:** sum/delay register semantics defined; load/hold/add sequencing open. |
+| A-01 | 32 algorithms as data | **Resolved (hardware + model):** alignment rule, carriers, feedback ops and COM counts verified; cross-checked entry-for-entry against a bit-synchronous OPS model (algorithm 18 op-1 C bit corrected). |
+| A-02 | Modulator→carrier summing | **Partial (hardware + model):** the sum/delay register's C/D bits decode as clear/load/hold/add (`msum=(C?mren:0)+(D?signal:0)`, `mren=msum`); FREN is the feedback-path push; SEL 0..5 picks none/signal/new mren/previous mren/fren1/self-feedback average; the last op's mren is the voice output. A capture still closes it. |
 | A-03 | Feedback slot | **Resolved:** 3-bit field on the per-algorithm self-loop. |
 | A-04 | Voice bus and pan | **Decided:** mono carrier bus; panning is an extra beyond the hardware (`SLOPSIX_EXTRAS`, see X-06); pan law open. |
-| A-05 | Per-algorithm output compensation | **Partial:** six COM log values and carrier counts verified; a known improvement over the model baseline. |
+| A-05 | Per-algorithm output compensation | **Resolved (hardware + model):** six COM log values and carrier counts verified; the five-carrier value is 38, not 35. |
 
 ## Output stage
 
 | ID | Item | Resolution |
 |---|---|---|
-| OU-01 | DAC and compander | **Partial:** 14-bit → 12-bit mantissa + 3-bit shift per voice; shift-code rule open. |
-| OU-02 | Saturation and overflow | **Open:** summed-voice overflow behaviour not pinned. |
-| OU-03 | Effective sample rate | **Resolved:** 49,096 Hz. |
+| OU-01 | DAC and compander | **Partial (hardware + model):** 14-bit → 12-bit mantissa + 3-bit shift per voice; the model selects the shift by magnitude (≥`0x1000` drop 3, ≥`0x800` drop 2, ≥`0x400` drop 1, else none); exact SF-code numbering and saturation remain open. |
+| OU-02 | Saturation and overflow | **Open:** summed-voice overflow behaviour not pinned; the model does not cover saturation. |
+| OU-03 | Effective sample rate | **Resolved:** 49,096 Hz (≈49,096.354 from the 9.4265 MHz master clock / 192; E-clock / 24). |
 | OU-04 | Analog tail | **Decided:** out of scope for v1; 3-bit master volume is a public parameter. |
 
 ## Voice, patch and host boundaries
@@ -144,10 +145,10 @@ read together.
 
 | ID | Item | Resolution |
 |---|---|---|
-| F-01 | Phase format | **Decided:** 32-bit state, 22-bit increments, 32-bit-safe; 23-bit wrap emulation open. |
+| F-01 | Phase format | **Decided:** 32-bit state, 22-bit increments, 32-bit-safe; the 23-bit wrap is emulated by an explicit mask at the increment add (D-6, implemented). |
 | F-02 | Log-domain arithmetic | **Partial:** 12-bit `2^(v/256)` domain; extended-precision exponential recipe known. |
 | F-03 | Multiply style | **Decided:** 64-bit intermediates; mulhi helper only if the target demands. |
-| F-04 | Rate tables per sample rate | **Open:** table residency (shared const vs per-context derivation) to settle. |
+| F-04 | Rate tables per sample rate | **Decided (D-4):** shared const tables in flash, no per-context copies; rate-dependent values derived as integer ratios at context creation. |
 | F-05 | Tables in flash | **Decided:** generators exist; note and COM generators done. |
 | F-06 | Context budget | **Open:** to be documented at implementation. |
 
@@ -156,33 +157,35 @@ read together.
 | ID | Item | Resolution |
 |---|---|---|
 | T-01 | Canonical patch set | **Open:** factory/custom patch sets are out-of-tree inputs; the harness must accept them by path. |
-| T-02 | Hardware evidence set | **Open:** captures needed for feedback depth, EG/LFO laws, DAC/compander, per-algorithm loudness and velocity direction. |
-| T-03 | Harness stages | **Partial:** planned table, EG, pitch, compander, pan, algorithm and LFO stages. |
-| T-04 | Model comparison | **Partial:** secondary baseline only; the first concrete A/B target is the LFO speed law. |
+| T-02 | Hardware evidence set | **Open:** captures needed for O-06, A-02, E-01/E-02, L-05, compander/SF numbering, per-algorithm loudness and velocity direction. |
+| T-03 | Harness stages | **Partial:** table, operator, frequency, algorithm/graph, EG, level, COM and bend stages implemented; compander, pan, API and LFO stages planned. |
+| T-04 | Model comparison | **Partial:** secondary baseline only; L-01's law is resolved, the next A/B targets are the EG curves and compander. |
 
 ## Cross-cutting open questions
 
 | ID | Question | Resolution |
 |---|---|---|
-| OQ-01 | Are pitch EG / LFO / bend evaluated per sample or at CPU cadence? | **Answered:** pitch EG ~159 Hz, LFO ~318 Hz, bend static; staircases, not smooth. |
+| OQ-01 | Are pitch EG / LFO / bend evaluated per sample or at CPU cadence? | **Answered:** pitch EG ~188 Hz, LFO ~375.3 Hz, bend static; staircases, not smooth. |
 | OQ-02 | Master-tune unit and neutral value? | **Decided:** Q16 cents; 0 = shipped tuning; quantum documented. |
-| OQ-03 | Meaning of the bend step words and their range mapping? | **Answered:** range = semitones 0–12, step = 0–15; one table-stride detail provisional. |
-| OQ-04 | How does a 32-bit phase state emulate the 23-bit wrap? | **Open:** engine decision plus a capture. |
-| OQ-05 | Note-on phase initialisation? | **Open:** needs a capture. |
-| OQ-06 | Compander shift-code rule and saturation/overflow? | **Open:** needs capture/hardware facts. |
-| OQ-07 | Deviation scaling of the five modulation sources? | **Open:** sets the FM index scale. |
-| OQ-08 | Feedback level→shift map? | **Open:** model formula is not hardware. |
-| OQ-09 | EG rate→increment, rate-scaling and key-level curves? | **Partial:** the key-level builder is decoded; operator EG law is chip-internal. |
+| OQ-03 | Meaning of the bend step words and their range mapping? | **Answered:** range = semitones 0–12, step = 0–15; the 16×3-byte step table and big-endian word are confirmed. |
+| OQ-04 | How does a 32-bit phase state emulate the 23-bit wrap? | **Decided:** D-6 — 32-bit state masked to 23 bits at the increment add (implemented). |
+| OQ-05 | Note-on phase initialisation? | **Answered:** the patch's OSC KEY SYNC bit selects OPS mode (`0x30` sync / `0x50` free-run); the reset value is chip-internal. |
+| OQ-06 | Compander shift-code rule and saturation/overflow? | **Partial (model):** the magnitude rule (drop 3/2/1/0 above `0x1000`/`0x800`/`0x400`) is decoded; exact SF-code numbering and saturation/overflow still need a capture. |
+| OQ-07 | Deviation scaling of the five modulation sources? | **Answered (model):** the 14-bit modulator is added directly to the 12-bit sine index; full-scale ≈±4 periods, no clamp. |
+| OQ-08 | Feedback level→shift map? | **Partial (model):** effective `>>(1+(7−level))`; a capture is the closing evidence. |
+| OQ-09 | EG rate→increment, rate-scaling and key-level curves? | **Partial (firmware + model):** the key-level builder is decoded; the EG registers are pre-quantized to 0..63 and the EGS qrate/clock-gate law is model-derived. |
 | OQ-10 | Contents of the remaining scale/velocity/`statics` tables? | **Partial:** most tables located; the `statics` table is model-only. |
-| OQ-11 | Pitch-EG tables and LFO delay increments? | **Answered:** both pitch-EG tables known; delay law decoded (one provisional byte). |
-| OQ-12 | Which LFO speed law ships, and the tick↔Hz divisor? | **Partial:** closed firmware law ships; Hz divisor open. |
-| OQ-13 | Shared const tables or per-context derivation? | **Open:** memory-budget decision. |
+| OQ-11 | Pitch-EG tables and LFO delay increments? | **Answered:** both pitch-EG tables known; the delay law `(16+u)<<(k+2)` is confirmed, with no transcription error. |
+| OQ-12 | Which LFO speed law ships, and the tick↔Hz divisor? | **Resolved:** the closed firmware law ships; the tick is ≈375.3 Hz from the 1.1783 MHz E-clock and the 3140-count reload. |
+| OQ-13 | Shared const tables or per-context derivation? | **Decided:** D-4 — shared const tables; rate values derived at init. |
 | OQ-14 | Per-voice pan law? | **Open:** no hardware rule pinned. |
 | OQ-15 | Test-vector location and harness input path? | **Open:** out-of-tree inputs, consumed by path. |
 | OQ-16 | Which frequency domain does the engine use? | **Decided:** the firmware's 4096-units-per-octave word; chip field is `>>2`. |
 | OQ-17 | Reproduce the chip's 14-bit frequency-field truncation? | **Decided:** yes, quantize at the boundary. |
-| OQ-18 | Which way does velocity go? | **Open:** audible direction known; internal representation inverted/complemented detail unresolved. |
+| OQ-18 | Which way does velocity go? | **Answered:** the operator volume register is an attenuation; the table is read from the hard end, so a harder key is louder. Keybed calibration remains open. |
 | OQ-19 | DX100 internals | **Partial:** patch format (67 bytes), LFO laws/shared policy, internal velocity, operator on/off, the eight algorithms and the chip EG/rate laws are closed; the exact DX100 algorithm-number ↔ `CON` mapping and the board output stage remain open. |
+| OQ-20 | Sum/delay register C/D operations and SEL source mapping? | **Partial (model):** C/D decode as clear/load/hold/add; SEL 0..5 maps none/signal/new mren/previous mren/fren1/self-feedback average; a register capture still closes it. |
+| OQ-21 | Amplitude-modulation reduction law? | **Partial (model):** `a += amp_mod << ams` (ams 0..3, clamp `0xFFF`); the msfa depth table is superseded; a capture remains. |
 
 ## DX100 owner's-manual questions
 
