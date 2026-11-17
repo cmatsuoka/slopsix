@@ -270,6 +270,8 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
         const slopsix_op_conn *conn = &alg->ops[op];
         int32_t mod_in = 0;
         int32_t sample;
+        int32_t log_amp_q8;
+        int32_t log_amp_q10;
 
         switch (conn->source) {
         case SLOPSIX_MOD_OPERATOR:
@@ -299,8 +301,33 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
             break;
         }
 
-        slopsix_op_render(&voice->ops[op], &voice->params[op], mod_in,
-                          &sample);
+        /* The envelope: the operator's log amplitude is the envelope's
+         * level, less the carrier-count compensation the algorithm
+         * applies to this operator (Phase 3).  The compensation is zero
+         * for a modulator, because the hardware applies it to the
+         * carriers only. */
+        if (voice->eg[op].active) {
+            log_amp_q8 = slopsix_eg_step(&voice->eg[op]);
+        } else {
+            log_amp_q8 =
+                voice->params[op].log_amp_q10 >> SLOPSIX_AMP_Q8_SHIFT;
+        }
+
+        log_amp_q8 += slopsix_com_q8(conn->com);
+
+        /* The amplitude modulation lowers the level of the operators
+         * that are sensitive to it; it never raises it. */
+        log_amp_q8 -= slopsix_ams_reduction_q8(voice->params[op].ams_sens,
+            voice->ams_amount_q8);
+
+        if (log_amp_q8 < 0) {
+            /* The compensation can mute a carrier at full level. */
+            log_amp_q8 = 0;
+        }
+
+        log_amp_q10 = log_amp_q8 << SLOPSIX_AMP_Q8_SHIFT;
+
+        slopsix_op_render(&voice->ops[op], log_amp_q10, mod_in, &sample);
 
         voice->out[op] = sample;
 

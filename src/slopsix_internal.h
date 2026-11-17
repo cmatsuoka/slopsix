@@ -205,6 +205,83 @@ typedef struct {
 /* The context handle is the context state; the public API uses void *. */
 #define SLOPSIX_CONTEXT(ctx) ((slopsix_context_state *)(ctx))
 
+/* -------------------------------------------- envelope and level (Phase 3) */
+
+/* The amplitude domain is the hardware's 12-bit Q8 log2 domain: 256 units
+ * per octave (research O-03).  The engine composes every level in that
+ * domain and the operator core converts once, at the signal exponent.
+ *
+ * The level parameters (the operator output level and the envelope's
+ * stage levels) are hardware parameters in the 0..99 range; the engine
+ * maps them onto a "microstep" gain of 0..127, where one microstep is
+ * 1/8 of an octave, i.e. 32 units of the Q8 domain.  The mapping is
+ * closed (research E-08, the ROM's own attenuation table is the exact
+ * inverse of the law below) and is implemented in
+ * slopsix_eg.c. */
+#define SLOPSIX_MICROSTEP_MAX 127
+#define SLOPSIX_MICROSTEP_Q8 32
+#define SLOPSIX_MICROSTEP_Q8_SHIFT 5
+
+/* The velocity's attenuation unit: half a microstep, because the
+ * hardware's operator volume register holds the keyboard level scaling's
+ * part twice (research E-05, research E-07). */
+#define SLOPSIX_VELOCITY_Q8_SHIFT 4
+
+/* The reference offset of the level composition: the Q8 domain's zero
+ * point, so that a voice at the maximum level sits at the origin of the
+ * domain.  The value is the model's domain-conversion constant
+ * (research O-07); it is the only place where the absolute level of the
+ * engine is anchored. */
+#define SLOPSIX_LEVEL_OFFSET_Q8 4256
+
+/* The envelope's own fixed point: the Q8 level with 16 fractional bits.
+ * The attack's asymptote and its jump target are the model's constants
+ * (research E-01). */
+#define SLOPSIX_EG_FRAC 16
+#define SLOPSIX_EG_MIN_Q8 16
+#define SLOPSIX_EG_JUMP_Q8 1716
+#define SLOPSIX_EG_MAX_Q8 4352
+
+/* The keyboard level scaling: 43 key-code groups of three semitones
+ * each, covering the whole keyboard (research E-05). */
+#define SLOPSIX_KLS_GROUPS 43
+
+/* The envelope's block cadence: the reference model advances the
+ * envelope once per 64-sample block and interpolates the gain across
+ * it.  The engine keeps both cadences behind one switch until a capture
+ * pins the hardware's own (plan decision D-9). */
+#define SLOPSIX_EG_BLOCK 64
+
+/* One operator's envelope generator.
+ *
+ * The state machine walks the four stages (attack, decay, sustain,
+ * release); the key-up jumps straight to the release stage.  The level
+ * is held in the engine's fixed point and moves towards the current
+ * stage's target.
+ */
+typedef struct {
+    /* The parameters, set at note-on. */
+    uint8_t rates[4];       /* the four stage rates, 0..99 */
+    uint8_t levels[4];      /* the four stage levels, 0..99 */
+    int32_t op_level_q8;    /* the operator's own level (Q8) */
+    uint8_t rate_scaling;   /* the note's rate scaling delta, 0..31 */
+
+    /* The runtime state. */
+    int32_t level;          /* the current level, Q8 << SLOPSIX_EG_FRAC */
+    int32_t target;         /* the current stage's target */
+    int32_t inc;            /* the current stage's increment */
+    int32_t static_count;   /* the remaining static-count samples */
+    uint8_t stage;          /* 0..3, 4 when the envelope has finished */
+    uint8_t active;         /* the envelope is in use */
+    uint8_t rising;         /* the stage rises towards its target */
+    uint8_t down;           /* the key is down */
+    uint8_t block_mode;     /* the cadence switch (plan decision D-9) */
+    uint8_t block_pos;      /* the sample position inside the block */
+    int32_t block_level;    /* the block's starting level */
+    int32_t block_step;     /* the block's per-sample step */
+    uint32_t sample_rate;   /* the host's sample rate */
+} slopsix_eg;
+
 /* ------------------------------------------------------- operator (Phase 2) */
 
 /* One operator's runtime state.  The phase accumulator is free-running
@@ -217,19 +294,28 @@ typedef struct {
 
 /* One operator's static parameters.  The frequency composition reads
  * mode, coarse, fine and detune at note-on time; the render path reads
- * only log_amp_q10. */
+ * only log_amp_q10, and the envelope composes the effective amplitude
+ * from it (or from the envelope's own level) and the algorithm's
+ * compensation. */
 typedef struct {
     uint8_t mode;        /* 0 = ratio, 1 = fixed frequency */
     uint8_t coarse;      /* 0..31 */
     uint8_t fine;        /* 0..99 */
     uint8_t detune;      /* 0..14 (the hardware's 4-bit signed value) */
-    int32_t log_amp_q10; /* the operator's 12-bit Q8 log amplitude already
-                          * shifted into the log word's Q10 scale; whoever
-                          * fills the struct must apply
-                          * `<< SLOPSIX_AMP_Q8_SHIFT` (the render path reads
-                          * the field as stored, and today the test harness
-                          * is the only writer until the note-on path
-                          * lands) */
+    int32_t log_amp_q10; /* the operator's log amplitude, already shifted
+                          * into the log word's Q10 scale; whoever fills
+                          * the struct must apply `<< SLOPSIX_AMP_Q8_SHIFT`.
+                          * The resolution is the hardware's Q8 (the value
+                          * is a 12-bit word): the envelope-less render
+                          * path shifts back to Q8, so no finer detail
+                          * survives */
+
+    /* The level pipeline's parameters (Phase 3). */
+    uint8_t out_level;     /* the operator output level, 0..99 */
+    uint8_t velocity_sens; /* the key velocity sensitivity, 0..7 */
+    uint8_t ams_sens;      /* the amplitude modulation sensitivity, 0..3 */
+    int8_t kls[SLOPSIX_KLS_GROUPS]; /* the keyboard level scaling offsets,
+                                     * one per key-code group */
 } slopsix_op_params;
 
 /* ------------------------------------------------- the operator graph */
@@ -268,12 +354,15 @@ typedef struct {
 typedef struct {
     slopsix_operator ops[SLOPSIX_OP_COUNT];
     slopsix_op_params params[SLOPSIX_OP_COUNT];
+    slopsix_eg eg[SLOPSIX_OP_COUNT];  /* the operators' envelopes */
     int32_t out[SLOPSIX_OP_COUNT];  /* the operators' last samples */
     int32_t reg_delay;              /* the register's previous sample */
     int32_t fb_prev;                /* the feedback path's last sum */
     int32_t fb_prev2;               /* the feedback path's sum before it */
     int32_t fb_delay;               /* the feedback path's delayed value */
     uint8_t feedback_level;         /* the OPS's 3-bit feedback field */
+    int32_t ams_amount_q8;          /* the LFO's amplitude modulation
+                                     * amount (Q8); Phase 4 fills it */
 } slopsix_voice_engine;
 
 /* ------------------------------------------------------ internal API */
@@ -423,9 +512,13 @@ static inline int32_t slopsix_feedback_scaled(int32_t fb_prev,
  * The phase advances by the operator's increment; the modulation input
  * (and the operator's own feedback) are added to the phase before the
  * sine lookup.  The output is the 14-bit linear sample.
+ *
+ * The log amplitude is passed in rather than read from the parameters,
+ * because the envelope and the carrier-count compensation compose it
+ * on every sample.
  */
 static inline void slopsix_op_render(slopsix_operator *op,
-    const slopsix_op_params *params, int32_t mod_in, int32_t *out)
+    int32_t log_amp_q10, int32_t mod_in, int32_t *out)
 {
     uint32_t acc;
     uint32_t phase;
@@ -447,7 +540,7 @@ static inline void slopsix_op_render(slopsix_operator *op,
 
     /* The log word: the operator's pre-shifted log amplitude (Q10) minus
      * the log-sine's negated log2 value. */
-    log_value = params->log_amp_q10 - slopsix_logsin(sine_phase);
+    log_value = log_amp_q10 - slopsix_logsin(sine_phase);
 
     sample = slopsix_signal_exp(log_value);
 
@@ -461,6 +554,53 @@ static inline void slopsix_op_render(slopsix_operator *op,
     *out = sample;
 }
 
+/* ------------------------------------------------- the render composites */
+
+/*
+ * The carrier-count compensation, in the Q8 domain: a negative value
+ * that the carrier's log amplitude carries (research A-05).  The code
+ * is static per algorithm, so it is composed on the render path per
+ * sample; it is inline for the same reason as the helpers above.
+ */
+static inline int32_t slopsix_com_q8(uint8_t com)
+{
+    if (com > 5u) {
+        com = 5u;
+    }
+    return -((int32_t)slopsix_com_log[com] << 4);
+}
+
+/* The amplitude modulation's depth table: the model's depth per
+ * sensitivity step, as a fraction of the amount (research L-05). */
+static const uint32_t slopsix_ams_depth[4] = {
+    0, 4342338, 7171437, 16777216
+};
+
+/*
+ * The amplitude modulation's reduction, in the Q8 domain: the amount by
+ * which the LFO lowers an operator's level.  The reduction never raises
+ * the level (research L-05).  It is inline for the same reason as the
+ * helpers above.
+ */
+static inline int32_t slopsix_ams_reduction_q8(uint8_t ams_sens,
+    int32_t amount_q8)
+{
+    uint8_t sens = ams_sens > 3u ? 3u : ams_sens;
+    int64_t reduction;
+
+    if (amount_q8 <= 0) {
+        return 0;
+    }
+
+    reduction = ((int64_t)amount_q8 * (int64_t)slopsix_ams_depth[sens]) >> 24;
+
+    if (reduction < 0) {
+        reduction = 0;
+    }
+
+    return (int32_t)reduction;
+}
+
 /* The frequency path. */
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
                              int32_t master_tune_q16);
@@ -472,5 +612,48 @@ uint8_t slopsix_algorithm_feedback_operator(unsigned index);
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
                                   int32_t *voice_out);
+
+/* ------------------------------------------------- the envelope (Phase 3) */
+
+/* The level curve: the hardware's 0..99 level parameter mapped onto the
+ * engine's 0..127 microstep gain.  The law is closed: below 20 the gain
+ * follows the hardware's own curve, from 20 upwards it is linear. */
+int32_t slopsix_level_curve(uint8_t param);
+
+/* The keyboard level scaling builder: it fills the 43 per-group offsets
+ * of one operator.  The offsets are signed gains in microsteps: a
+ * positive offset raises the level, a negative one lowers it. */
+void slopsix_kls_build(int8_t *offsets, uint8_t breakpoint,
+    uint8_t left_depth, uint8_t right_depth,
+    uint8_t left_curve, uint8_t right_curve);
+
+/* The breakpoint's key-code group. */
+uint8_t slopsix_kls_breakpoint_index(uint8_t breakpoint);
+
+/* The velocity route: the hardware's operator volume attenuation for a
+ * velocity and a velocity sensitivity (research E-07).  The attenuation
+ * falls as the key is struck harder; the direction is pinned in Phase 3
+ * (see the algorithm page). */
+int32_t slopsix_velocity_attenuation(uint8_t velocity, uint8_t sensitivity);
+
+/* The operator's level in the Q8 domain: the output level, the keyboard
+ * level scaling offset of the note's group and the velocity. */
+int32_t slopsix_op_level_q8(uint8_t out_level, int8_t kls_offset,
+    uint8_t velocity, uint8_t velocity_sens);
+
+/* The note's key-code group: the index of the keyboard level scaling
+ * curve.  Three semitones share a group. */
+uint8_t slopsix_note_group(uint8_t note);
+
+/* The rate scaling: the note's contribution to the envelope's rate. */
+uint8_t slopsix_rate_scaling(uint8_t note, uint8_t sensitivity);
+
+/* The envelope. */
+void slopsix_eg_init(slopsix_eg *eg, const uint8_t rates[4],
+    const uint8_t levels[4], int32_t op_level_q8,
+    uint8_t rate_scaling, uint32_t sample_rate);
+void slopsix_eg_note_on(slopsix_eg *eg);
+void slopsix_eg_note_off(slopsix_eg *eg);
+int32_t slopsix_eg_step(slopsix_eg *eg);
 
 #endif /* SLOPSIX_INTERNAL_H */

@@ -289,7 +289,7 @@ static void stage_operator(void)
             int32_t got;
             int32_t want;
 
-            slopsix_op_render(&op, &params, 0, &got);
+            slopsix_op_render(&op, params.log_amp_q10, 0, &got);
             want = reference_sample(phase, params.log_amp_q10);
 
             if (got != want) {
@@ -747,6 +747,458 @@ static void stage_algorithms(void)
           "no operator is modulated by an equal or lower-numbered one");
 }
 
+/* ------------------------------------------- Phase 3: the envelope and the
+ * level pipeline */
+
+/* A representative operator level for the envelope's tests: the output
+ * level at its maximum and a middle velocity. */
+#define TEST_OP_LEVEL_Q8 3328
+
+/* The envelope's target level, as the engine composes it. */
+static int32_t test_eg_target(uint8_t level_param, int32_t op_level_q8)
+{
+    int32_t target = ((slopsix_level_curve(level_param) >> 1) << 6) +
+                     op_level_q8 - SLOPSIX_LEVEL_OFFSET_Q8;
+
+    if (target < SLOPSIX_EG_MIN_Q8) {
+        target = SLOPSIX_EG_MIN_Q8;
+    }
+    return target;
+}
+
+static void stage_eg(void)
+{
+    slopsix_eg eg;
+    uint8_t rates[4] = { 99, 99, 99, 99 };
+    uint8_t levels[4] = { 99, 99, 99, 0 };
+    int32_t target;
+    int32_t level;
+    int i;
+
+    printf("stage eg\n");
+
+    /* The level curve: the hardware's 0..99 parameter mapped onto the
+     * engine's 0..127 microstep gain. */
+    check(slopsix_level_curve(0) == 0, "level_curve(0) == 0");
+    check(slopsix_level_curve(19) == 46, "level_curve(19) == 46");
+    check(slopsix_level_curve(20) == 48, "level_curve(20) == 48");
+    check(slopsix_level_curve(99) == 127, "level_curve(99) == 127");
+
+    /* The attack: the envelope rises to its target and holds it. */
+    slopsix_eg_init(&eg, rates, levels, TEST_OP_LEVEL_Q8, 0,
+                    SLOPSIX_DEFAULT_SAMPLE_RATE);
+    target = test_eg_target(99, TEST_OP_LEVEL_Q8);
+
+    level = 0;
+    for (i = 0; i < 4000; i++) {
+        level = slopsix_eg_step(&eg);
+        if (level == target) {
+            break;
+        }
+    }
+    check(level == target, "the attack reaches the stage's target level");
+    check(i < 4000, "the attack reaches its target in finite time");
+
+    /* The decay: the envelope falls from the first target to the
+     * second one. */
+    {
+        int32_t decay_target = test_eg_target(99, TEST_OP_LEVEL_Q8);
+        int reached = 0;
+
+        for (i = 0; i < 4000; i++) {
+            level = slopsix_eg_step(&eg);
+            if (level == decay_target && eg.stage >= 2u) {
+                reached = 1;
+                break;
+            }
+        }
+        check(reached, "the decay reaches the sustain stage");
+    }
+
+    /* The release: the key up jumps to the release stage. */
+    slopsix_eg_note_off(&eg);
+    check(eg.stage == 3u, "the key up jumps to the release stage");
+    level = slopsix_eg_step(&eg);
+    check(level <= target, "the release falls from the sustain level");
+
+    /* The rate scaling: a higher note makes the envelope faster. */
+    {
+        slopsix_eg low;
+        slopsix_eg high;
+        uint8_t middle[4] = { 50, 50, 50, 50 };
+        int32_t low_level = 0;
+        int32_t high_level = 0;
+        int low_samples = 0;
+        int high_samples = 0;
+
+        slopsix_eg_init(&low, middle, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_eg_init(&high, middle, levels, TEST_OP_LEVEL_Q8,
+                        slopsix_rate_scaling(96, 7),
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+        for (i = 0; i < 4000; i++) {
+            low_level = slopsix_eg_step(&low);
+            high_level = slopsix_eg_step(&high);
+            if (low_samples == 0 && low_level == target) {
+                low_samples = i + 1;
+            }
+            if (high_samples == 0 && high_level == target) {
+                high_samples = i + 1;
+            }
+        }
+
+        check(slopsix_rate_scaling(96, 7) > 0,
+              "the rate scaling grows with the note");
+        check(slopsix_rate_scaling(0, 7) == 0,
+              "the rate scaling is zero at the bottom of the keyboard");
+        check(high_samples > 0 && low_samples > 0 &&
+              high_samples < low_samples,
+              "the rate scaling makes the envelope faster");
+    }
+
+    /* The attack out of silence: the level jumps to the attack's
+     * starting point. */
+    {
+        uint8_t silent[4] = { 0, 99, 99, 0 };
+        int32_t jump = 0;
+
+        slopsix_eg_init(&eg, rates, silent, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+        for (i = 0; i < 64; i++) {
+            level = slopsix_eg_step(&eg);
+            if (level > jump) {
+                jump = level;
+            }
+        }
+        check(jump > 0, "the attack out of silence jumps to its start point");
+    }
+
+    /* A stage whose target is the current level waits for its measured
+     * duration instead of moving. */
+    {
+        uint8_t equal[4] = { 99, 99, 99, 0 };
+        int held = 0;
+
+        slopsix_eg_init(&eg, rates, equal, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+        /* The first stage's target equals the second one's, so the
+         * envelope holds the level while the static count runs. */
+        for (i = 0; i < 64; i++) {
+            level = slopsix_eg_step(&eg);
+            if (level == target) {
+                held++;
+            }
+        }
+        check(held > 0,
+              "a stage with a reached target holds the level for its "
+              "measured duration");
+    }
+
+    /* The two cadences agree in timing: the increment is a block's worth
+     * and the per-sample cadence divides it by the block size. */
+    {
+        slopsix_eg per_sample;
+        slopsix_eg per_block;
+        int sample_reached = -1;
+        int block_reached = -1;
+
+        slopsix_eg_init(&per_sample, rates, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_eg_init(&per_block, rates, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        per_block.block_mode = 1u;
+
+        for (i = 0; i < 200000; i++) {
+            if (sample_reached < 0 &&
+                slopsix_eg_step(&per_sample) == target) {
+                sample_reached = i;
+            }
+            if (block_reached < 0 &&
+                slopsix_eg_step(&per_block) == target) {
+                block_reached = i;
+            }
+            if (sample_reached >= 0 && block_reached >= 0) {
+                break;
+            }
+        }
+
+        check(sample_reached > 0 && block_reached > 0,
+              "both cadences reach the target");
+        check(abs(sample_reached - block_reached) <= SLOPSIX_EG_BLOCK,
+              "the two cadences agree in timing (within a block)");
+    }
+
+    /* The envelope's block cadence: the envelope advances once per block
+     * and the level is interpolated across it. */
+    {
+        uint8_t block_levels[4] = { 99, 99, 99, 0 };
+        int32_t previous;
+        int monotonic = 1;
+
+        slopsix_eg_init(&eg, rates, block_levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        eg.block_mode = 1u;
+
+        previous = slopsix_eg_step(&eg);
+        for (i = 0; i < 1024; i++) {
+            level = slopsix_eg_step(&eg);
+            if (level > target) {
+                monotonic = 0;
+            }
+            if (level < previous && previous != target) {
+                monotonic = 0;
+            }
+            previous = level;
+        }
+        check(monotonic,
+              "the block cadence interpolates the level towards the target");
+        check(level == target, "the block cadence reaches the target too");
+    }
+}
+
+static void stage_level(void)
+{
+    int8_t offsets[SLOPSIX_KLS_GROUPS];
+    int i;
+
+    printf("stage level\n");
+
+    /* The keyboard level scaling: the curve is built per key-code group
+     * and read at the note's group. */
+    {
+        uint8_t breakpoint = 39;   /* the hardware's C3 */
+        uint8_t group;
+        int at_breakpoint = 0;
+        int negative_above = 0;
+        int grows = 0;
+
+        /* A negative right curve: the level falls above the
+         * breakpoint. */
+        slopsix_kls_build(offsets, breakpoint, 0, 99, 0, 0);
+        group = slopsix_note_group(72);
+        if (offsets[group] < 0) {
+            negative_above = 1;
+        }
+        if (offsets[slopsix_kls_breakpoint_index(breakpoint) - 1u] == 0) {
+            at_breakpoint = 1;
+        }
+        if (offsets[slopsix_note_group(96)] < offsets[group]) {
+            grows = 1;
+        }
+
+        check(at_breakpoint,
+              "the keyboard level scaling is neutral at the breakpoint");
+        check(negative_above,
+              "a negative curve lowers the level above the breakpoint");
+        check(grows,
+              "the keyboard level scaling grows with the distance");
+
+        /* A positive right curve: the level rises above the
+         * breakpoint. */
+        slopsix_kls_build(offsets, breakpoint, 0, 99, 0, 3);
+        check(offsets[slopsix_note_group(96)] > 0,
+              "a positive curve raises the level above the breakpoint");
+
+        /* The curve's magnitude saturates at the table's top. */
+        slopsix_kls_build(offsets, breakpoint, 0, 99, 0, 0);
+        check(offsets[slopsix_note_group(127)] == -SLOPSIX_MICROSTEP_MAX &&
+              offsets[slopsix_note_group(96)] > offsets[slopsix_note_group(127)],
+              "the keyboard level scaling saturates at the table's top");
+    }
+
+    /* The velocity route: a harder key is louder. */
+    {
+        int32_t soft = slopsix_op_level_q8(99, 0, 20, 7);
+        int32_t hard = slopsix_op_level_q8(99, 0, 120, 7);
+        int32_t soft_none = slopsix_op_level_q8(99, 0, 20, 0);
+        int32_t hard_none = slopsix_op_level_q8(99, 0, 120, 0);
+
+        check(hard > soft, "a harder key gives a louder operator");
+        check(soft_none == hard_none,
+              "a velocity sensitivity of zero ignores the velocity");
+        check(slopsix_velocity_attenuation(120, 7) <
+              slopsix_velocity_attenuation(20, 7),
+              "the velocity route's attenuation falls with the velocity");
+    }
+
+    /* The operator output level. */
+    {
+        int32_t full = slopsix_op_level_q8(99, 0, 127, 0);
+        int32_t none = slopsix_op_level_q8(0, 0, 127, 0);
+
+        check(full > none, "the operator output level raises the level");
+    }
+
+    /* The amplitude modulation: it lowers the level of the sensitive
+     * operators and never raises it. */
+    check(slopsix_ams_reduction_q8(0, 512) == 0,
+          "an operator without amplitude modulation is not affected");
+    check(slopsix_ams_reduction_q8(3, 512) > 0,
+          "the amplitude modulation lowers the level");
+    check(slopsix_ams_reduction_q8(3, 0) == 0,
+          "the amplitude modulation does nothing without an amount");
+    check(slopsix_ams_reduction_q8(1, 512) < slopsix_ams_reduction_q8(3, 512),
+          "the amplitude modulation's depth grows with the sensitivity");
+
+    /* The carrier-count compensation: every carrier of an algorithm is
+     * divided by the algorithm's carrier count, so that a voice sounds
+     * equally loud in every algorithm. */
+    {
+        unsigned alg;
+        int compensation_ok = 1;
+
+        for (alg = 0; alg < 32u; alg++) {
+            const slopsix_algorithm *decoded = slopsix_algorithm_get(alg);
+            unsigned carriers = 0;
+            unsigned op;
+            int32_t total = 0;
+
+            for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
+                if (decoded->ops[op].carrier) {
+                    carriers++;
+                    total += slopsix_com_q8(decoded->ops[op].com);
+                }
+            }
+
+            /* Every carrier of an algorithm carries the algorithm's
+             * carrier count minus one, and the compensation is the
+             * hardware's six-step approximation of log2 of the carrier
+             * count. */
+            if (carriers > 0u) {
+                /* The ideal compensation is log2 of the carrier count,
+                 * in the Q8 domain: 256 units per octave. */
+                static const int32_t ideal[6] = {
+                    0, 256, 406, 512, 594, 662
+                };
+                int32_t per_carrier = -slopsix_com_q8(
+                    (uint8_t)(carriers - 1u));
+
+                for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
+                    if (decoded->ops[op].carrier &&
+                        decoded->ops[op].com != (uint8_t)(carriers - 1u)) {
+                        compensation_ok = 0;
+                    }
+                }
+
+                /* The hardware's six-step table approximates log2 of
+                 * the carrier count to within 0.16 of an octave. */
+                if (per_carrier < ideal[carriers - 1u] - 40 ||
+                    per_carrier > ideal[carriers - 1u] + 40) {
+                    compensation_ok = 0;
+                }
+            }
+        }
+
+        check(compensation_ok,
+              "every algorithm's carriers carry the carrier-count "
+              "compensation");
+    }
+
+    /* The compensation's value: it is log2 of the carrier count, in the
+     * Q8 domain. */
+    check(slopsix_com_q8(0) == 0, "a single carrier is not compensated");
+    check(slopsix_com_q8(1) == -256, "two carriers are compensated by 2");
+    check(slopsix_com_q8(5) == -672, "six carriers are compensated by 6");
+
+    /* The level composition reaches the render path: the envelope's
+     * level is the operator's log amplitude. */
+    {
+        slopsix_voice_engine voice;
+        uint8_t rates[4] = { 99, 99, 99, 99 };
+        uint8_t levels[4] = { 99, 99, 99, 0 };
+        int32_t out = 0;
+        int nonzero = 0;
+
+        memset(&voice, 0, sizeof(voice));
+        for (i = 0; i < SLOPSIX_OP_COUNT; i++) {
+            voice.params[i].mode = 0;
+            voice.params[i].coarse = 1;
+            voice.params[i].fine = 0;
+            voice.params[i].detune = 7;
+            voice.ops[i].increment = slopsix_increment_from_word(
+                slopsix_op_freq_word(60, &voice.params[i], 0),
+                SLOPSIX_DEFAULT_SAMPLE_RATE);
+            slopsix_eg_init(&voice.eg[i], rates, levels, TEST_OP_LEVEL_Q8, 0,
+                            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        }
+
+        for (i = 0; i < 512; i++) {
+            slopsix_voice_render_sample(&voice, slopsix_algorithm_get(0),
+                                        &out);
+            if (out != 0) {
+                nonzero++;
+            }
+        }
+        check(nonzero > 0, "the envelope drives the rendered voice");
+    }
+}
+
+/* The loudness equality across algorithms: the carrier-count
+ * compensation divides every carrier by the algorithm's carrier count,
+ * so a voice with the same per-carrier level sounds as loud in a
+ * six-carrier algorithm as in a single-carrier one. */
+static void stage_com(void)
+{
+    slopsix_voice_engine voice;
+    int32_t peak_many = 0;
+    int32_t peak_one = 0;
+    int i;
+
+    printf("stage com\n");
+
+    /* Algorithm 32: six carriers, every one of them compensated by six. */
+    memset(&voice, 0, sizeof(voice));
+    for (i = 0; i < SLOPSIX_OP_COUNT; i++) {
+        voice.params[i].mode = 0;
+        voice.params[i].coarse = 1;
+        voice.params[i].fine = 0;
+        voice.params[i].detune = 7;
+        voice.ops[i].increment = slopsix_increment_from_word(
+            slopsix_op_freq_word(60, &voice.params[i], 0),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        voice.params[i].log_amp_q10 = 4000 << SLOPSIX_AMP_Q8_SHIFT;
+    }
+    for (i = 0; i < 512; i++) {
+        int32_t out = 0;
+
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(31), &out);
+        if (out > peak_many) {
+            peak_many = out;
+        }
+    }
+
+    /* Algorithm 16: a single carrier, not compensated at all. */
+    memset(&voice, 0, sizeof(voice));
+    for (i = 0; i < SLOPSIX_OP_COUNT; i++) {
+        voice.params[i].mode = 0;
+        voice.params[i].coarse = 1;
+        voice.params[i].fine = 0;
+        voice.params[i].detune = 7;
+        voice.ops[i].increment = slopsix_increment_from_word(
+            slopsix_op_freq_word(60, &voice.params[i], 0),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        voice.params[i].log_amp_q10 = (i == 0)
+            ? (4000 << SLOPSIX_AMP_Q8_SHIFT) : 0;
+    }
+    for (i = 0; i < 512; i++) {
+        int32_t out = 0;
+
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(15), &out);
+        if (out > peak_one) {
+            peak_one = out;
+        }
+    }
+
+    check(peak_many > 0 && peak_one > 0,
+          "both algorithms render a signal");
+    check(peak_many * 100 >= peak_one * 95 &&
+          peak_many * 100 <= peak_one * 105,
+          "a six-carrier algorithm is as loud as a single-carrier one");
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -786,6 +1238,15 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--graph") == 0) {
             stage_graph();
             ran = 1;
+        } else if (strcmp(argv[i], "--eg") == 0) {
+            stage_eg();
+            ran = 1;
+        } else if (strcmp(argv[i], "--level") == 0) {
+            stage_level();
+            ran = 1;
+        } else if (strcmp(argv[i], "--com") == 0) {
+            stage_com();
+            ran = 1;
         } else {
             fprintf(stderr, "unknown stage: %s\n", argv[i]);
             return 2;
@@ -801,6 +1262,9 @@ int main(int argc, char **argv)
         stage_freq();
         stage_algorithms();
         stage_graph();
+        stage_eg();
+        stage_level();
+        stage_com();
     }
 
     if (failures != 0) {
