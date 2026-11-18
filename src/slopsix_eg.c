@@ -56,14 +56,19 @@ static const uint8_t slopsix_kls_curve_exp[36] = {
  *
  * The first entry is the hardware's own word (the value 4 in the low
  * byte and a zero in the high byte); the dip at the second entry is
- * reproduced as the hardware has it, and it is an open research item
- * whether the disassembly's word is a transcription artefact
- * (research E-07). */
-static const uint8_t slopsix_velocity_attenuation_table[32] = {
+ * reproduced as the hardware has it (research E-07).
+ *
+ * The thirty-third entry is the byte that follows the table in the
+ * firmware's ROM: the firmware indexes the table at 32 - (velocity >> 2),
+ * so the softest key (group 0) reads one entry past the table's end.
+ * That byte is the opcode of the routine that follows the table, and the
+ * firmware's velocity response for the softest keys depends on it. */
+static const uint8_t slopsix_velocity_attenuation_table[33] = {
     4, 0, 12, 21, 30, 40, 46, 52,
     58, 64, 70, 76, 82, 88, 94, 100,
     103, 106, 109, 112, 114, 116, 118, 120,
-    122, 124, 126, 128, 130, 131, 132, 133
+    122, 124, 126, 128, 130, 131, 132, 133,
+    189
 };
 
 /* The measured stage durations: 77 entries, the number of samples a
@@ -249,8 +254,10 @@ int32_t slopsix_velocity_attenuation(uint8_t velocity, uint8_t sensitivity)
     int32_t scale;
     int32_t attenuation;
 
-    /* The hard end of the table first. */
-    scale = slopsix_velocity_attenuation_table[31u - group];
+    /* The firmware reads the table backwards, at 32 - (velocity >> 2),
+     * so the softest key reads the byte that follows the table (see the
+     * table's comment). */
+    scale = slopsix_velocity_attenuation_table[32u - group];
 
     /* The sensitivity's offset and its coefficient. */
     attenuation = (15 - 2 * (int32_t)sens) +
