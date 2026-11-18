@@ -7,6 +7,8 @@
 #   check-dx100    the DX100 personality build
 #   check-extras   the extras build (conveniences beyond the original hardware)
 #   example        build the OpenAL terminal keyboard player
+#   validate-render build the slopsix side of the validation loop
+#   validate       build it and run tools/validate.py with BANKS="..."
 #   tables         regenerate the generated tables under build/tables/
 #   tables-install regenerate the tables and write src/slopsix_tables.c
 #   clean          remove the build products
@@ -109,7 +111,7 @@ TABLES := build/tables/logsin_table.c \
           build/tables/freq_table.c
 
 .PHONY: all check check-dx7 check-dx100 check-extras example tables \
-        tables-install check-tables clean
+        tables-install check-tables validate-render validate clean
 
 all: $(ARCHIVE) $(TESTBIN)
 
@@ -138,6 +140,32 @@ $(EXAMPLE): examples/play_keys.c $(ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) \
 	    $(OPENAL_CFLAGS) $< $(ARCHIVE) $(OPENAL_LIBS) -o $@
+
+# --- validation loop -------------------------------------------------------
+
+# The validation loop compares rendered audio, not engine state.  The
+# slopsix renderer is the only part built here; the reference renderers are
+# external artefacts and are passed to the script by path.
+VALIDATE_RENDER := $(BUILD)/validation/render_slopsix
+
+validate-render: $(VALIDATE_RENDER)
+
+$(VALIDATE_RENDER): tools/validate_render.c $(ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(CC) $(WARNINGS) $(OPT_FAST) $(INCLUDES) $(FEATURE_DEFS) $< \
+	    $(ARCHIVE) -o $@
+
+# Run the comparison when BANKS names the input sysex banks (they are
+# out-of-repo inputs, so they are supplied on the command line):
+#   make validate BANKS="bank1.syx bank2.syx"
+validate: $(VALIDATE_RENDER)
+	@if [ -z "$(BANKS)" ]; then \
+	    echo "validate: built $(VALIDATE_RENDER)"; \
+	    echo "run: python3 tools/validate.py --bank BANK.syx ..."; \
+	else \
+	    $(PYTHON) tools/validate.py \
+	        $(foreach b,$(BANKS),--bank $(b)) $(VALIDATE_ARGS); \
+	fi
 
 # --- generated tables -------------------------------------------------------
 
