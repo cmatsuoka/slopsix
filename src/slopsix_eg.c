@@ -319,7 +319,13 @@ uint8_t slopsix_rate_scaling(uint8_t note, uint8_t sensitivity)
         x = 31;
     }
 
-    return (uint8_t)(((int32_t)sens * x) >> 3);
+    /* The EGS's key-scaling law, as the bit-synchronous model carries it:
+     * round(x * sens / 7), in qrate units.  A BANJO trace (2026-11-18)
+     * gives 6 for sens 3 and 13 for sens 7; the old >>3 form gave 4 and
+     * 11 and left the envelope too slow.  The note-dependent x is still
+     * the engine's approximation (note / 3 - 7); the EGS derives it from
+     * the voice-pitch word. */
+    return (uint8_t)(((int32_t)sens * x + 3) / 7);
 }
 
 /* ------------------------------------------ the carrier-count compensation */
@@ -433,7 +439,7 @@ static void slopsix_eg_advance(slopsix_eg *eg, uint8_t stage)
     /* The static count: the measured duration of a stage that does not
      * move the level, and of the attack out of silence. */
     eg->static_count = 0;
-    if ((eg->target == eg->level) ||
+    if (((eg->target == eg->level) && (stage >= 2u)) ||
         ((stage == 0u) && (level_param == 0u))) {
         uint32_t static_rate = (uint32_t)rate + (uint32_t)eg->rate_scaling;
         int32_t count;

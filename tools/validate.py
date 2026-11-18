@@ -60,23 +60,22 @@ A row is called an *outlier* for one engine when that engine's distance to the o
 
 | Metric | slopsix outlier | VDX7 outlier | agree |
 |---|---|---|---|
-| envelope | 10 | 16 | 38 |
+| envelope | 4 | 41 | 19 |
 | spectrum | 3 | 16 | 45 |
 
-Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.331 against 0.685, median envelope distance 2.54 dB against 2.54 dB; slopsix is at least as close on 41/64 spectrum rows and 37/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.434 against 0.685, median envelope distance 1.65 dB against 2.54 dB; slopsix is at least as close on 43/64 spectrum rows and 50/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
 
-### Population A - VDX7 disagrees with Dexed, slopsix agrees with Dexed
+### The envelope and spectrum after the EG fixes
 
-These are envelope-timing differences, not slopsix bugs: VDX7's EGs decay faster than both other engines.
-
-- **ROM 3B program 26 (BANJO)**: VDX7 falls from 0 dB to -60 dB within 0.6 s. Slopsix and Dexed both hold -3 dB until 0.45 s and then decay at the same rate (at 0.40 s: slopsix -3.30 dB, Dexed -3.48 dB, VDX7 -41.07 dB).
-- **ROM 1A program 21 (MARIMBA)**: VDX7 decays about 1.5 times faster than slopsix and Dexed, which agree with each other closely.
-
-Rows that flag as VDX7 outliers on both metrics: ROM 1A 04, ROM 1A 13, ROM 3B 07. These belong to the known EGS EG-rate items (E-01/E-02).
-
-### Population B - remaining single-metric slopsix divergences
-
-No row flags as a slopsix outlier on both metrics after the 2026-11-18 selector fix.
+After the 2026-11-18 equal-target and rate-scaling fixes, slopsix follows
+VDX7's envelope on most rows: envelope outliers are slopsix 4, VDX7 41,
+agree 19, and the median envelope distance is 1.65 dB against Dexed's
+2.54 dB (50/64 rows at least as close as Dexed). Dexed is now the common
+envelope outlier. The remaining slopsix envelope outliers are ROM 1A
+10/14 and ROM 3B 24/27. The spectral median rose from 0.333 to 0.434
+because the corrected envelopes change the fixed-window spectra; the
+timbre/level path is the next target, not a reason to keep the slower
+envelopes. The remaining slopsix spectral outliers are ROM 3B 10/11/14.
 
 Localised on **ROM 1A program 30** (TRAIN, algorithm 4, feedback 7): slopsix renders an extra partial at 977 Hz (relative amplitude 0.16) that neither VDX7 nor Dexed produces, while it holds the 1140 Hz band at 0.067 against VDX7's 0.23 and the 359 Hz band at 0.064 against VDX7's 0.21. Dexed stays within 0.043 of VDX7 on this patch; slopsix is 0.686 away. The same shape appears on ROM 1A 25 (TUB BELLS), with an extra partial at 917 Hz.
 
@@ -101,7 +100,7 @@ Open items, both **needs more investigation**:
 The engine's algorithm ROM table matches the chip's entry for entry (the
 selector, the feedback-pair store bit, the C/D control bits and the COM
 code: 0 mismatches in 192 entries), and the carrier sets reproduce the
-documented chart. Three corrections settled on 2026-11-18 - all adopt the
+documented chart. Five corrections settled on 2026-11-18 - all adopt the
 firmware's own semantics, which VDX7 (the register file shows the raw
 pass-through) and Dexed (its table indexer) already implement:
 
@@ -119,6 +118,13 @@ pass-through) and Dexed (its table indexer) already implement:
   earlier placement shifted every selector by one operator; the COM code
   and carrier flag stay on the consumer. This is the 2026-11-18 fix that
   drops the spectral median to 0.331.
+- **The static hold applies only to stages 2 and 3.** A held stage 0/1
+  whose target already equals the current level advances immediately, as
+  the EGS does; waiting for the measured static duration held BANJO's
+  carrier too long. This is the envelope fix above.
+- **The rate scaling is `round(x*sens/7)`.** The BANJO trace gives 6 for
+  sens 3 and 13 for sens 7; the old `>>3` form gave 4 and 11 and left the
+  envelope too slow. This is the rate-scaling fix above.
 - **The sum/delay register is the die's own model**: `msum = (C ? mren :
   0) + (D ? signal : 0)`, the selector reads the register's new value
   (SEL2), the value before the producer's update (SEL3), the feedback
@@ -131,12 +137,36 @@ pass-through) and Dexed (its table indexer) already implement:
   walkthrough pins the accumulate semantics and the chart draws them.
 
 On the corrected engine the two factory banks' median spectral distance
-to VDX7 is 0.331 (was 0.492) and the median envelope distance 2.54 dB
-(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 41/64 spectra
-(was 33/64). The remaining divergences concentrate on the EGS EG-cadence
+to VDX7 is 0.434 (was 0.492) and the median envelope distance 1.65 dB
+(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 43/64 spectra
+(was 33/64) and 50/64 envelopes. The remaining divergences concentrate on the EGS EG-cadence
 items (E-01/E-02, population A above) and the fixed-frequency
 operator's level law (population B above); the algorithm walk itself
 now matches the reference.
+
+### The operator envelope: equal-target held stages (2026-11-18)
+
+The operator EG's stages 0 and 1 must advance immediately when their
+target already equals the current level; only the sustain and release
+stages hold. The engine waited for the measured static duration on every
+equal-target stage, which made BANJO's carrier hold L1 == L2 for about
+0.45 s. Restricting the static hold to stages 2 and 3 cuts BANJO's
+envelope distance to VDX7 from 24.4 to 9.09 dB (ROM 1A program 01:
+4.04 -> 1.17 dB) with no material change to the medians. The remaining
+BANJO gap is the stage-2 decay rate: slopsix still reaches the off level
+later than VDX7, so the EGS rate law is the next target.
+
+### The EG rate scaling: corrected (2026-11-18)
+
+The BANJO trace pinned the EGS key-scaling law: op3 (sens 3) gets delta 6
+and op1 (sens 7) gets 13, while the old `>>3` form gave 4 and 11. Using
+`round(x*sens/7)` cuts BANJO's envelope distance from 9.09 to 2.68 dB and
+the 64-patch envelope median from 2.54 to 1.65 dB (50/64), and MARIMBA
+from 11.24 to 3.51 dB (Dexed is 11.81). The fixed-window spectral median
+rises from 0.333 to 0.434 because the corrected envelopes change the
+analysis window; the timbre path is next. The note-dependent `x` mapping
+remains the engine's `note/3 - 7` approximation of the EGS voice-pitch
+group.
 
 ### The algorithm selector mapping: corrected (2026-11-18)
 

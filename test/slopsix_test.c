@@ -1257,6 +1257,24 @@ static void stage_eg(void)
               "measured duration");
     }
 
+    /* BANJO's carrier holds L1 == L2 on stage 1.  The EGS advances such
+     * a held stage immediately; only the sustain/release stages hold for
+     * their measured duration. */
+    {
+        uint8_t banjo_rates[4] = { 98, 36, 44, 56 };
+        uint8_t banjo_levels[4] = { 99, 99, 0, 0 };
+        int steps = 0;
+
+        slopsix_eg_init(&eg, banjo_rates, banjo_levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        while (eg.stage < 2u && steps < 4096) {
+            level = slopsix_eg_step(&eg);
+            steps++;
+        }
+        check(steps < 4096,
+              "an equal-target held stage advances without the static hold");
+    }
+
     /* The two cadences agree in timing: the increment is a block's worth
      * and the per-sample cadence divides it by the block size. */
     {
