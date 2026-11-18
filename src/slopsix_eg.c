@@ -399,17 +399,33 @@ static void slopsix_eg_advance(slopsix_eg *eg, uint8_t stage)
 
     /* The increment.
      *
-     * The model's increment is the amount the envelope's level moves per
-     * envelope *step*, and the reference model steps the envelope once
-     * per 64-sample block: the increment is therefore a block's worth.
-     * The per-sample cadence divides it by the block size, so that the
-     * two cadences agree in timing and differ only in how the level is
-     * interpolated across the block.
+     * The rate gate.  The firmware pre-quantises the patch's 0..99 rate
+     * with (rate * 164) >> 8 (chip register domain 0..63); the engine
+     * adds the note's rate scaling and forms
+     *
+     *   q = (rate * 41) >> 6 + rate scaling
+     *
+     * which is the firmware expression rewritten in the engine's Q6
+     * domain.  The increment doubles every four q steps and the low two
+     * bits select the fraction 4/4..7/4 (research E-02).  A
+     * bit-synchronous EGS model follows the same law, and the chip's
+     * documented envelope time table agrees with it across the rate
+     * range.  The table also lists one identical fastest decay time for
+     * the top four q values (60..63), and the chip's clock gate clamps
+     * the step there; the register value itself is unchanged, only the
+     * increment saturates (SLOPSIX_EG_RATE_MAX).
+     *
+     * The increment is the amount the envelope's level moves per
+     * envelope *step*, and the reference cadence steps the envelope
+     * once per 64-sample block: the increment is therefore a block's
+     * worth.  The per-sample cadence divides it by the block size, so
+     * that the two cadences agree in timing and differ only in how the
+     * level is interpolated across the block.
      */
     q = ((int32_t)rate * 41) >> 6;
     q += (int32_t)eg->rate_scaling;
-    if (q > 63) {
-        q = 63;
+    if (q > SLOPSIX_EG_RATE_MAX) {
+        q = SLOPSIX_EG_RATE_MAX;
     }
     inc = (4 + (q & 3)) << (8 + (q >> 2));
     eg->inc = slopsix_eg_scale(inc, eg->sample_rate);

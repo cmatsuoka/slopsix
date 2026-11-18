@@ -60,10 +60,10 @@ A row is called an *outlier* for one engine when that engine's distance to the o
 
 | Metric | slopsix outlier | VDX7 outlier | agree |
 |---|---|---|---|
-| envelope | 25 | 16 | 23 |
-| spectrum | 10 | 15 | 39 |
+| envelope | 13 | 13 | 38 |
+| spectrum | 10 | 13 | 41 |
 
-Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.467 against 0.684, median envelope distance 2.75 dB against 2.54 dB; slopsix is at least as close on 34/64 spectrum rows and 31/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.467 against 0.685, median envelope distance 2.78 dB against 2.54 dB; slopsix is at least as close on 34/64 spectrum rows and 31/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
 
 ### Population A - VDX7 disagrees with Dexed, slopsix agrees with Dexed
 

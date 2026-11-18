@@ -531,6 +531,13 @@ static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
 #define SLOPSIX_EG_JUMP_Q8 1716
 #define SLOPSIX_EG_MAX_Q8 4352
 
+/* The envelope increment's saturation point: the top four six-bit rates
+ * (60..63) all select the fastest step.  The chip's documented envelope
+ * time table lists one identical 96 dB decay time for the four, and the
+ * chip's clock gate clamps the step there (research E-02).  The rate
+ * register keeps its 0..63 value; only the increment saturates. */
+#define SLOPSIX_EG_RATE_MAX 60
+
 /* The envelope's block cadence: the reference model advances the
  * envelope once per 64-sample block and interpolates the gain across
  * it.  The engine keeps both cadences behind one switch until a capture

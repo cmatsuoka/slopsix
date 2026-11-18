@@ -1158,6 +1158,40 @@ static void stage_eg(void)
               "the rate scaling makes the envelope faster");
     }
 
+    /* The increment's saturation: the top four q values (60..63, from
+     * patch rates 95..99) share the fastest step, while a rate just
+     * below still has a smaller increment. */
+    {
+        slopsix_eg fast;
+        slopsix_eg top;
+        slopsix_eg mid;
+        uint8_t r91[4] = { 91, 91, 91, 91 };
+        uint8_t r95[4] = { 95, 95, 95, 95 };
+        uint8_t r96[4] = { 96, 96, 96, 96 };
+        uint8_t r97[4] = { 97, 97, 97, 97 };
+        uint8_t r99[4] = { 99, 99, 99, 99 };
+
+        slopsix_eg_init(&fast, r95, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_eg_init(&mid, r91, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+        slopsix_eg_init(&top, r96, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        check(top.inc == fast.inc,
+              "rates 96 and 95 share the fastest increment");
+        slopsix_eg_init(&top, r97, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        check(top.inc == fast.inc,
+              "rates 97 and 95 share the fastest increment");
+        slopsix_eg_init(&top, r99, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        check(top.inc == fast.inc,
+              "rates 99 and 95 share the fastest increment");
+        check(mid.inc < fast.inc,
+              "a rate below the saturation point is still slower");
+    }
+
     /* The attack out of silence: the level jumps to the attack's
      * starting point. */
     {
