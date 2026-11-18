@@ -38,7 +38,7 @@
  * and 6 the pair holds operator 4's resp. operator 5's values instead).
  *
  * This translation unit is on the per-sample render path and is compiled
- * speed-first (-O2); the rest of the library is compiled size-first.
+ * speed-first (-O3); the rest of the library is compiled size-first.
  */
 #include "slopsix_internal.h"
 

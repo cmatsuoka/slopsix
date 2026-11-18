@@ -23,7 +23,7 @@ Each engine was driven through its own render entry point with a timing
 harness that discards the audio after the engine's int16 output stage:
 
 - **slopsix:** the default DX7 build (`make all`, `-Os` for the control
-  sources and `-O2` for the per-sample path), one context with 16-voice
+  sources and `-O3` for the per-sample path), one context with 16-voice
   polyphony.
 - **Dexed:** the msfa Mark I engine (Dexed's default), one `Dx7Note` per
   held note, compiled at `-O2`.

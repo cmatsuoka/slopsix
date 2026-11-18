@@ -21,7 +21,7 @@
  * is 0..7.
  *
  * This translation unit is on the per-sample render path and is compiled
- * speed-first (-O2); the rest of the library is compiled size-first.
+ * speed-first (-O3); the rest of the library is compiled size-first.
  */
 #include <string.h>
 

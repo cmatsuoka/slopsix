@@ -15,7 +15,7 @@
 #
 # The optimisation split is explicit: everything is compiled size-first
 # (-Os) except the translation units on the per-sample render path, which
-# are compiled speed-first (-O2).
+# are compiled speed-first (-O3).
 
 CC     ?= cc
 AR     ?= ar
@@ -80,7 +80,7 @@ ifeq ($(HAVE_NO_UNWIND),yes)
 endif
 
 OPT_SIZE := -Os
-OPT_FAST := -O2
+OPT_FAST := -O3
 
 INCLUDES := -Iinclude -Isrc
 

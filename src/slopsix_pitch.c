@@ -17,7 +17,7 @@
  *     with the hardware's recipe (research P-01).
  *
  * This translation unit is on the per-sample render path and is compiled
- * speed-first (-O2); the rest of the library is compiled size-first.
+ * speed-first (-O3); the rest of the library is compiled size-first.
  */
 #include "slopsix_internal.h"
 
