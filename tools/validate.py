@@ -113,6 +113,34 @@ against the reference emulator gives:
   regresses one patch from 0.006 to 0.509; the residual is tracked as
   research OQ-26.
 
+### The operator feedback: a real bug, now localised
+
+The feedback *parameter* loads correctly (the packed byte 111 bits 0-2 is
+the feedback - the reference emulator's sound responds to that byte, and
+so does the engine), and the feedback *division* (the average of the
+last two samples, then the shifter) matches the chip's. But the
+**operator that reads the feedback path is wrong**, and it shows:
+
+- With the feedback at 0 and at 7, **ROM 3B/26 (BANJO) renders
+  bit-identically in the engine** (maximum sample difference 0), while
+  the reference changes by 4343 counts.
+- Where the feedback is audible in the engine, its sign in the sidebands
+  is wrong: ROM 1A/00 (BRASS 1)'s feedback signature (the change in the
+  band vector between the two feedback levels) is +0.062 at 127 Hz where
+  the reference has -0.056.
+- The cause: the engine assigns the self-feedback selector to the
+  operator *before* the column's owner, which for algorithm 7 means
+  operator 6 - a modulator with a tiny output, so the feedback
+  disappears. The reference's die-level model puts the reader one
+  operator lower (operator 4 for algorithm 7), where it is clearly
+  audible. The harness's 32/32 feedback-operator check cannot catch it:
+  it compares the engine against the same alignment-derived table.
+
+Tracked as research OQ-27; the operator itself needs the die's data or a
+capture, and the update timing (the engine reads the path from the
+previous sample, the chip updates the feedback registers during the walk)
+is a second, smaller difference.
+
 ### The patch loading, checked against the firmware
 
 The firmware's own register writes can be checked directly: the reference emulator exposes the EGS's register file, so the values the firmware hands the chip can be compared with the engine's own composition over every patch of the banks. The result:
