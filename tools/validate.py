@@ -49,6 +49,67 @@ except ImportError as exc:  # pragma: no cover - environment check
 BANK_HEADER = b"\xf0\x43\x00\x09\x20\x00"
 NATIVE_RATE = 49096
 
+# The hand-written analysis that follows the generated tables.  It is
+# static text: the numbers in it come from the renders of the current
+# report, and it is kept here so that a regeneration does not lose it.
+FINDINGS_SECTION = """## Findings
+
+### The divergence list mixes two populations
+
+A row is called an *outlier* for one engine when that engine's distance to the other is more than 1.3 times the other distance and larger than 1.0. Over the 64 rows:
+
+| Metric | slopsix outlier | VDX7 outlier | agree |
+|---|---|---|---|
+| envelope | 25 | 16 | 23 |
+| spectrum | 10 | 15 | 39 |
+
+Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.492 against 0.684, median envelope distance 2.85 dB against 2.54 dB; slopsix is at least as close on 33/64 spectrum rows and 30/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+
+### Population A - VDX7 disagrees with Dexed, slopsix agrees with Dexed
+
+These are envelope-timing differences, not slopsix bugs: VDX7's EGs decay faster than both other engines.
+
+- **ROM 3B program 26 (BANJO)**: VDX7 falls from 0 dB to -60 dB within 0.6 s. Slopsix and Dexed both hold -3 dB until 0.45 s and then decay at the same rate (at 0.40 s: slopsix -3.30 dB, Dexed -3.48 dB, VDX7 -41.07 dB).
+- **ROM 1A program 21 (MARIMBA)**: VDX7 decays about 1.5 times faster than slopsix and Dexed, which agree with each other closely.
+
+Rows that flag as VDX7 outliers on both metrics: ROM 1A 04, ROM 1A 13, ROM 3B 04, ROM 3B 07. These belong to the known EGS EG-rate items (E-01/E-02).
+
+### Population B - slopsix disagrees with both references
+
+Rows that flag as slopsix outliers on both metrics: ROM 1A 08, ROM 1A 18, ROM 1A 24, ROM 1A 25, ROM 3B 11.
+
+Localised on **ROM 1A program 30** (TRAIN, algorithm 4, feedback 7): slopsix renders an extra partial at 977 Hz (relative amplitude 0.16) that neither VDX7 nor Dexed produces, while it holds the 1140 Hz band at 0.067 against VDX7's 0.23 and the 359 Hz band at 0.064 against VDX7's 0.21. Dexed stays within 0.043 of VDX7 on this patch; slopsix is 0.686 away. The same shape appears on ROM 1A 25 (TUB BELLS), with an extra partial at 917 Hz.
+
+What is known so far:
+
+- The extra partial comes from a **fixed-frequency operator**: clearing the OSC MODE bit of operator 4 removes it, clearing operator 3's does not. Both operators are in fixed mode (op3 coarse 10 / fine 99, op4 coarse 22 / fine 57).
+- The fixed-frequency **frequency law is not the bug**: slopsix's model reproduces the ROM's law (`0x16AC + TABLE_OP_FREQ_FIXED[coarse & 3] + 136 * fine`) exactly - both give 976.8 Hz for op3 and 296.9 Hz for op4 in the EGS's frequency units.
+- What differs is the fixed-mode operator's **level and modulation balance**: in VDX7 the fixed operators are nearly inaudible (0.00-0.01 relative amplitude), while in slopsix operator 4 reaches 0.16. VDX7 also carries a small 2361 Hz partial that slopsix lacks.
+
+Open items, both **needs more investigation**:
+
+- The fixed-mode operator's output level (the keyboard level scaling and the level composition) and its modulation depth.
+- Whether VDX7's 2361 Hz partial is the same operator at a different level, or a sideband of a different operator.
+
+### The patch loading, checked against the firmware
+
+The firmware's own register writes can be checked directly: the reference emulator exposes the EGS's register file, so the values the firmware hands the chip can be compared with the engine's own composition over every patch of the banks. The result:
+
+| Quantity | Matches the firmware |
+|---|---|
+| the EG rate registers | 64/64 patches |
+| the EG level registers | 64/64 patches |
+| the operator frequency registers (ratio and fixed mode) | all |
+| the detune and the rate-scaling/amp-mod registers | all |
+| the operator level register | 1/64 patches before the fix below |
+
+The patch *fields* therefore load correctly; the discrepancy was in the **level pipeline**. Two firmware laws have since been applied to the engine (research: the firmware page's level-pipeline section):
+
+- the **velocity route** now reads the firmware's velocity table backwards, at `32 - (velocity >> 2)`, so the softest key reads the byte that follows the table in the ROM. The operator level register now matches the firmware **exactly** for every operator without a keyboard-level-scaling depth (259 of the 384 operator instances over the 64 patches; the mean error is 0.00 units).
+- the keyboard level scaling's **index space** is still open: the engine's distance from the breakpoint differs from the firmware's, which leaves a mean residual of 1.3 register units on the operators that do have a scaling depth. The magnitude law itself is confirmed.
+
+""".splitlines()
+
 
 def bank_names(bank_path):
     """Return the 32 voice names from a packed DX7 bank."""
@@ -534,6 +595,7 @@ def write_report(args, labels, programs, references, rows):
                      " each patch points at should be recorded before the"
                      " code is changed.")
         lines.append("")
+        lines.extend(FINDINGS_SECTION)
 
     lines.append("## Reproducing")
     lines.append("")
