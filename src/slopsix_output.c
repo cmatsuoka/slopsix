@@ -7,6 +7,8 @@
  * the once-per-sample stages and the master-volume ladder:
  *
  *   mixed bus  ->  12-bit DAC code step with saturation
+ *              ->  the analog tail's reconstruction filter (the DX7's
+ *                 own stage, src/slopsix_filter.c)
  *              ->  optional pan split (SLOPSIX_EXTRAS only)
  *              ->  3-bit master volume (the DAC reference ladder)
  *              ->  int16 conversion with rounding
@@ -15,6 +17,10 @@
  * later extension can replace the quantization or the conversion without
  * touching the mixer or the operators (plan decision D-15).  The pan is
  * selected at compile time; the DX7 path carries no runtime branch for it.
+ *
+ * The value that leaves this stage is in Q12 of a DAC code: the filter
+ * that sits between the DAC step and the pan is an analog stage, so its
+ * output is not on the DAC's integer grid.
  *
  * This translation unit is on the per-sample render path and is compiled
  * speed-first (-O2); the rest of the library is compiled size-first.
@@ -77,20 +83,33 @@ int32_t slopsix_dac_step(int32_t bus)
     return code;
 }
 
-/* The final conversion: a DAC code times a Q16 gain onto int16.
+/* The final conversion: the analog stage's output times a Q16 gain onto
+ * int16.
  *
- * int16 full scale is 16 codes (2048 * 16 = 32768), so the gain falls
- * out of the shift; the value rounds to nearest, half away from zero.
- * The rails of the DAC step bound the product: the largest magnitude is
- * 2048 * 65536, whose conversion is exactly -32768 or 32752 - inside
- * int16, so the conversion adds no saturation of its own. */
-int16_t slopsix_output_scale(int32_t code, int32_t gain_q16)
+ * The value is the filter's output in Q12 of a DAC code, so int16 full
+ * scale is 16 codes (2048 * 16 = 32768) at the code's own scale and the
+ * gain falls out of the shift: the product is scaled by 2^24 (the gain's
+ * Q16 and the value's Q12).  The value rounds to nearest, half away from
+ * zero.
+ *
+ * The analog stage can overshoot the code window (the filter's passband
+ * peaks at +0.8 dB and its high-Q section rings), so the conversion
+ * saturates at the int16 rails: that saturation is the chain's last one.
+ */
+int16_t slopsix_output_scale(int32_t code_q12, int32_t gain_q16)
 {
-    int32_t product = code * gain_q16;
-    int32_t magnitude = product < 0 ? -product : product;
-    int32_t rounded = ((uint32_t)magnitude + 2048u) >> 12;
+    int64_t product = (int64_t)code_q12 * (int64_t)gain_q16;
+    int64_t magnitude = product < 0 ? -product : product;
+    int64_t rounded = (magnitude + (1LL << 23)) >> 24;
+    int64_t value = product < 0 ? -rounded : rounded;
 
-    return (int16_t)(product < 0 ? -(int32_t)rounded : (int32_t)rounded);
+    if (value > 32767) {
+        value = 32767;
+    } else if (value < -32768) {
+        value = -32768;
+    }
+
+    return (int16_t)value;
 }
 
 #if defined(SLOPSIX_EXTRAS)
@@ -98,7 +117,10 @@ int16_t slopsix_output_scale(int32_t code, int32_t gain_q16)
  * the travel it is panned towards and fades linearly across the other
  * half; at centre both amounts are the Q15 unity, so the split is
  * exactly the mono signal in both channels.  The amounts are Q15
- * (32768 == unity gain), so the split is one floor-division shift. */
+ * (32768 == unity gain), so the split is one floor-division shift.
+ *
+ * The mono value is the filter's output in Q12 of a DAC code, so the
+ * product is 64-bit. */
 void slopsix_pan_split(int32_t pan_q16, int32_t mono, int32_t *left,
                        int32_t *right)
 {
@@ -121,27 +143,29 @@ void slopsix_pan_split(int32_t pan_q16, int32_t mono, int32_t *left,
         right_amount = SLOPSIX_Q16_ONE / 2;
     }
 
-    *left = slopsix_floor_div(mono * left_amount, 15u);
-    *right = slopsix_floor_div(mono * right_amount, 15u);
+    *left = (int32_t)slopsix_floor_div64((int64_t)mono * left_amount, 15u);
+    *right = (int32_t)slopsix_floor_div64((int64_t)mono * right_amount, 15u);
 }
 #endif
 
-/* The once-per-sample composite: the DAC step, the compile-time-selected
- * pan and the master conversion.  Without SLOPSIX_EXTRAS the mono code
- * lands in both channels unchanged - the faithful centre output. */
-void slopsix_output_mix(const slopsix_context_state *state, int32_t bus,
+/* The once-per-sample composite: the DAC step, the analog tail's
+ * filter, the compile-time-selected pan and the master conversion.
+ * Without SLOPSIX_EXTRAS the mono code lands in both channels unchanged -
+ * the faithful centre output. */
+void slopsix_output_mix(slopsix_context_state *state, int32_t bus,
                         int16_t *left, int16_t *right)
 {
     int32_t code = slopsix_dac_step(bus);
+    int32_t value = slopsix_filter_process(&state->filter, code);
     int32_t left_code;
     int32_t right_code;
     int32_t gain;
 
 #if defined(SLOPSIX_EXTRAS)
-    slopsix_pan_split(state->pan_q16, code, &left_code, &right_code);
+    slopsix_pan_split(state->pan_q16, value, &left_code, &right_code);
 #else
-    left_code = code;
-    right_code = code;
+    left_code = value;
+    right_code = value;
 #endif
 
     gain = slopsix_master_gain_q16(state->master_volume);

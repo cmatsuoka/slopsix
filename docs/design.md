@@ -98,7 +98,7 @@ read together.
 | OU-01 | DAC and compander | **Partial (hardware + model):** 14-bit → 12-bit mantissa + 3-bit shift per voice; the model selects the shift by magnitude (≥`0x1000` drop 3, ≥`0x800` drop 2, ≥`0x400` drop 1, else none); exact SF-code numbering and saturation remain open. |
 | OU-02 | Saturation and overflow | **Open:** summed-voice overflow behaviour not pinned; the model does not cover saturation. |
 | OU-03 | Effective sample rate | **Resolved:** 49,096 Hz (≈49,096.354 from the 9.4265 MHz master clock / 192; E-clock / 24). |
-| OU-04 | Analog tail | **Decided:** out of scope for v1; 3-bit master volume is a public parameter. |
+| OU-04 | Analog tail | **Partial (shipped):** the board's reconstruction filter is in the engine — a 5th-order cascade after the DAC step, fitted to the VDX7 reference response, with its digital design derived for the host's rate from the filter's analog prototype. The two-hold sample-and-hold reconstruction and the analog volume stage stay out; the 3-bit master volume is a public parameter. |
 
 ## Voice, patch and host boundaries
 

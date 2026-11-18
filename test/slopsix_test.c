@@ -19,6 +19,8 @@
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   ctrl        the controllers: scaling, routes and both registers
+ *   filter      the analog tail: the reconstruction filter's design,
+ *               its DC gain and its response
  *   output      the output stages: compander, DAC step, pan law and master
  *   api         the public API: engine selection, the patch I/O, the
  *               setters' error reporting and the capability queries
@@ -1996,6 +1998,231 @@ static void compander_expect(int32_t sample, int32_t mantissa,
     }
 }
 
+/* The output stage's filter is stateful: a constant bus has to run
+ * through it before its steady state can be read.  The filter's DC gain
+ * is one, so a settled constant lands on the code's own value. */
+static void output_settle(slopsix_context_state *state, int32_t bus,
+                          int16_t *left, int16_t *right)
+{
+    int i;
+
+    for (i = 0; i < 4096; i++) {
+        slopsix_output_mix(state, bus, left, right);
+    }
+}
+
+/* The closeness of a measured value to its expectation: the filter's
+ * settled value carries the fixed point's last bits, so the output
+ * stages' exact values are read with a small tolerance. */
+static int output_near(int16_t got, int expect, int tolerance)
+{
+    int delta = (int)got - expect;
+
+    if (delta < 0) {
+        delta = -delta;
+    }
+    return delta <= tolerance;
+}
+
+/* ------------------------------------------- the analog tail's filter
+ *
+ * The reconstruction filter: the prototype's coefficients at the anchor
+ * rate, the DC gain, and the response at the reference's frequencies.
+ * The response is measured through the filter itself - a sine runs
+ * through it and the steady-state amplitude ratio is read back - so the
+ * check is on the engine's own arithmetic and not on the coefficients
+ * alone.
+ */
+
+/* The prototype, as the research page's candidate fit (the table the
+ * generator emits). */
+static const int32_t filter_prototype[3][5] = {
+    { 535498195, 535498195, 0, -2745435, 0 },
+    { 610876461, 1221752922, 610876461, 762572659, 607191361 },
+    { 953291420, 1906582839, 953291420, 1794846297, 944577557 }
+};
+
+/* A sine wave: the phase runs in 32 bits over a whole period and the
+ * wave is the polynomial sine on a quarter wave, in Q15.
+ *
+ *   sin(x) ~ x - x^3/6 + x^5/120 - x^7/5040
+ *
+ * The argument is at most pi/2, where the truncation leaves about 1.6e-4
+ * of the amplitude - far below the measurement's own tolerance. */
+static int32_t harness_sin(uint32_t phase)
+{
+    uint32_t quadrant = (phase >> 30) & 3u;
+    uint32_t index = phase & 0x3FFFFFFFu;
+    int64_t x;
+    int64_t x2;
+    int64_t x3;
+    int64_t x5;
+    int64_t x7;
+    int32_t value;
+
+    if ((quadrant & 1u) != 0u) {
+        /* The second and the fourth quadrant mirror the wave. */
+        index = (1u << 30) - 1u - index;
+    }
+
+    /* The argument inside the quarter wave, in Q15 (pi/2 is 51472).  The
+     * powers are 64-bit: a Q15 product of two quarter-wave arguments
+     * overflows 32 bits. */
+    x = (int64_t)(((uint64_t)index * 51472u) >> 30);
+    x2 = (x * x) >> 15;
+    x3 = (x2 * x) >> 15;
+    x5 = (x3 * x2) >> 15;
+    x7 = (x5 * x2) >> 15;
+
+    value = x - (x3 / 6) + (x5 / 120) - (x7 / 5040);
+
+    if (quadrant >= 2u) {
+        value = -value;
+    }
+
+    return value;
+}
+
+/* The filter's gain at a frequency, as a Q16 ratio: a sine of that
+ * frequency runs through the filter and the steady-state amplitude ratio
+ * is read back. */
+static int32_t filter_gain_q16(uint32_t sample_rate, uint32_t freq)
+{
+    slopsix_filter filter;
+    uint32_t step = (uint32_t)(((uint64_t)freq << 32) / sample_rate);
+    uint32_t phase = 0;
+    int32_t peak_in = 0;
+    int32_t peak_out = 0;
+    int i;
+
+    slopsix_filter_init(&filter, sample_rate);
+
+    for (i = 0; i < 8192; i++) {
+        /* The sine in Q15 becomes a DAC code: the full scale is 2047. */
+        int32_t code = harness_sin(phase) >> 4;
+        int32_t out = slopsix_filter_process(&filter, code);
+
+        phase += step;
+
+        if (i >= 2048) {
+            int32_t mag_in = code < 0 ? -code : code;
+            int32_t mag_out = out < 0 ? -out : out;
+
+            if (mag_in > peak_in) {
+                peak_in = mag_in;
+            }
+            if (mag_out > peak_out) {
+                peak_out = mag_out;
+            }
+        }
+    }
+
+    if (peak_in == 0) {
+        return 0;
+    }
+
+    /* The filter's output is in Q12 of a DAC code, the input's peak is
+     * in codes, so the ratio carries the Q12 shift. */
+    return (int32_t)(((int64_t)peak_out << 16) /
+                     ((int64_t)peak_in << SLOPSIX_FILTER_Q12));
+}
+
+/* The closeness of a measured gain to its expectation, in percent. */
+static int filter_gain_near(int32_t got, int32_t expect, int percent)
+{
+    int64_t delta = (int64_t)got - expect;
+    int64_t tolerance = ((int64_t)expect * percent) / 100;
+
+    if (delta < 0) {
+        delta = -delta;
+    }
+
+    return delta <= tolerance;
+}
+
+static void stage_filter(void)
+{
+    slopsix_filter filter;
+    unsigned section;
+    unsigned k;
+
+    printf("stage filter\n");
+
+    /* The anchor rate's design is the prototype: the transform's round
+     * trip is exact up to the fixed point's last bits. */
+    slopsix_filter_init(&filter, SLOPSIX_DEFAULT_SAMPLE_RATE);
+    for (section = 0; section < SLOPSIX_FILTER_SECTIONS; section++) {
+        int match = 1;
+
+        for (k = 0; k < 5u; k++) {
+            int32_t want = filter_prototype[section][k];
+            int32_t got;
+
+            switch (k) {
+            case 0: got = filter.section[section].b0; break;
+            case 1: got = filter.section[section].b1; break;
+            case 2: got = filter.section[section].b2; break;
+            case 3: got = filter.section[section].a1; break;
+            default: got = filter.section[section].a2; break;
+            }
+
+            if (got > want + 64 || got < want - 64) {
+                match = 0;
+            }
+        }
+        check(match, "the anchor rate's design is the prototype");
+    }
+
+    /* The DC gain: a constant code settles on its own value. */
+    {
+        int32_t value = 0;
+        int i;
+
+        slopsix_filter_init(&filter, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        for (i = 0; i < 4096; i++) {
+            value = slopsix_filter_process(&filter, 1000);
+        }
+        check(value >= (1000 << SLOPSIX_FILTER_Q12) - 4 &&
+              value <= (1000 << SLOPSIX_FILTER_Q12) + 4,
+              "the filter's DC gain is one");
+
+        slopsix_filter_init(&filter, SLOPSIX_DEFAULT_SAMPLE_RATE);
+        for (i = 0; i < 4096; i++) {
+            value = slopsix_filter_process(&filter, -1000);
+        }
+        check(value <= (-1000 * (1 << SLOPSIX_FILTER_Q12)) + 4 &&
+              value >= (-1000 * (1 << SLOPSIX_FILTER_Q12)) - 4,
+              "the filter's DC gain is one on the negative side too");
+    }
+
+    /* The response at the reference's frequencies: the passband, the
+     * +0.78 dB peak at 14.65 kHz, the -3 dB corner at 17.02 kHz and the
+     * stopband at 20 kHz. */
+    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 1000),
+                           65536, 2), "the passband is flat at 1 kHz");
+    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 14650),
+                           71692, 3), "the peak at 14.65 kHz is +0.78 dB");
+    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 17020),
+                           46400, 3), "the corner at 17.02 kHz is -3 dB");
+    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 20000),
+                           13184, 5), "the stopband at 20 kHz is -13.9 dB");
+
+    /* The rate scaling: the corner stays where it is at another host
+     * rate, and the passband stays flat. */
+    check(filter_gain_near(filter_gain_q16(48000u, 1000), 65536, 2),
+          "the 48 kHz design's passband is flat");
+    check(filter_gain_near(filter_gain_q16(48000u, 17020), 46400, 3),
+          "the 48 kHz design keeps the corner at -3 dB");
+    check(filter_gain_near(filter_gain_q16(44100u, 17020), 46400, 3),
+          "the 44.1 kHz design keeps the corner at -3 dB");
+
+    /* A host rate that cannot carry the corner: the filter is
+     * transparent, because the reference's response is flat below the
+     * corner and the corner is above the host's Nyquist. */
+    check(filter_gain_near(filter_gain_q16(32000u, 10000), 65536, 2),
+          "a rate that cannot carry the corner leaves the filter flat");
+}
+
 static void stage_output(void)
 {
     static const int32_t ladder[8] = {
@@ -2130,24 +2357,35 @@ static void stage_output(void)
     check(slopsix_master_gain_q16(8u) == ladder[7],
           "a level past the top of the ladder clamps to it");
 
-    /* The final conversion: rounding to the int16 grid at unity gain. */
-    check(slopsix_output_scale(2047, SLOPSIX_Q16_ONE) == 32752,
+    /* The final conversion: rounding to the int16 grid at unity gain.
+     * The value is the analog stage's output in Q12 of a DAC code, so
+     * the code window's rails are the Q12 values of 2047 and -2048. */
+    check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12,
+                               SLOPSIX_Q16_ONE) == 32752,
           "the code window's top lands on 32752 at unity gain");
-    check(slopsix_output_scale(-2048, SLOPSIX_Q16_ONE) == -32768,
+    check(slopsix_output_scale(-2048 * (1 << SLOPSIX_FILTER_Q12),
+                               SLOPSIX_Q16_ONE) == -32768,
           "the code window's floor lands on -32768");
-    check(slopsix_output_scale(2046, SLOPSIX_Q16_ONE) == 32736,
+    check(slopsix_output_scale(2046 << SLOPSIX_FILTER_Q12,
+                               SLOPSIX_Q16_ONE) == 32736,
           "unity gain keeps the int16 output on the 12-bit grid");
-    check(slopsix_output_scale(100, SLOPSIX_Q16_ONE) == 1600,
+    check(slopsix_output_scale(100 << SLOPSIX_FILTER_Q12,
+                               SLOPSIX_Q16_ONE) == 1600,
           "unity gain keeps the int16 output on the 12-bit grid");
-    check(slopsix_output_scale(2047, 36052) == 18017,
+    check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12, 36052) == 18017,
           "a ladder tap scales the code");
-    check(slopsix_output_scale(-2048, 1340) == -670,
+    check(slopsix_output_scale(-2048 * (1 << SLOPSIX_FILTER_Q12), 1340) == -670,
           "the quietest tap scales the code");
+    check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12,
+                               SLOPSIX_Q16_ONE) == 32752 &&
+          slopsix_output_scale(4096 << SLOPSIX_FILTER_Q12,
+                               SLOPSIX_Q16_ONE) == 32767,
+          "the conversion saturates at the int16 rails");
 
     {
         slopsix_context ctx;
         slopsix_context_state *state;
-        int16_t l1, r1, l2, r2;
+        int16_t l1, r1;
 
         ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
         if (ctx == NULL) {
@@ -2161,30 +2399,53 @@ static void stage_output(void)
               "the default master volume is the hardware's reset value");
 
         /* The composite at default settings: full scale in, one voice's
-         * window top out, left and right identical. */
-        slopsix_output_mix(state, 16376, &l1, &r1);
-        check(l1 == 32752 && r1 == 32752,
+         * window top out, left and right identical.  The analog tail's
+         * filter is stateful, so the constant bus is settled first. */
+        output_settle(state, 16376, &l1, &r1);
+        check(output_near(l1, 32752, 2) && output_near(r1, 32752, 2),
               "the mixed bus's full scale lands on the code window's top");
-        slopsix_output_mix(state, 16384, &l1, &r1);
-        check(l1 == 32752 && r1 == 32752,
+        output_settle(state, 16384, &l1, &r1);
+        check(output_near(l1, 32752, 2) && output_near(r1, 32752, 2),
               "a bus past one voice's window saturates instead of growing");
-        slopsix_output_mix(state, -16384, &l1, &r1);
-        check(l1 == -32768 && r1 == -32768,
+        output_settle(state, -16384, &l1, &r1);
+        check(output_near(l1, -32768, 2) && output_near(r1, -32768, 2),
               "the negative rail saturates at -32768");
 
-        /* Determinism: the same state and input produce the same output. */
-        slopsix_output_mix(state, 12345, &l1, &r1);
-        slopsix_output_mix(state, 12345, &l2, &r2);
-        check(l1 == l2 && r1 == r2, "the mix is deterministic");
+        /* Determinism: the same state and the same input sequence produce
+         * the same output.  The filter is stateful, so the replay starts
+         * from a reset context. */
+        {
+            int16_t first[8];
+            int16_t second[8];
+            int same = 1;
+            int i;
+
+            slopsix_reset(ctx);
+            for (i = 0; i < 4; i++) {
+                slopsix_output_mix(state, 12345, &first[i * 2],
+                                   &first[i * 2 + 1]);
+            }
+            slopsix_reset(ctx);
+            for (i = 0; i < 4; i++) {
+                slopsix_output_mix(state, 12345, &second[i * 2],
+                                   &second[i * 2 + 1]);
+            }
+            for (i = 0; i < 8; i++) {
+                if (first[i] != second[i]) {
+                    same = 0;
+                }
+            }
+            check(same, "the mix is deterministic");
+        }
 
         /* The volume ladder through the composite. */
         slopsix_set_master_volume(ctx, 0u);
-        slopsix_output_mix(state, 16376, &l1, &r1);
-        check(l1 == 670 && r1 == 670,
+        output_settle(state, 16376, &l1, &r1);
+        check(output_near(l1, 670, 2) && output_near(r1, 670, 2),
               "volume 0 is the ladder's bottom tap, not silence");
         slopsix_set_master_volume(ctx, 3u);
-        slopsix_output_mix(state, 16376, &l1, &r1);
-        check(l1 == 3215 && r1 == 3215,
+        output_settle(state, 16376, &l1, &r1);
+        check(output_near(l1, 3215, 2) && output_near(r1, 3215, 2),
               "volume 3's tap scales the mixed code");
         slopsix_set_master_volume(ctx, 7u);
 
@@ -2192,26 +2453,28 @@ static void stage_output(void)
         /* The pan law through the composite: centre is bit-identical
          * mono-in-both-channels, the extremes are hard splits.  The bus
          * 8000 maps to code 1000, which at unity gain is 16000. */
-        slopsix_output_mix(state, -12800, &l1, &r1);
-        check(l1 == -25600 && r1 == -25600,
+        output_settle(state, -12800, &l1, &r1);
+        check(output_near(l1, -25600, 2) && output_near(r1, -25600, 2),
               "the default centre keeps both channels identical");
         slopsix_set_pan(ctx, 0);
-        slopsix_output_mix(state, 8000, &l1, &r1);
-        check(l1 == 16000 && r1 == 0, "hard left carries the mono signal alone");
+        output_settle(state, 8000, &l1, &r1);
+        check(output_near(l1, 16000, 2) && r1 == 0,
+              "hard left carries the mono signal alone");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE);
-        slopsix_output_mix(state, 8000, &l1, &r1);
-        check(l1 == 0 && r1 == 16000, "hard right carries the mono signal alone");
+        output_settle(state, 8000, &l1, &r1);
+        check(l1 == 0 && output_near(r1, 16000, 2),
+              "hard right carries the mono signal alone");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 4);
-        slopsix_output_mix(state, 8000, &l1, &r1);
-        check(l1 == 16000 && r1 == 8000,
+        output_settle(state, 8000, &l1, &r1);
+        check(output_near(l1, 16000, 2) && output_near(r1, 8000, 2),
               "the left half keeps the mono level, the right fades");
         slopsix_set_pan(ctx, 3 * SLOPSIX_Q16_ONE / 4);
-        slopsix_output_mix(state, 8000, &l1, &r1);
-        check(l1 == 8000 && r1 == 16000,
+        output_settle(state, 8000, &l1, &r1);
+        check(output_near(l1, 8000, 2) && output_near(r1, 16000, 2),
               "the right half keeps the mono level, the left fades");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 2);
-        slopsix_output_mix(state, -12800, &l1, &r1);
-        check(l1 == -25600 && r1 == -25600,
+        output_settle(state, -12800, &l1, &r1);
+        check(output_near(l1, -25600, 2) && output_near(r1, -25600, 2),
               "centre is bit-identical, negative codes included");
 
         /* The pan law's own clamps, called directly on a code. */
@@ -2232,8 +2495,8 @@ static void stage_output(void)
 #else
         /* Without the extras the mono code lands in both channels
          * whatever a host stores in the state. */
-        slopsix_output_mix(state, 8000, &l1, &r1);
-        check(l1 == 16000 && r1 == 16000,
+        output_settle(state, 8000, &l1, &r1);
+        check(output_near(l1, 16000, 2) && output_near(r1, 16000, 2),
               "without the extras both channels carry the mono signal");
 #endif
 
@@ -3426,6 +3689,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--ctrl") == 0) {
             stage_ctrl();
             ran = 1;
+        } else if (strcmp(argv[i], "--filter") == 0) {
+            stage_filter();
+            ran = 1;
         } else if (strcmp(argv[i], "--output") == 0) {
             stage_output();
             ran = 1;
@@ -3461,6 +3727,7 @@ int main(int argc, char **argv)
         stage_pitcheg();
         stage_lfo();
         stage_ctrl();
+        stage_filter();
         stage_output();
         stage_api();
         stage_extras();

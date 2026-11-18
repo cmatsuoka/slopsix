@@ -94,6 +94,7 @@ PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_pitch.c \
              src/slopsix_algorithm.c \
              src/slopsix_output.c \
+             src/slopsix_filter.c \
              src/slopsix_voice.c
 
 CORE_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRCS))
@@ -108,7 +109,8 @@ TABLES := build/tables/logsin_table.c \
           build/tables/exp_table.c \
           build/tables/note_table.c \
           build/tables/com_table.c \
-          build/tables/freq_table.c
+          build/tables/freq_table.c \
+          build/tables/filter_table.c
 
 .PHONY: all check check-dx7 check-dx100 check-extras example tables \
         tables-install check-tables validate-render validate clean

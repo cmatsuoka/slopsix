@@ -28,6 +28,9 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, state->sample_rate);
+    /* The analog tail's filter: the design follows the host's rate and
+     * its state starts cleared. */
+    slopsix_filter_init(&state->filter, state->sample_rate);
     /* The controller arithmetic's cached values: the memset leaves all
      * inputs, ranges and routings at zero, and nothing routed is the
      * neutral total - the routine still runs once, as the firmware's
@@ -42,6 +45,7 @@ void slopsix_dx7_init(slopsix_context_state *state, uint32_t sample_rate)
         state->sample_rate = sample_rate;
         slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
         slopsix_lfo_cadence_init(&state->lfo_cadence, sample_rate);
+        slopsix_filter_init(&state->filter, sample_rate);
     }
 }
 
@@ -53,6 +57,7 @@ void slopsix_dx7_reset(slopsix_context_state *state)
     state->sample_rate = rate;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, rate);
+    slopsix_filter_init(&state->filter, rate);
 }
 
 void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
@@ -67,6 +72,9 @@ void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
     state->sample_rate = sample_rate;
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, sample_rate);
+    /* The analog tail's filter follows the host's rate: its digital
+     * design is derived again, and its state starts cleared. */
+    slopsix_filter_init(&state->filter, sample_rate);
 
     /* The sounding voices re-anchor: the envelopes take the host rate
      * (a stage already in progress keeps its current timing until the
