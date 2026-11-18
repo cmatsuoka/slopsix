@@ -36,6 +36,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Library version. major/minor/patch are packed as 0x00MMmmpp.
+ * The plain integer constants keep SLOPSIX_VERSION_NUMBER usable in #if. */
+#define SLOPSIX_VERSION_MAJOR 0
+#define SLOPSIX_VERSION_MINOR 1
+#define SLOPSIX_VERSION_PATCH 0
+#define SLOPSIX_VERSION_NUMBER \
+    ((SLOPSIX_VERSION_MAJOR << 16) | \
+        (SLOPSIX_VERSION_MINOR << 8) | SLOPSIX_VERSION_PATCH)
+
 /* Capability macros: what this build can do.  The host can test them at
  * compile time, so a program that uses an optional feature can be built
  * for a build without it.
@@ -85,6 +94,12 @@ typedef enum {
     SLOPSIX_ERR_RANGE = 2,        /* value out of range (clamped) */
     SLOPSIX_ERR_INVALID = 3       /* malformed input */
 } slopsix_error;
+
+/* Return the version of the library the process is linked against, packed as
+ * SLOPSIX_VERSION_NUMBER. This reports the compiled library, so a host can
+ * compare it with the header's SLOPSIX_VERSION_NUMBER to detect a mismatched
+ * build. */
+uint32_t slopsix_version_number(void);
 
 /* The context is opaque: it is created, configured and rendered. */
 typedef void *slopsix_context;

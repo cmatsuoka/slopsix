@@ -1191,3 +1191,8 @@ uint32_t slopsix_context_sample_rate(const slopsix_context ctx)
     }
     return impl->sample_rate;
 }
+
+uint32_t slopsix_version_number(void)
+{
+    return SLOPSIX_VERSION_NUMBER;
+}

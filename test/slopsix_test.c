@@ -3451,6 +3451,10 @@ static void stage_api(void)
         return;
     }
 
+    /* Version reporting. */
+    check(slopsix_version_number() == SLOPSIX_VERSION_NUMBER,
+          "slopsix_version_number() returns the header version");
+
     /* The capability queries. */
     check(slopsix_context_engine(ctx) == SLOPSIX_ENGINE_DX7,
           "the context reports the engine it was created for");
