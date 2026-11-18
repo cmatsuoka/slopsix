@@ -60,6 +60,21 @@
   the fixed INIT VOICE. The scan omits the specification, MIDI and
   voice-data appendices.
 
+## Patents
+
+- **John M. Chowning, US 4,018,121 — "Method of synthesizing a
+  musical sound"** — <https://patents.google.com/patent/US4018121A>.
+  Original FM patent; the `sin{Kωt + f(ωmt)}` phase-addition formulation.
+- **Norio Tomisawa, US 4,249,447 — "Tone production method for an
+  electronic musical instrument"** —
+  <https://patents.google.com/patent/US4249447A>. Operator self-feedback
+  with the "anti-hunting" averaging of the last two samples.
+- **Tetsuo Nishimoto, US 4,554,857 — "Electronic musical instrument
+  capable of varying a tone synthesis operation algorithm"** —
+  <https://patents.google.com/patent/US4554857A>. The
+  operator box (phase modulation, log-domain `I(t)`/`A(t)` envelope) and
+  the log frequency-number format.
+
 ## Firmware, ROM images and disassembly
 
 - **ajxs, annotated DX7 v1.8 ROM disassembly** —
