@@ -52,220 +52,25 @@ NATIVE_RATE = 49096
 # The hand-written analysis that follows the generated tables.  It is
 # static text: the numbers in it come from the renders of the current
 # report, and it is kept here so that a regeneration does not lose it.
-FINDINGS_SECTION = """## Findings
+FINDINGS_SECTION = """## Open questions
 
-### Status after the level-offset fix
+The remaining open accuracy items in this set are:
 
-After the 2026-11-18 operator-level offset fix the divergence list is
-empty: every patch's spectral and envelope deviations are inside the
-range the two references span.  The outlier counts are now
-
-| Metric | slopsix outlier | VDX7 outlier | agree |
-|---|---|---|---|
-| envelope | 3 | 43 | 18 |
-| spectrum | 0 | 21 | 43 |
-
-Overall slopsix is *closer* to VDX7 than Dexed is: median spectral
-distance **0.058** against Dexed's 0.685, median envelope distance
-**1.44 dB** against Dexed's 2.54 dB.  Slopsix is at least as close as
-Dexed on **54/64** spectrum rows and **54/64** envelope rows.
-
-### The operator level offset: corrected (2026-11-18)
-
-The level composition's reference offset was 4256 Q8 units, one octave
-too high.  A per-operator trace against VDX7 showed every raw operator
-signal was exactly half VDX7's at the same EGS registers, while the
-relative levels were correct.  The offset is a domain calibration, and
-the compander sits downstream of the operator graph: changing it does
-not cancel the modulation depth.  The earlier note that offset 4000
-left the factory renders byte-identical was an artifact of the
-pre-fix comparison and is withdrawn.
-
-At offset **4000** the raw operator signals match VDX7 (e.g. ROM 3B
-program 14's operator 4 peaks at 3920 in both), and the timbre follows:
-
-- median spectral distance to VDX7: **0.434 -> 0.058**
-- patches at least as close as Dexed, spectrum: **43/64 -> 54/64**
-- envelope median: **1.65 -> 1.44 dB** (54/64 rows)
-- ROM 1A 30 (TRAIN): the "extra" 977 Hz partial disappears; its spectral
-  S-V is 0.065 against Dexed's 0.046.
-- ROM 1A 25 (TUB BELLS): spectral S-V is 0.154 against Dexed's 0.152.
-- ROM 3B 14: spectral S-V is 0.018, matching the 3x carriers and their
-  sidebands.
-
-The absolute output rises by one octave with the corrected operator
-scale; the output stage's DAC step and compander handle the new level,
-and the chord test now admits the negative rail (-32768).  The remaining
-slopsix outliers are envelope-only (ROM 3B 5/9/24), which is the EGS
-envelope cadence/timing work, not the operator or modulation path.
-
-### The envelope and spectrum after the EG fixes
-
-The equal-target and rate-scaling fixes first put the envelope within
-1.65 dB of VDX7 on 51/64 rows; the later level-offset fix carries that to
-1.44 dB on 54/64 rows.  The spectral median was 0.333 immediately after
-the selector fix and 0.434 after the envelope fixes changed the analysis
-window; it is 0.058 after the level-offset fix.  The envelope-only
-outliers are ROM 3B 5/9/24.
-
-### The fine-frequency table's 101st word (2026-11-18)
-
-ROM 3B program 14 (60's organ) carries a serialised fine value of **100**
-on its carrier operator 1 (coarse 0, fine 100). The firmware's fine
-frequency table is not 100 words long: it has a 101st word, `0x1000`,
-and the firmware indexes it without clamping (the operator's fine byte
-is multiplied by two and added to the table base). The extra word is the
-2.0 ratio, so coarse 0/fine 100 is the 1.0 ratio, not the 0.5 ratio. The
-engine indexed `fine % 100`, wrapping 100 to 0 and dropping that carrier
-by an octave; VDX7 and Dexed both keep it at the note's pitch. The table
-now has 101 entries (`slopsix_fine_offset[100] = 4096`), the ratio path
-clamps a serialised value above 100 to the last defined word, and the
-fixed-frequency path uses the raw fine byte (0..127) as the firmware
-does, without the modulo.
-
-Alone (at the old level offset) program 14's spectral distance to VDX7
-dropped from **1.59 to 0.85** and the envelope from 0.33 to 0.26 dB.
-After the later level-offset fix the row is **0.018** spectral and
-**0.25 dB** envelope: the fine-table correction and the one-octave
-operator-scale correction together restore the two 3x carriers and their
-modulation sidebands.
-
-### The algorithms, checked one by one
-
-The engine's algorithm ROM table matches the chip's entry for entry (the
-selector, the feedback-pair store bit, the C/D control bits and the COM
-code: 0 mismatches in 192 entries), and the carrier sets reproduce the
-documented chart. Five corrections settled on 2026-11-18 - all adopt the
-firmware's own semantics, which VDX7 (the register file shows the raw
-pass-through) and Dexed (its table indexer) already implement:
-
-- **The algorithm field of the dump is the OPS's 0..31 row.** The
-  listing's PATCH_ACTIVATE_ALG_MODE composes the $2805 register as
-  `PATCH_ALGORITHM << 3 | feedback` with no adjustment, so the dump's
-  byte is the raw row (the panel displays one more). The engine used to
-  read the field as 1..32 - one row off from both references across
-  every render comparison. The earlier per-algorithm sweep numbers in
-  this section were taken across adjacent rows and are retired; the
-  sweep gets re-run on the corrected convention.
-- **The selector belongs to the producer's row.** The walk applies a
-  column's selector after computing operator N to modulate operator N-1,
-  so the decoder stores it on operator N, not on the consumer N-1. The
-  earlier placement shifted every selector by one operator; the COM code
-  and carrier flag stay on the consumer. This is the 2026-11-18 fix that
-  drops the spectral median to 0.331.
-- **The static hold applies only to stages 2 and 3.** A held stage 0/1
-  whose target already equals the current level advances immediately, as
-  the EGS does; waiting for the measured static duration held BANJO's
-  carrier too long. This is the envelope fix above.
-- **The rate scaling is `round(x*sens/7)`.** The BANJO trace gives 6 for
-  sens 3 and 13 for sens 7; the old `>>3` form gave 4 and 11 and left the
-  envelope too slow. This is the rate-scaling fix above.
-- **The sum/delay register is the die's own model**: `msum = (C ? mren :
-  0) + (D ? signal : 0)`, the selector reads the register's new value
-  (SEL2), the value before the producer's update (SEL3), the feedback
-  pair's last stored value (SEL4, live - a push earlier in the same walk
-  reaches the reader), or the averaged pair (SEL5). The earlier
-  provisional two-bus model let double-writing operators shadow a
-  loaded value, which severed the {4,5}->3 sums of algorithms 7/8/9, the
-  {5,6}->4 sums of 10/11/14/15/26/27, the {4,5,6}->3 sums of 12/13 and
-  the {2,3,5}->1 output sums of 16/17/18 (all 1-based); the die
-  walkthrough pins the accumulate semantics and the chart draws them.
-
-On the corrected engine the two factory banks' median spectral distance
-to VDX7 is 0.434 (was 0.492) and the median envelope distance 1.65 dB
-(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 43/64 spectra
-(was 33/64) and 54/64 envelopes. The remaining divergences concentrate on the EGS EG-cadence
-items (E-01/E-02, population A above) and the fixed-frequency
-operator's level law (population B above); the algorithm walk itself
-now matches the reference.
-
-### The operator envelope: equal-target held stages (2026-11-18)
-
-The operator EG's stages 0 and 1 must advance immediately when their
-target already equals the current level; only the sustain and release
-stages hold. The engine waited for the measured static duration on every
-equal-target stage, which made BANJO's carrier hold L1 == L2 for about
-0.45 s. Restricting the static hold to stages 2 and 3 cuts BANJO's
-envelope distance to VDX7 from 24.4 to 9.09 dB (ROM 1A program 01:
-4.04 -> 1.17 dB) with no material change to the medians. The remaining
-BANJO gap is the stage-2 decay rate: slopsix still reaches the off level
-later than VDX7, so the EGS rate law is the next target.
-
-### The EG rate scaling: corrected (2026-11-18)
-
-The BANJO trace pinned the EGS key-scaling law: op3 (sens 3) gets delta 6
-and op1 (sens 7) gets 13, while the old `>>3` form gave 4 and 11. Using
-`round(x*sens/7)` cuts BANJO's envelope distance from 9.09 to 2.68 dB and
-the 64-patch envelope median from 2.54 to 1.65 dB (51/64; 54/64 after the later level-offset fix), and MARIMBA
-from 11.24 to 3.51 dB (Dexed is 11.81). The fixed-window spectral median
-rises from 0.333 to 0.434 because the corrected envelopes change the
-analysis window; the timbre path is next. The note-dependent `x` mapping
-remains the engine's `note/3 - 7` approximation of the EGS voice-pitch
-group.
-
-### The algorithm selector mapping: corrected (2026-11-18)
-
-The engine's walk reads a selector after computing operator N to produce
-operator N-1's modulation, but the decoder stored each ROM column's
-selector on the *consumer* row. The selector was therefore applied one
-operator early: algorithms whose adjacent selectors differ (18, 15, 6,
-...) fed the wrong signal, sum or feedback value into the next row. The
-decoder now stores the selector on the producer row; the COM code and
-the carrier flag remain on the consumer. The 64-patch median spectral
-distance to VDX7 drops from 0.467 to 0.331, the envelope median from
-2.78 to 2.54 dB, and slopsix is at least as close as Dexed on 41/64
-spectra and 37/64 envelopes. The flagged PIANO 2 (algorithm 18) and
-CLAS.GUIT (algorithm 15) renders now follow the reference walk.
-
-### The operator feedback: resolved (2026-11-18)
-
-The earlier report had this open as "the operator that reads the
-feedback path is wrong". That identification had two sources, both now
-corrected, and neither was the reader:
-
-- the **algorithm row shifted by one**, so the analysed row was the
-  neighbour's (BANJO's dump byte 7 is the hardware's algorithm 8, not
-  7);
-- the **register model's shadowing**, which in that row severed the
-  6->{5}->3 sum path that carries the feedback into the carrier
-  operator 3, leaving the loop audibly dead - BANJO rendered
-  bit-identically at feedback 0 and 7 (the old engine's 0 counts against
-  the reference's 4343).
-
-The reader/wiring was right all along: in every checked-in algorithm the
-reader is the operator whose selector is SEL=4/5, with column 1 wrapping
-to operator 6. The feedback pair is pushed **only where a row carries
-the store bit** - in the self-feedback loops the reading operator's own
-row carries it; in algorithms 4 and 6 (0-based rows 3 and 5) the ROM puts
-the store bit on operator 4 resp. operator 5 while the reader is
-operator 6, and the engine's old implicit "the reader's own output joins
-the path" rule added a spurious contributor there. The pair now also
-carries the die's push timing, so the delayed feedback selector (SEL4,
-algorithms 19-25, 1-based) sees a same-walk push where the old engine was
-one sample late.
-
-Measured 2026-11-18 on the corrected engine: BANJO (dump byte 7)
-responds to feedback 0 vs 7 with 2143 counts against the reference's
-4342 at the same scenario; the residual difference tracks the model
-items still open, not the feedback wiring.
-
-### The patch loading, checked against the firmware
-
-The firmware's own register writes can be checked directly: the reference emulator exposes the EGS's register file, so the values the firmware hands the chip can be compared with the engine's own composition over every patch of the banks. The result:
-
-| Quantity | Matches the firmware |
-|---|---|
-| the EG rate registers | 64/64 patches |
-| the EG level registers | 64/64 patches |
-| the operator frequency registers (ratio and fixed mode) | all |
-| the detune and the rate-scaling/amp-mod registers | all |
-| the operator level register | 1/64 patches before the fix below |
-
-The patch *fields* therefore load correctly; the discrepancy was in the **level pipeline**. Two firmware laws have since been applied to the engine (research: the firmware page's level-pipeline section):
-
-- the **velocity route** now reads the firmware's velocity table backwards, at `32 - (velocity >> 2)`, so the softest key reads the byte that follows the table in the ROM. The operator level register now matches the firmware **exactly** for every operator without a keyboard-level-scaling depth (259 of the 384 operator instances over the 64 patches; the mean error is 0.00 units).
-- the keyboard level scaling's **index space** is still open: the engine's distance from the breakpoint differs from the firmware's, which leaves a mean residual of 1.3 register units on the operators that do have a scaling depth. The magnitude law itself is confirmed.
-
+- **E-02/E-03/OQ-09**: the exact note-dependent `x` mapping in the EGS
+  rate-scaling law, and a hardware capture of the envelope clock.
+- **E-05/OQ-25**: the keyboard-level-scaling index space. The engine's
+  operator level register still differs from the firmware's on the
+  operators with a scaling depth (mean 1.3 register units).
+- **O-07**: the 4000 level offset is calibrated against VDX7's raw
+  operator signal, not a hardware capture; the absolute level remains
+  model-grade.
+- **A-02/OQ-20/OQ-27**: the hardware load/read phase and key-on
+  persistence of the sum/delay and feedback registers.
+- **O-06/OQ-08**: a hardware capture of the feedback level-to-shift path.
+- **OU-01/OQ-06**: the compander's exact SF-code numbering and
+  saturation/overflow behaviour.
+- **T-02**: the hardware evidence set; the comparisons here use VDX7 and
+  Dexed as model references.
 """.splitlines()
 
 
@@ -278,7 +83,7 @@ def bank_names(bank_path):
     names = []
     for i in range(32):
         voice = data[6 + i * 128:6 + (i + 1) * 128]
-        names.append(voice[118:128].decode("ascii", "replace").rstrip())
+        names.append(voice[118:128].decode("ascii", "replace").strip())
     return names
 
 
@@ -545,6 +350,77 @@ def main():
     return 0
 
 
+def patch_label(row):
+    """The patch's display label: its name, or its program index if blank."""
+    name = " ".join((row.get("name") or "").split())
+    return name if name else "p%02d" % row["program"]
+
+
+def append_discrepancies(lines, rows):
+    """List the current largest differences and the slopsix-only outliers."""
+    spectral = []
+    envelope = []
+    spec_only = []
+    env_only = []
+
+    for row in rows:
+        if not (row.get("vdx7") and row.get("dexed")):
+            continue
+        v, s, d = row["vdx7"], row["slopsix"], row["dexed"]
+        spec_sv = spectral_distance(v.spectrum, s.spectrum)
+        spec_dv = spectral_distance(v.spectrum, d.spectrum)
+        env_sv = envelope_distance(v.envelope, s.envelope)
+        env_dv = envelope_distance(v.envelope, d.envelope)
+        if not math.isnan(spec_sv) and not math.isnan(spec_dv):
+            spectral.append((spec_sv, spec_dv, row))
+            if spec_sv > 1.0 and spec_sv > 1.3 * spec_dv:
+                spec_only.append((spec_sv, spec_dv, row))
+        if not math.isnan(env_sv) and not math.isnan(env_dv):
+            envelope.append((env_sv, env_dv, row))
+            if env_sv > 1.0 and env_sv > 1.3 * env_dv:
+                env_only.append((env_sv, env_dv, row))
+
+    lines.append("## Current discrepancies")
+    lines.append("")
+    lines.append("Largest spectral differences to VDX7 (absolute S-V, top 5):")
+    lines.append("")
+    lines.append("| Bank | Patch | Spec S-V | Spec D-V |")
+    lines.append("|---|---|---:|---:|")
+    for sv, dv, row in sorted(spectral, key=lambda x: -x[0])[:5]:
+        lines.append("| %s | %s | %s | %s |"
+                     % (row["bank"], patch_label(row), fmt(sv, 3), fmt(dv, 3)))
+    lines.append("")
+    lines.append("Largest envelope differences to VDX7 (absolute S-V, top 5):")
+    lines.append("")
+    lines.append("| Bank | Patch | Env S-V | Env D-V |")
+    lines.append("|---|---|---:|---:|")
+    for sv, dv, row in sorted(envelope, key=lambda x: -x[0])[:5]:
+        lines.append("| %s | %s | %s | %s |"
+                     % (row["bank"], patch_label(row), fmt(sv), fmt(dv)))
+    lines.append("")
+    lines.append("Slopsix-specific outliers (S-V > 1.3 * D-V and S-V > 1.0):")
+    lines.append("")
+    if env_only or spec_only:
+        if env_only:
+            lines.append("- **Envelope**: " + ", ".join(
+                "%s %s (%s vs %s dB)"
+                % (row["bank"], patch_label(row), fmt(sv), fmt(dv))
+                for sv, dv, row in sorted(env_only, key=lambda x: -x[0])))
+        if spec_only:
+            lines.append("- **Spectrum**: " + ", ".join(
+                "%s %s (%s vs %s)"
+                % (row["bank"], patch_label(row), fmt(sv, 3), fmt(dv, 3))
+                for sv, dv, row in sorted(spec_only, key=lambda x: -x[0])))
+    else:
+        lines.append("None.")
+    lines.append("")
+    lines.append("The top lists are by slopsix's absolute distance to VDX7;"
+                 " the D-V column shows how far Dexed is from VDX7 on the"
+                 " same row. A row is slopsix-specific only when it exceeds"
+                 " both thresholds above.")
+    lines.append("")
+
+
 def write_report(args, labels, programs, references, rows):
     lines = []
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -568,10 +444,7 @@ def write_report(args, labels, programs, references, rows):
     lines.append("- note: %d, velocity: %d" % (args.note, args.velocity))
     lines.append("- note held for %.3f s, then %.3f s of tail"
                  % (args.hold, args.tail))
-    lines.append("- banks: %s" % ", ".join(
-        "%s (programs %s)" % (label,
-                              ",".join(str(p) for p in programs))
-        for label in labels))
+    lines.append("- banks: %s" % ", ".join(labels))
     lines.append("")
     lines.append("## Method")
     lines.append("")
@@ -603,7 +476,7 @@ def write_report(args, labels, programs, references, rows):
     if has_vdx7:
         lines.append("## Per-patch results")
         lines.append("")
-        header = ("| Bank | Pgm | Onset (ms) | Env S-V | Env D-V | "
+        header = ("| Bank | Patch | Onset (ms) | Env S-V | Env D-V | "
                   "Spec S-V | Spec D-V | Spec S-D/V-D | Env S-D/V-D |")
         lines.append(header)
         lines.append("|---|---|---|---|---|---|---|---|---|")
@@ -629,8 +502,8 @@ def write_report(args, labels, programs, references, rows):
                 return sd / vd
 
             onset_ms = 1000.0 * s.onset / s.rate
-            lines.append("| %s | %02d | %s | %s | %s | %s | %s | %s | %s |"
-                % (row["bank"], row["program"], fmt(onset_ms, 0),
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+                % (row["bank"], patch_label(row), fmt(onset_ms, 0),
                    fmt(env_sv), fmt(env_dv), fmt(spec_sv, 3),
                    fmt(spec_dv, 3),
                    fmt(ratio(spec_sd, spec_dv)),
@@ -644,13 +517,13 @@ def write_report(args, labels, programs, references, rows):
                      " `--vdx7-render`) and run again for the full"
                      " comparison.")
         lines.append("")
-        lines.append("| Bank | Pgm | Onset (ms) | Peak |")
+        lines.append("| Bank | Patch | Onset (ms) | Peak |")
         lines.append("|---|---|---|---|")
         for row in rows:
             s = row["slopsix"]
             peak = float(np.max(np.abs(s.samples))) if s.samples.size else 0.0
-            lines.append("| %s | %02d | %s | %.3f |"
-                         % (row["bank"], row["program"],
+            lines.append("| %s | %s | %s | %.3f |"
+                         % (row["bank"], patch_label(row),
                             fmt(1000.0 * s.onset / s.rate, 0), peak))
         lines.append("")
 
@@ -697,63 +570,9 @@ def write_report(args, labels, programs, references, rows):
                          % (spec_wins, comparable, env_wins, comparable))
         lines.append("")
 
-        lines.append("## Divergences to investigate")
-        lines.append("")
-        lines.append("These are the patches where slopsix is farther from"
-                     " VDX7 than Dexed is by a clear margin, or where its"
-                     " deviation from Dexed is much larger than VDX7's"
-                     " deviation from Dexed. They are the first candidates"
-                     " for a per-row investigation in the research pages.")
-        lines.append("")
-        flagged = []
-        for r in rows:
-            if not (r.get("vdx7") and r.get("dexed")):
-                continue
-            v, s, d = r["vdx7"], r["slopsix"], r["dexed"]
-            spec_sv = spectral_distance(v.spectrum, s.spectrum)
-            spec_dv = spectral_distance(v.spectrum, d.spectrum)
-            env_sv = envelope_distance(v.envelope, s.envelope)
-            env_dv = envelope_distance(v.envelope, d.envelope)
-            spec_sd = spectral_distance(s.spectrum, d.spectrum)
-            env_sd = envelope_distance(s.envelope, d.envelope)
-            score = None
-            reason = []
-            if not math.isnan(spec_sv) and not math.isnan(spec_dv):
-                if spec_sv > max(0.35, spec_dv * 1.5) and spec_sv > 0.5:
-                    reason.append("spectrum S-V %.2f vs D-V %.2f"
-                                  % (spec_sv, spec_dv))
-                    score = spec_sv / max(spec_dv, 1e-9)
-            if not math.isnan(env_sv) and not math.isnan(env_dv):
-                if env_sv > max(3.0, env_dv * 1.5):
-                    reason.append("envelope S-V %.1f dB vs D-V %.1f dB"
-                                  % (env_sv, env_dv))
-            if not math.isnan(spec_sd) and not math.isnan(spec_dv):
-                if spec_dv > 1e-9 and spec_sd > spec_dv * 2.0 \
-                        and spec_sd > 0.5:
-                    if not reason:
-                        reason.append("spectrum S-D %.2f vs V-D %.2f"
-                                      % (spec_sd, spec_dv))
-            if reason:
-                flagged.append((score if score is not None else 0.0, r,
-                                reason))
-        flagged.sort(key=lambda item: item[0], reverse=True)
-        if not flagged:
-            lines.append("None. Every patch's spectral and envelope"
-                         " deviations are in the range the two references"
-                         " themselves span.")
-        else:
-            for _, r, reason in flagged:
-                lines.append("- **%s program %02d**: %s."
-                             % (r["bank"], r["program"], "; ".join(reason)))
-        lines.append("")
-        lines.append("The divergence list is diagnostic, not a pass/fail"
-                     " gate: some of these are expected until the envelope"
-                     " model's remaining EGS rewrite (E-01/E-02) and the"
-                     " analog output tail are done. The research row that"
-                     " each patch points at should be recorded before the"
-                     " code is changed.")
-        lines.append("")
+        append_discrepancies(lines, rows)
         lines.extend(FINDINGS_SECTION)
+        lines.append("")
 
     lines.append("## Reproducing")
     lines.append("")

@@ -38,8 +38,8 @@ read together.
 | ID | Item | Resolution |
 |---|---|---|
 | P-01 | Note → frequency path | **Resolved:** closed-form note word; the per-key ±1¢ alternation is exact; engine works in the 4096-units-per-octave domain. Absolute Hz base remains inside the sound chip. |
-| P-02 | Ratio-mode operator frequency | **Partial (firmware + model):** coarse table is exact; the fine composition is model-derived. |
-| P-03 | Fixed-frequency mode | **Partial (firmware + model):** fixed-mode composition is pinned (`opPitch>>2` + detune; no voice pitch, master tune, bend, pitch EG or LFO); the Hz formula remains model-derived. |
+| P-02 | Ratio-mode operator frequency | **Partial (firmware + model):** coarse table is exact; the fine curve is model-derived. The firmware fine table has 101 words: a serialised fine value of 100 reads the extra `0x1000` word (the 2.0 ratio), so coarse 0/fine 100 is the 1.0 ratio; that boundary is firmware-verified. |
+| P-03 | Fixed-frequency mode | **Partial (firmware + model):** fixed-mode composition is pinned (`opPitch>>2` + detune; no voice pitch, master tune, bend, pitch EG or LFO); the fine term uses the raw serialised 0..127 byte, not the ratio table or a modulo-100 index. The Hz formula remains model-derived. |
 | P-04 | Detune | **Resolved (firmware + model):** 4-bit register (3-bit magnitude + sign), −7..+7; one step is 1/1024 octave ≈1.17 cents (4 units in the engine's 4096/octave word). |
 | P-05 | Pitch bend quantization | **Resolved (firmware):** 14-bit MIDI bend, hardware range and step, curve and quirks reproduced; the 48-byte step table is 16×3-byte groups with a big-endian word, stride confirmed. |
 | P-06 | Portamento | **Decided:** no engine portamento in v1; host glides. Rate law located for a later optional parameter. |
@@ -66,7 +66,7 @@ read together.
 | E-03 | Rate scaling | **Partial (firmware + model):** shipped as a register; the model law is `rs=round(clamp((voicePitch>>8)−16,0,27)·sens/7)` in qrate units. |
 | E-04 | EG update cadence | **Partial (firmware + hardware):** operator EG is chip-internal (model: one operator envelope per sample on a 16-bit master clock); pitch EG is a ~188 Hz CPU staircase; LFO is a ~375.3 Hz static-level update. |
 | E-05 | Keyboard level scaling | **Partial (firmware):** the runtime scaling-curve builder is decoded and reimplemented (43 key-code groups, the two 36-entry ROM curves, the depth law); the curve's overrun, the keybed's breakpoint range, and the exact mapping into the EGS amplitude domain remain open. |
-| E-06 | Sustain / release details | **Partial (model):** the model pins the stage machine (key-on S0, key-off S3 from the current level, stages 2/3 short-circuit at target, delay only in stages 0/1); still model-grade. |
+| E-06 | Sustain / release details | **Partial (model):** the model pins the stage machine (key-on S0, key-off S3 from the current level; equal-target stages 0/1 advance immediately, while stages 2/3 short-circuit at target; delay only in stages 0/1); still model-grade. |
 | E-07 | Velocity response | **Resolved:** the keybed is velocity sensitive (Mk1 included); velocity scales operator level; the direction is pinned (the operator volume register is an attenuation, so a harder key is louder); the keybed's own calibration is open. |
 | E-08 | The level curve | **Resolved:** the hardware's 100-entry table is an attenuation table and the exact inverse of the level law (the hardware's curve below parameter 20, `28 + parameter` above it); the engine implements the law. |
 
