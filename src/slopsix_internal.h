@@ -709,15 +709,13 @@ typedef struct {
 /* A voice's engine state: the operators, their parameters and their
  * frequencies.  The walk's registers (the pending modulation value and
  * the sum/delay register are the die's shift-register stages, the two
- * feedback registers its feedback pair) and the operators' last samples
- * survive a sample, and the walk reads one operator of them per row in
- * the hardware's order. */
+ * feedback registers its feedback pair) survive a sample, and the walk
+ * reads one operator of them per row in the hardware's order. */
 typedef struct {
     slopsix_operator ops[SLOPSIX_OP_COUNT];
     slopsix_op_params params[SLOPSIX_OP_COUNT];
     slopsix_eg eg[SLOPSIX_OP_COUNT];  /* the operators' envelopes */
     slopsix_pitch_eg pitch_eg;        /* the voice's pitch envelope */
-    int32_t out[SLOPSIX_OP_COUNT];  /* the operators' last samples */
     int32_t modout;                 /* the next row's modulation value:
                                      * the processed row's selector
                                      * produces it and the next row (or

@@ -297,8 +297,6 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
         slopsix_op_render(&voice->ops[index], log_amp_q10, voice->modout,
             &sample);
 
-        voice->out[index] = sample;
-
         /* The sum/delay register's update: C keeps its content, D loads
          * or adds this operator's signal. */
         msum = (conn->ctrl_c ? voice->mren : 0) +
