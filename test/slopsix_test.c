@@ -2359,7 +2359,10 @@ static void stage_output(void)
 
     /* The final conversion: rounding to the int16 grid at unity gain.
      * The value is the analog stage's output in Q12 of a DAC code, so
-     * the code window's rails are the Q12 values of 2047 and -2048. */
+     * the code window's rails are the Q12 values of 2047 and -2048.
+     * These expectations are the default reference
+     * (SLOPSIX_OUTPUT_HEADROOM_BITS = 0); one bit of headroom moves
+     * every value here down by one bit. */
     check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12,
                                SLOPSIX_Q16_ONE) == 32752,
           "the code window's top lands on 32752 at unity gain");

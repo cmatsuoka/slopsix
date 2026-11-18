@@ -119,7 +119,16 @@ void slopsix_reset(slopsix_context ctx);
 /* Render `frames` stereo interleaved samples into `stereo_out`
  * (2 * frames int16_t values).  Deterministic.  The render entry point is
  * resolved at context creation, so this is one indirect call per buffer
- * and no personality branch sits in the sample loop. */
+ * and no personality branch sits in the sample loop.
+ *
+ * The output level is a library convention, not a hardware fact (the
+ * DAC's absolute span and the board's analog stage are deliberately out
+ * of the model).  At the default master volume - the hardware's top
+ * ladder tap - the 12-bit code window's rails land on int16 full scale,
+ * the level region of the common DX7 emulator baselines, so a host that
+ * swaps engines keeps its gain staging.  The model's own saturation is
+ * that code window; the analog tail's overshoot can reach the int16
+ * rails, where the conversion saturates. */
 void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames);
 
 /* ---------------------------------------------------------------- patches */

@@ -1156,6 +1156,24 @@ int32_t slopsix_dac_step(int32_t bus);
  * the top tap. */
 int32_t slopsix_master_gain_q16(unsigned level);
 
+/* The output stage's headroom, in bits: the model's own saturation point
+ * (the 12-bit DAC code window) sits this far below int16 full scale.  One
+ * bit is 6.02 dB.
+ *
+ * The reference is the engine's choice, not a hardware fact: the DAC's
+ * absolute span and the board's analog stage are deliberately out of the
+ * model (research OQ-24, OU-04), so only the relative levels are pinned.
+ * Zero keeps the code window's rails on the int16 rails, which places the
+ * output in the level region of the Dexed/msfa baseline - a host that
+ * replaces one engine with the other keeps its gain staging.  One bit
+ * matches the VDX7 reference renderer's convention and leaves 6 dB for a
+ * host gain or a future effects chain, and keeps the analog tail's
+ * passband overshoot out of the int16 clamp.
+ *
+ * Changing this changes every rendered level, so the output stage's
+ * absolute-level checks in the harness move with it. */
+#define SLOPSIX_OUTPUT_HEADROOM_BITS 0u
+
 /* The final conversion: the analog stage's output times a Q16 gain,
  * rounded and mapped onto int16.  The value is the filter's output in
  * Q12 of a DAC code; the conversion saturates at the int16 rails, which

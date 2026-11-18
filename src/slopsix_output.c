@@ -86,11 +86,18 @@ int32_t slopsix_dac_step(int32_t bus)
 /* The final conversion: the analog stage's output times a Q16 gain onto
  * int16.
  *
- * The value is the filter's output in Q12 of a DAC code, so int16 full
- * scale is 16 codes (2048 * 16 = 32768) at the code's own scale and the
- * gain falls out of the shift: the product is scaled by 2^24 (the gain's
- * Q16 and the value's Q12).  The value rounds to nearest, half away from
+ * The value is the filter's output in Q12 of a DAC code, so the product
+ * is scaled by 2^24 (the gain's Q16 and the value's Q12) and the gain
+ * falls out of the shift.  The value rounds to nearest, half away from
  * zero.
+ *
+ * The reference level is the output stage's own choice, not a hardware
+ * fact (the DAC's absolute span and the analog stage are out of the
+ * model, research OQ-24/OU-04).  With no headroom (the default,
+ * SLOPSIX_OUTPUT_HEADROOM_BITS = 0) the code window's rails land on the
+ * int16 rails - int16 full scale is 16 codes, 2048 * 16 = 32768 - which
+ * keeps the output in the Dexed/msfa baseline's level region; one bit of
+ * headroom halves it (6.02 dB) and matches the VDX7 reference renderer.
  *
  * The analog stage can overshoot the code window (the filter's passband
  * peaks at +0.8 dB and its high-Q section rings), so the conversion
@@ -100,7 +107,9 @@ int16_t slopsix_output_scale(int32_t code_q12, int32_t gain_q16)
 {
     int64_t product = (int64_t)code_q12 * (int64_t)gain_q16;
     int64_t magnitude = product < 0 ? -product : product;
-    int64_t rounded = (magnitude + (1LL << 23)) >> 24;
+    int64_t rounded = (magnitude +
+        (1LL << (23 + SLOPSIX_OUTPUT_HEADROOM_BITS))) >>
+        (24 + SLOPSIX_OUTPUT_HEADROOM_BITS);
     int64_t value = product < 0 ? -rounded : rounded;
 
     if (value > 32767) {
