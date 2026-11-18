@@ -1003,6 +1003,7 @@ static void stage_algorithms(void)
     int carriers_ok = 1;
     int feedback_ok = 1;
     int order_ok = 1;
+    int source_ok = 1;
 
     printf("stage algorithms\n");
 
@@ -1032,10 +1033,14 @@ static void stage_algorithms(void)
         }
 
         /* An operator is only ever modulated by a higher-numbered
-         * operator, except for its own feedback path. */
+         * operator, except for its own feedback path.  The selector is
+         * stored on the row that produces it; that row's consumer is the
+         * previous operator (the wrap column's consumer is operator 6). */
         for (op = 1; op <= SLOPSIX_OP_COUNT; op++) {
+            unsigned consumer = (op == 1u) ? SLOPSIX_OP_COUNT : (op - 1u);
+
             if (decoded->ops[op - 1u].source == SLOPSIX_MOD_OPERATOR &&
-                decoded->ops[op - 1u].source_op <= (uint8_t)op) {
+                decoded->ops[op - 1u].source_op <= (uint8_t)consumer) {
                 order_ok = 0;
             }
         }
@@ -1046,6 +1051,26 @@ static void stage_algorithms(void)
           "all 32 algorithms decode the documented feedback operator");
     check(order_ok,
           "no operator is modulated by an equal or lower-numbered one");
+
+    /* Algorithm 18's selectors differ from row to row, so it pins the
+     * producer-row placement: op6 SEL1, op5 SEL1, op4 SEL5, op3 SEL0,
+     * op2 SEL2, op1 SEL0. */
+    {
+        const slopsix_algorithm *a = slopsix_algorithm_get(17u);
+        static const slopsix_mod_source want[6] = {
+            SLOPSIX_MOD_NONE, SLOPSIX_MOD_REGISTER, SLOPSIX_MOD_NONE,
+            SLOPSIX_MOD_FEEDBACK, SLOPSIX_MOD_OPERATOR,
+            SLOPSIX_MOD_OPERATOR
+        };
+        unsigned op;
+
+        for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
+            if (a->ops[op].source != want[op]) {
+                source_ok = 0;
+            }
+        }
+    }
+    check(source_ok, "each selector is stored on its producer row");
 }
 
 /* ------------------------------------------- Phase 3: the envelope and the

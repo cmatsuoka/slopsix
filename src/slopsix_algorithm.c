@@ -131,8 +131,8 @@ static void slopsix_algorithm_decode(unsigned index)
 
         alg->ops[consumer - 1u].com = (uint8_t)com;
         alg->ops[consumer - 1u].carrier = (uint8_t)(com != 0u ? 1u : 0u);
-        alg->ops[consumer - 1u].source = SLOPSIX_MOD_NONE;
-        alg->ops[consumer - 1u].source_op = 0u;
+        alg->ops[op - 1u].source = SLOPSIX_MOD_NONE;
+        alg->ops[op - 1u].source_op = 0u;
 
         switch (sel) {
         case 0:
@@ -144,24 +144,24 @@ static void slopsix_algorithm_decode(unsigned index)
              * higher-numbered neighbour; the checked-in ROM never carries
              * this selector there, and the graph would render it
              * unmodulated if the data ever did. */
-            if (consumer < SLOPSIX_OP_COUNT) {
-                alg->ops[consumer - 1u].source = SLOPSIX_MOD_OPERATOR;
-                alg->ops[consumer - 1u].source_op = (uint8_t)(consumer + 1u);
+            if (op != 1u) {
+                alg->ops[op - 1u].source = SLOPSIX_MOD_OPERATOR;
+                alg->ops[op - 1u].source_op = (uint8_t)op;
             }
             break;
         case 2:
-            alg->ops[consumer - 1u].source = SLOPSIX_MOD_REGISTER;
+            alg->ops[op - 1u].source = SLOPSIX_MOD_REGISTER;
             break;
         case 3:
-            alg->ops[consumer - 1u].source = SLOPSIX_MOD_REGISTER_DELAYED;
+            alg->ops[op - 1u].source = SLOPSIX_MOD_REGISTER_DELAYED;
             break;
         case 4:
-            alg->ops[consumer - 1u].source = SLOPSIX_MOD_FEEDBACK_DELAYED;
+            alg->ops[op - 1u].source = SLOPSIX_MOD_FEEDBACK_DELAYED;
             break;
         default:
             /* The self-feedback path: the walk's pending value becomes
              * the feedback pair's average. */
-            alg->ops[consumer - 1u].source = SLOPSIX_MOD_FEEDBACK;
+            alg->ops[op - 1u].source = SLOPSIX_MOD_FEEDBACK;
             slopsix_feedback_operator[index] = (uint8_t)consumer;
             break;
         }

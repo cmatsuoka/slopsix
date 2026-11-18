@@ -60,10 +60,10 @@ A row is called an *outlier* for one engine when that engine's distance to the o
 
 | Metric | slopsix outlier | VDX7 outlier | agree |
 |---|---|---|---|
-| envelope | 13 | 13 | 38 |
-| spectrum | 10 | 13 | 41 |
+| envelope | 10 | 16 | 38 |
+| spectrum | 3 | 16 | 45 |
 
-Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.467 against 0.685, median envelope distance 2.78 dB against 2.54 dB; slopsix is at least as close on 34/64 spectrum rows and 31/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.331 against 0.685, median envelope distance 2.54 dB against 2.54 dB; slopsix is at least as close on 41/64 spectrum rows and 37/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
 
 ### Population A - VDX7 disagrees with Dexed, slopsix agrees with Dexed
 
@@ -72,11 +72,11 @@ These are envelope-timing differences, not slopsix bugs: VDX7's EGs decay faster
 - **ROM 3B program 26 (BANJO)**: VDX7 falls from 0 dB to -60 dB within 0.6 s. Slopsix and Dexed both hold -3 dB until 0.45 s and then decay at the same rate (at 0.40 s: slopsix -3.30 dB, Dexed -3.48 dB, VDX7 -41.07 dB).
 - **ROM 1A program 21 (MARIMBA)**: VDX7 decays about 1.5 times faster than slopsix and Dexed, which agree with each other closely.
 
-Rows that flag as VDX7 outliers on both metrics: ROM 1A 04, ROM 1A 13, ROM 3B 04, ROM 3B 07. These belong to the known EGS EG-rate items (E-01/E-02).
+Rows that flag as VDX7 outliers on both metrics: ROM 1A 04, ROM 1A 13, ROM 3B 07. These belong to the known EGS EG-rate items (E-01/E-02).
 
-### Population B - slopsix disagrees with both references
+### Population B - remaining single-metric slopsix divergences
 
-Rows that flag as slopsix outliers on both metrics: ROM 1A 08, ROM 1A 18, ROM 1A 24, ROM 1A 25, ROM 3B 11.
+No row flags as a slopsix outlier on both metrics after the 2026-11-18 selector fix.
 
 Localised on **ROM 1A program 30** (TRAIN, algorithm 4, feedback 7): slopsix renders an extra partial at 977 Hz (relative amplitude 0.16) that neither VDX7 nor Dexed produces, while it holds the 1140 Hz band at 0.067 against VDX7's 0.23 and the 359 Hz band at 0.064 against VDX7's 0.21. Dexed stays within 0.043 of VDX7 on this patch; slopsix is 0.686 away. The same shape appears on ROM 1A 25 (TUB BELLS), with an extra partial at 917 Hz.
 
@@ -101,7 +101,7 @@ Open items, both **needs more investigation**:
 The engine's algorithm ROM table matches the chip's entry for entry (the
 selector, the feedback-pair store bit, the C/D control bits and the COM
 code: 0 mismatches in 192 entries), and the carrier sets reproduce the
-documented chart. Two corrections settled on 2026-11-18 - both adopt the
+documented chart. Three corrections settled on 2026-11-18 - all adopt the
 firmware's own semantics, which VDX7 (the register file shows the raw
 pass-through) and Dexed (its table indexer) already implement:
 
@@ -113,6 +113,12 @@ pass-through) and Dexed (its table indexer) already implement:
   every render comparison. The earlier per-algorithm sweep numbers in
   this section were taken across adjacent rows and are retired; the
   sweep gets re-run on the corrected convention.
+- **The selector belongs to the producer's row.** The walk applies a
+  column's selector after computing operator N to modulate operator N-1,
+  so the decoder stores it on operator N, not on the consumer N-1. The
+  earlier placement shifted every selector by one operator; the COM code
+  and carrier flag stay on the consumer. This is the 2026-11-18 fix that
+  drops the spectral median to 0.331.
 - **The sum/delay register is the die's own model**: `msum = (C ? mren :
   0) + (D ? signal : 0)`, the selector reads the register's new value
   (SEL2), the value before the producer's update (SEL3), the feedback
@@ -125,12 +131,26 @@ pass-through) and Dexed (its table indexer) already implement:
   walkthrough pins the accumulate semantics and the chart draws them.
 
 On the corrected engine the two factory banks' median spectral distance
-to VDX7 is 0.467 (was 0.492) and the median envelope distance 2.75 dB
-(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 34/64 spectra
+to VDX7 is 0.331 (was 0.492) and the median envelope distance 2.54 dB
+(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 41/64 spectra
 (was 33/64). The remaining divergences concentrate on the EGS EG-cadence
 items (E-01/E-02, population A above) and the fixed-frequency
-operator's level law (population B above), not on the algorithm
-structure.
+operator's level law (population B above); the algorithm walk itself
+now matches the reference.
+
+### The algorithm selector mapping: corrected (2026-11-18)
+
+The engine's walk reads a selector after computing operator N to produce
+operator N-1's modulation, but the decoder stored each ROM column's
+selector on the *consumer* row. The selector was therefore applied one
+operator early: algorithms whose adjacent selectors differ (18, 15, 6,
+...) fed the wrong signal, sum or feedback value into the next row. The
+decoder now stores the selector on the producer row; the COM code and
+the carrier flag remain on the consumer. The 64-patch median spectral
+distance to VDX7 drops from 0.467 to 0.331, the envelope median from
+2.78 to 2.54 dB, and slopsix is at least as close as Dexed on 41/64
+spectra and 37/64 envelopes. The flagged PIANO 2 (algorithm 18) and
+CLAS.GUIT (algorithm 15) renders now follow the reference walk.
 
 ### The operator feedback: resolved (2026-11-18)
 

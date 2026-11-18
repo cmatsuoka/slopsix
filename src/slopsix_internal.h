@@ -626,14 +626,16 @@ typedef enum {
                                     * value */
 } slopsix_mod_source;
 
-/* One operator's connection in the graph.  The selector and the
- * compensation bits belong to the link into operator N-1 (the register
- * walk's ROM column reads), and C/D/A configure the registers this
- * operator's own row drives: C/D the sum/delay register (`mren`), A the
- * feedback pair */
+/* One operator's connection in the graph.  The selector (`source`) is
+ * stored on the row that produces the next row's modulation - the entry
+ * in the ROM column labelled with this operator; the compensation and
+ * carrier fields belong to the consumer, operator N-1.  C/D/A configure
+ * the registers this operator's own row drives: C/D the sum/delay
+ * register (`mren`), A the feedback pair */
 typedef struct {
     slopsix_mod_source source;
-    uint8_t source_op;  /* the modulating operator, 1..6, when relevant */
+    uint8_t source_op;  /* the selected signal's operator, 1..6, when
+                         * relevant */
     uint8_t carrier;    /* the output joins the voice's carrier sum */
     uint8_t com;        /* the carrier-count compensation code, 0..5 */
     uint8_t ctrl_c;     /* the sum/delay register: 1 keeps its content */
