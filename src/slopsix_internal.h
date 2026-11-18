@@ -602,6 +602,14 @@ static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
  * pins the hardware's own (plan decision D-9). */
 #define SLOPSIX_EG_BLOCK 64
 
+/* The render path's per-block, operator-major evaluation (the DX7
+ * render path's shape, matching the reference emulator's 64-sample
+ * operator blocks).  The block renderer evaluates one operator over a
+ * whole block of samples before moving to the next; a process call is
+ * cut into sub-blocks that end on the control-rate ticks, and every
+ * sub-block renders in blocks of this size at most. */
+#define SLOPSIX_RENDER_BLOCK 64
+
 /* One operator's envelope generator.
  *
  * The state machine walks the four stages (attack, decay, sustain,
@@ -712,9 +720,67 @@ typedef struct {
     uint8_t fb_out;     /* the output is stored into the feedback pair */
 } slopsix_op_conn;
 
+/* The block renderer's per-algorithm schedule (decoded once with the
+ * algorithm's connection data).
+ *
+ * The per-block, operator-major evaluation renders one operator over a
+ * whole block before moving to the next, so the schedule has to pin
+ * - for every operator, where its modulation input comes from (a
+ *   same-sample buffer of an already-rendered operator, an msum
+ *   timeline value, nothing, or the operator's own feedback pair);
+ * - which operator runs its own per-sample loop because its input is
+ *   its own previous outputs (the feedback self-loop, lags one and
+ *   two);
+ * - which operators form one sample-interleaved run because the
+ *   algorithm's feedback pair is pushed by one of them and read by
+ *   another (algorithms 4 and 6);
+ * - which operators must record their sum/delay-register timeline
+ *   (only where a later row reads it), and how that value is composed
+ *   from the row's C/D bits.
+ *
+ * Everything the schedule cannot pin degrades to the per-sample walk
+ * (`fast` cleared), so a graph the analysis does not understand still
+ * renders - through the walk, exactly as the extensions do until they
+ * get schedules of their own.
+ */
+typedef enum {
+    SCHED_IN_ZERO = 0,      /* the modulation input is zero */
+    SCHED_IN_OBUF,          /* the output buffer of operator `in_src` */
+    SCHED_IN_MSUM,          /* the sum/delay timeline of operator `in_src` */
+    SCHED_IN_PAIR_AVG,      /* the feedback pair's scaled average
+                             * (lags one and two on the op itself) */
+    SCHED_IN_PAIR_LAG1      /* the feedback pair's last value (a lag-one
+                             * self-loop) */
+} slopsix_sched_in;
+
+/* How an operator's sum/delay-register timeline value is composed per
+ * sample.  The walk's C/D bits (`msum = (C ? mren : 0) + (D ? signal :
+ * 0)`); the `SCHED_M_PREV*` forms read the timeline of the operator one
+ * row higher, which is impossible for operator 6 because operator 6's
+ * row is the first of the sample. */
+typedef enum {
+    SCHED_M_DEAD = 0,       /* nothing reads the timeline: skip it */
+    SCHED_M_ZERO,           /* C and D clear: the timeline value is 0 */
+    SCHED_M_OUT,            /* D only: the operator's signal */
+    SCHED_M_PREV,           /* C only: the higher row's timeline value */
+    SCHED_M_PREV_OUT        /* C and D: the higher value plus the signal */
+} slopsix_sched_m;
+
+typedef struct {
+    uint8_t fast;           /* 0: render the algorithm with the walk */
+    uint8_t solo;           /* the self-loop operator's index, 0xFF none */
+    uint8_t group;          /* the sample-interleaved run's member count,
+                             * 0, 2 or 3; the members are the walk
+                             * sequence's leading indices */
+    uint8_t in_kind[SLOPSIX_OP_COUNT];
+    uint8_t in_src[SLOPSIX_OP_COUNT];
+    uint8_t msum_mode[SLOPSIX_OP_COUNT];
+} slopsix_schedule;
+
 /* One algorithm's connection data. */
 typedef struct {
     slopsix_op_conn ops[SLOPSIX_OP_COUNT];  /* index 0 == operator 1 */
+    slopsix_schedule schedule;
 } slopsix_algorithm;
 
 /* A voice's engine state: the operators, their parameters and their
@@ -746,6 +812,26 @@ typedef struct {
 } slopsix_voice_engine;
 
 /* --------------------------------------------------------- context state */
+
+/* The block renderer's scratch, one voice's worth.  Voices are
+ * processed one at a time, so it is a context member, not per voice,
+ * and it is allocated with the context at creation (the render call
+ * does no allocation; plan decision D-15).
+ *
+ * `opout` holds each operator's rendered samples for the sub-block;
+ * `msum` the operators' sum/delay-register timeline values (only the
+ * rows some later row reads are written); `level` the operators'
+ * pre-composed log amplitudes (Q8, with the compensation and the
+ * amplitude-modulation reduction not yet applied); `voice_out` the
+ * carrier sums and `bus` the per-sample mix bus for the output
+ * stages. */
+typedef struct {
+    int32_t opout[SLOPSIX_OP_COUNT][SLOPSIX_RENDER_BLOCK];
+    int32_t msum[SLOPSIX_OP_COUNT][SLOPSIX_RENDER_BLOCK];
+    int16_t level[SLOPSIX_OP_COUNT][SLOPSIX_RENDER_BLOCK];
+    int32_t voice_out[SLOPSIX_RENDER_BLOCK];
+    int32_t bus[SLOPSIX_RENDER_BLOCK];
+} slopsix_block_scratch;
 
 typedef struct {
     uint32_t sample_rate;
@@ -814,6 +900,9 @@ typedef struct {
      * step (the DX7's own output stage; the algorithm page §8.1).  Its
      * design follows the host's rate and its state runs continuously. */
     slopsix_filter filter;
+
+    /* The block renderer's scratch (one voice's worth, above). */
+    slopsix_block_scratch block_scratch;
 } slopsix_context_state;
 
 /* ------------------------------------------------------- the personality */
@@ -980,6 +1069,49 @@ static inline int32_t slopsix_feedback_scaled(int32_t fren1, int32_t fren2,
 }
 
 /*
+ * One operator's per-sample stage, with the phase held in registers:
+ * the same arithmetic as slopsix_op_render, but with the accumulator
+ * and its increment as values so the block renderer's loops can keep
+ * them resident across the block.  `phase_out` receives the updated
+ * accumulator.
+ */
+static inline void slopsix_op_stage(uint32_t phase, uint32_t increment,
+    int32_t log_amp_q10, int32_t mod_in, uint32_t *phase_out, int32_t *out)
+{
+    uint32_t sine_phase;
+    int32_t log_value;
+    int32_t sample;
+
+    /* The modulation input - the sum of the operator's input buses, or
+     * the feedback path's value - is added to the phase for the lookup
+     * only: it is not part of the accumulator's state.  It is not
+     * clamped: the hardware adds the operator's linear output (or the
+     * modulator sum) as it is, and the phase addition wraps. */
+    {
+        uint32_t lookup = phase +
+            (uint32_t)(mod_in * (1 << SLOPSIX_MOD_DEVIATION_SHIFT));
+
+        sine_phase = (lookup >> SLOPSIX_SINE_PHASE_SHIFT) &
+                     SLOPSIX_SINE_PHASE_MASK;
+    }
+
+    /* The log word: the operator's pre-shifted log amplitude (Q10) minus
+     * the log-sine's negated log2 value. */
+    log_value = log_amp_q10 - slopsix_logsin(sine_phase);
+
+    sample = slopsix_signal_exp(log_value);
+
+    if (sine_phase & SLOPSIX_SINE_HALF_BIT) {
+        /* The negative half of the wave inverts the output. */
+        sample = -sample;
+    }
+
+    *phase_out = (phase + increment) & SLOPSIX_PHASE_MASK;
+
+    *out = sample;
+}
+
+/*
  * Render one operator.
  *
  * The phase advances by the operator's increment; the modulation input
@@ -993,36 +1125,11 @@ static inline int32_t slopsix_feedback_scaled(int32_t fren1, int32_t fren2,
 static inline void slopsix_op_render(slopsix_operator *op,
     int32_t log_amp_q10, int32_t mod_in, int32_t *out)
 {
-    uint32_t acc;
-    uint32_t phase;
-    uint32_t sine_phase;
-    int32_t log_value;
-    int32_t sample;
+    uint32_t acc = op->phase;
+    uint32_t next;
 
-    /* The modulation input - the sum of the operator's input buses, or
-     * the feedback path's value - is added to the phase for the lookup
-     * only: it is not part of the accumulator's state.  It is not
-     * clamped: the hardware adds the operator's linear output (or the
-     * modulator sum) as it is, and the phase addition wraps. */
-    acc = op->phase;
-    phase = acc + (uint32_t)(mod_in * (1 << SLOPSIX_MOD_DEVIATION_SHIFT));
-
-    sine_phase = (phase >> SLOPSIX_SINE_PHASE_SHIFT) & SLOPSIX_SINE_PHASE_MASK;
-
-    /* The log word: the operator's pre-shifted log amplitude (Q10) minus
-     * the log-sine's negated log2 value. */
-    log_value = log_amp_q10 - slopsix_logsin(sine_phase);
-
-    sample = slopsix_signal_exp(log_value);
-
-    if (sine_phase & SLOPSIX_SINE_HALF_BIT) {
-        /* The negative half of the wave inverts the output. */
-        sample = -sample;
-    }
-
-    op->phase = (acc + op->increment) & SLOPSIX_PHASE_MASK;
-
-    *out = sample;
+    slopsix_op_stage(acc, op->increment, log_amp_q10, mod_in, &next, out);
+    op->phase = next;
 }
 
 /* ------------------------------------------------- the render composites */
@@ -1349,6 +1456,22 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
                                   int32_t *voice_out);
 
+/* The block renderer: the per-sample walk's evaluation order reorganized
+ * per algorithm schedule - one operator over the whole block before the
+ * next, envelopes filled per block, every routing decision taken once
+ * per operator and block instead of per sample.  Bit-identical to
+ * `count` slopsix_voice_render_sample calls on the same voice (and it
+ * falls back to calling them, per sample, for the algorithms whose
+ * schedule the analysis could not pin).  `count` is the sub-block's
+ * length; it may exceed the block size, in which case the call renders
+ * consecutive blocks.  `scratch` is the caller's per-context workspace;
+ * the carrier sums land in `voice_out`.
+ */
+void slopsix_voice_render_block(slopsix_voice_engine *voice,
+                                 const slopsix_algorithm *alg,
+                                 slopsix_block_scratch *scratch,
+                                 int32_t *voice_out, unsigned count);
+
 /* The voice path (Phase 5).  The note-on fills one voice's engine from
  * the live patch, keying it as the firmware's VOICE_ADD does (envelopes
  * out of silence, the pitch EG reset to its initial level, the phases
@@ -1408,5 +1531,10 @@ void slopsix_eg_init(slopsix_eg *eg, const uint8_t rates[4],
 void slopsix_eg_note_on(slopsix_eg *eg);
 void slopsix_eg_note_off(slopsix_eg *eg);
 int32_t slopsix_eg_step(slopsix_eg *eg);
+
+/* The envelope stepped `count` times, one result per sample, leaving
+ * the same state `count` slopsix_eg_step calls would leave (the block
+ * renderer's level fill). */
+void slopsix_eg_fill(slopsix_eg *eg, int16_t *out, unsigned count);
 
 #endif /* SLOPSIX_INTERNAL_H */

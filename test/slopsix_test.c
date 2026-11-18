@@ -26,6 +26,11 @@
  *               setters' error reporting and the capability queries
  *   extras      the pan is an extra: available or a no-op by build
  *   render      the live voice path: patch parse, note render and release
+ *   blockgraph  the block renderer against the walk, per algorithm and
+ *               span shape (voice level)
+ *   blockprocess the block render call against the reference per-sample
+ *               loop, through the public API, over the splits and the
+ *               cadence ticks' positions
  *
  * The harness is a host tool, not the library: it may use whatever it
  * likes, but it links the public library plus the internal declarations
@@ -2785,6 +2790,503 @@ static void stage_render(void)
     slopsix_destroy_context(ctx);
 }
 
+/* ------------------------------------------------ the block render path */
+
+/* The state fields the render paths mutate (the block renderer and the
+ * walk must agree on all of them). */
+static void block_probe(const slopsix_voice_engine *e, uint32_t *phases,
+                        int32_t *eg_level, int32_t *regs, uint8_t *eg_stage)
+{
+    unsigned k;
+
+    for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
+        phases[k] = e->ops[k].phase;
+        eg_level[k] = e->eg[k].level;
+        eg_stage[k] = e->eg[k].stage;
+        /* the EG's block-cadence fields move even when the cadence is
+         * off, so they ride along in the same words */
+        eg_level[k] ^= (int32_t)e->eg[k].block_pos;
+        eg_level[k] ^= e->eg[k].block_level << 3;
+        eg_level[k] ^= e->eg[k].block_step << 5;
+    }
+    regs[0] = e->modout;
+    regs[1] = e->mren;
+    regs[2] = e->fren1;
+    regs[3] = e->fren2;
+}
+
+static int block_probe_equal(const slopsix_voice_engine *a,
+                             const slopsix_voice_engine *b)
+{
+    uint32_t phases[2][SLOPSIX_OP_COUNT];
+    int32_t levels[2][SLOPSIX_OP_COUNT];
+    int32_t regs[2][4];
+    uint8_t stages[2][SLOPSIX_OP_COUNT];
+
+    block_probe(a, phases[0], levels[0], regs[0], stages[0]);
+    block_probe(b, phases[1], levels[1], regs[1], stages[1]);
+
+    return memcmp(phases[0], phases[1], sizeof(phases[0])) == 0 &&
+           memcmp(levels[0], levels[1], sizeof(levels[0])) == 0 &&
+           memcmp(regs[0], regs[1], sizeof(regs[0])) == 0 &&
+           memcmp(stages[0], stages[1], sizeof(stages[0])) == 0;
+}
+
+static uint32_t block_seed;
+
+static uint32_t block_rnd(void)
+{
+    block_seed = block_seed * 1103515245u + 12345u;
+    return (block_seed >> 8) & 0xFFFFFF;
+}
+
+/* A randomized voice engine: the envelope generators live, the carry-in
+ * registers and phases arbitrary, the amplitude modulation live. */
+static void block_random_engine(slopsix_voice_engine *e, int eg_block_mode)
+{
+    unsigned k;
+    uint8_t rates[4];
+    uint8_t levels[4];
+
+    memset(e, 0, sizeof(*e));
+
+    for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
+        unsigned i;
+
+        for (i = 0; i < 4u; i++) {
+            rates[i] = (uint8_t)(block_rnd() % 100u);
+            levels[i] = (uint8_t)(block_rnd() % 100u);
+        }
+        e->params[k].log_amp_q10 = (int32_t)(block_rnd() % 5000u) << 2;
+        e->params[k].ams_sens = (uint8_t)(block_rnd() % 4u);
+        e->params[k].ams_reduction_q8 =
+            slopsix_ams_reduction_q8(e->params[k].ams_sens,
+                                     (uint8_t)(block_rnd() % 256u));
+        e->ops[k].phase = block_rnd();
+        e->ops[k].increment = 1000u + block_rnd() % 400000u;
+        slopsix_eg_init(&e->eg[k], rates, levels,
+                        (int32_t)(block_rnd() % 4000u),
+                        (uint8_t)(block_rnd() % 32u),
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
+        if (eg_block_mode) {
+            e->eg[k].block_mode = 1u;
+        }
+    }
+
+    e->feedback_level = (uint8_t)(block_rnd() % 8u);
+    e->modout = (int32_t)(block_rnd() % 65536u) - 32768;
+    e->mren = (int32_t)(block_rnd() % 65536u) - 32768;
+    e->fren1 = (int32_t)(block_rnd() % 65536u) - 32768;
+    e->fren2 = (int32_t)(block_rnd() % 65536u) - 32768;
+}
+
+/* One algorithm's voice-level check: the walk and the block renderer
+ * must agree sample for sample and leave the same engine state, for
+ * every span shape the render call's sub-blocks can produce - including
+ * spans past the block size and single-sample calls. */
+static void block_check_algorithm(unsigned algorithm, int eg_block_mode)
+{
+    static const unsigned shapes[6][6] = {
+        { 64, 64, 64, 64, 108, 0 },  /* 300 = block-aligned + a tail */
+        { 1, 1, 1, 1, 296, 0 },      /* single-sample calls */
+        { 7, 64, 1, 128, 100, 0 },   /* odd lengths, one past a block */
+        { 299, 1, 0, 0, 0, 0 },      /* a tail of one */
+        { 300, 0, 0, 0, 0, 0 },      /* one call past the block size */
+        { 63, 64, 173, 0, 0, 0 },    /* misaligned every which way */
+    };
+    const slopsix_algorithm *alg = slopsix_algorithm_get(algorithm);
+    unsigned shape;
+    unsigned caseid;
+
+    for (caseid = 0; caseid < 2u; caseid++) {
+        for (shape = 0; shape < 6u; shape++) {
+            slopsix_voice_engine ref;
+            slopsix_voice_engine blk;
+            struct {
+                int32_t ref[300];
+                int32_t blk[300];
+            } out;
+            unsigned spans[6];
+            unsigned pos = 0;
+            unsigned s;
+
+            for (s = 0; s < 6u; s++) {
+                spans[s] = shapes[shape][s];
+            }
+
+            block_seed = 1000u + algorithm * 97u + shape * 7u +
+                         (uint32_t)eg_block_mode * 131u;
+            block_random_engine(&ref, eg_block_mode);
+            blk = ref;
+
+            for (s = 0; s < 6u; s++) {
+                slopsix_block_scratch scratch;
+                unsigned count = spans[s];
+                unsigned t;
+
+                if (count == 0u) {
+                    break;
+                }
+                if (pos + count > 300u) {
+                    count = 300u - pos;
+                }
+
+                memset(&scratch, 0, sizeof(scratch));
+                for (t = 0; t < count; t++) {
+                    slopsix_voice_render_sample(&ref, alg,
+                                                &out.ref[pos + t]);
+                }
+                slopsix_voice_render_block(&blk, alg, &scratch,
+                                           &out.blk[pos], count);
+                pos += count;
+
+                if (!block_probe_equal(&ref, &blk)) {
+                    check(0, "the block render leaves the walk's engine "
+                             "state after each span");
+                    return;
+                }
+            }
+
+            for (s = 0; s < pos; s++) {
+                if (out.ref[s] != out.blk[s]) {
+                    (void)out;
+                    check(out.ref[s] == out.blk[s],
+                          "the block render matches the walk sample for "
+                          "sample");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+static void stage_blockgraph(void)
+{
+    unsigned algorithm;
+
+    printf("stage blockgraph\n");
+
+    for (algorithm = 0; algorithm < 32u; algorithm++) {
+        const slopsix_algorithm *alg = slopsix_algorithm_get(algorithm);
+
+        check(alg->schedule.fast != 0u,
+              "the checked-in algorithm carries a fast schedule");
+        block_check_algorithm(algorithm, 0);
+        block_check_algorithm(algorithm, 1);
+    }
+}
+
+/* The block render path's driver-level reference: the render call as it
+ * ran per sample, kept here so the sub-block cutting, the tick handling
+ * and the bus stage can be checked against it through the public API. */
+static void process_reference(slopsix_context ctx, int16_t *stereo_out,
+                              size_t frames)
+{
+    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+    const slopsix_algorithm *alg;
+    size_t sample;
+    size_t i;
+
+    if (stereo_out == NULL) {
+        return;
+    }
+    if (state == NULL) {
+        for (i = 0; i < frames * 2u; i++) {
+            stereo_out[i] = 0;
+        }
+        return;
+    }
+
+    alg = slopsix_algorithm_get(state->patch.algorithm);
+
+    for (sample = 0; sample < frames; sample++) {
+        int32_t bus = 0;
+        int lfo_tick;
+        int peg_tick;
+        unsigned v;
+
+        lfo_tick = slopsix_lfo_cadence_tick(&state->lfo_cadence);
+        peg_tick = slopsix_pitch_eg_cadence_tick(&state->pitch_cadence);
+
+        if (lfo_tick) {
+            slopsix_lfo_tick(state);
+        }
+        if (lfo_tick || peg_tick) {
+            int32_t lfo_offset = slopsix_mod_pitch_offset(state);
+
+            for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+                int32_t offset;
+
+                if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
+                    continue;
+                }
+                if (lfo_tick) {
+                    slopsix_voice_engine_update_ams(state,
+                        &state->engines[v]);
+                }
+                if (peg_tick) {
+                    slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
+                }
+                offset = lfo_offset +
+                    slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
+                if (offset != state->engines[v].pitch_offset) {
+                    slopsix_voice_engine_update_frequency(state,
+                        &state->voices[v], &state->engines[v]);
+                }
+            }
+        }
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            slopsix_compander_word word;
+            int32_t out;
+
+            if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
+                continue;
+            }
+
+            slopsix_voice_render_sample(&state->engines[v], alg, &out);
+            slopsix_compander_quantize(out, &word);
+            bus += slopsix_compander_value(&word);
+        }
+
+        slopsix_output_mix(state, bus,
+            &stereo_out[sample * 2u], &stereo_out[sample * 2u + 1u]);
+    }
+}
+
+/* The block-process stage's patch: every operator audible so the whole
+ * graph is live, the feedback up so the pair's paths carry, and the LFO
+ * depths up so the ticks rewrite both registers. */
+static void make_block_patch(uint8_t *dump, uint8_t algorithm)
+{
+    unsigned block;
+
+    memset(dump, 0, SLOPSIX_VOICE_DUMP_SIZE);
+
+    for (block = 0; block < 6u; block++) {
+        uint8_t *op = dump + block * SLOPSIX_DUMP_OP_BLOCK;
+
+        op[0] = 70u; op[1] = 60u; op[2] = 50u; op[3] = 40u;
+        op[4] = 60u; op[5] = 50u; op[6] = 70u; op[7] = 0u;
+        op[16] = 70u + (uint8_t)(block * 5u);
+        op[18] = (uint8_t)(1u + (block & 3u));
+        op[20] = (uint8_t)(1u + block);
+        op[13] = (uint8_t)(block & 3u);      /* the rate sensitivity */
+        op[15] = (uint8_t)((block * 7u) & 7u);  /* velocity sensitivity */
+        op[17] = (uint8_t)(block & 3u);      /* the amp-mod sensitivity */
+    }
+
+    dump[126] = 99u; dump[127] = 99u; dump[128] = 99u; dump[129] = 99u;
+    dump[130] = 30u; dump[131] = 70u; dump[132] = 50u; dump[133] = 99u;
+    dump[SLOPSIX_DUMP_ALGORITHM] = algorithm;
+    dump[SLOPSIX_DUMP_FEEDBACK] = 5u;
+    dump[SLOPSIX_DUMP_OSC_SYNC] = 1u;
+    dump[SLOPSIX_DUMP_LFO_SPEED] = 33u;
+    dump[SLOPSIX_DUMP_LFO_DELAY] = 40u;
+    dump[SLOPSIX_DUMP_LFO_PMD] = 60u;
+    dump[SLOPSIX_DUMP_LFO_AMD] = 80u;
+    dump[SLOPSIX_DUMP_LFO_WAVE] = 0u;
+    dump[SLOPSIX_DUMP_LFO_PMS] = 3u;
+    dump[SLOPSIX_DUMP_TRANSPOSE] = 24u;
+}
+
+/* The total the process stage renders, and where its events land (the
+ * positions are the chunk boundaries every split pattern honours). */
+#define BLOCK_TOTAL 2048
+#define BLOCK_EVENT1 512
+#define BLOCK_EVENT2 1024
+#define BLOCK_EVENT3 1536
+
+/* One run: the same event timeline through both render calls, the
+ * buffer split as the caller asks.  `splits` is the pattern the
+ * driver cycles over the four 512-sample segments between events. */
+static void block_run_split(slopsix_context ctx_ref, slopsix_context ctx_blk,
+                            const unsigned *splits, unsigned nsplits,
+                            int16_t *buf_ref, int16_t *buf_blk,
+                            int *mismatch)
+{
+    static const size_t segments[4] = { BLOCK_EVENT1,
+                                        BLOCK_EVENT2 - BLOCK_EVENT1,
+                                        BLOCK_EVENT3 - BLOCK_EVENT2,
+                                        BLOCK_TOTAL - BLOCK_EVENT3 };
+    unsigned seg;
+    unsigned idx = 0;
+
+    slopsix_note_on(ctx_ref, 60, 100);
+    slopsix_note_on(ctx_blk, 60, 100);
+
+    for (seg = 0; seg < 4u; seg++) {
+        size_t left = segments[seg];
+        unsigned which = 0;
+
+        while (left > 0) {
+            size_t n = splits[which % nsplits];
+
+            if (n > left) {
+                n = left;
+            }
+
+            memset(buf_ref + idx * 2u, 0x55, n * 2u * 2u);
+            memset(buf_blk + idx * 2u, 0x55, n * 2u * 2u);
+            process_reference(ctx_ref, buf_ref + idx * 2u, n);
+            slopsix_process(ctx_blk, buf_blk + idx * 2u, n);
+            if (memcmp(buf_ref + idx * 2u, buf_blk + idx * 2u,
+                       n * 2u * 2u) != 0) {
+                *mismatch = 1;
+            }
+            idx += n;
+            left -= n;
+            which++;
+        }
+
+        /* The events land at the segment boundaries, the same absolute
+         * samples in both runs. */
+        if (seg == 0u) {
+            slopsix_set_pitch_bend(ctx_ref, 0x3FFF);
+            slopsix_set_pitch_bend(ctx_blk, 0x3FFF);
+            slopsix_set_ctrl_value(ctx_ref, SLOPSIX_CTRL_MOD_WHEEL, 60);
+            slopsix_set_ctrl_value(ctx_blk, SLOPSIX_CTRL_MOD_WHEEL, 60);
+        } else if (seg == 1u) {
+            slopsix_set_ctrl_value(ctx_ref, SLOPSIX_CTRL_FOOT, 127);
+            slopsix_set_ctrl_value(ctx_blk, SLOPSIX_CTRL_FOOT, 127);
+        } else if (seg == 2u) {
+            slopsix_note_off(ctx_ref, 60);
+            slopsix_note_off(ctx_blk, 60);
+            slopsix_note_on(ctx_ref, 67, 64);
+            slopsix_note_on(ctx_blk, 67, 64);
+        }
+    }
+}
+
+static void stage_blockprocess(void)
+{
+    static const unsigned patterns[][6] = {
+        { 512, 0, 0, 0, 0, 0 },
+        { 64, 0, 0, 0, 0, 0 },
+        { 1, 0, 0, 0, 0, 0 },
+        { 63, 1, 0, 0, 0, 0 },
+        { 65, 63, 0, 0, 0, 0 },
+        { 7, 0, 0, 0, 0, 0 },
+        { 128, 129, 128, 127, 0, 0 },
+        { 200, 0, 0, 0, 0, 0 },
+    };
+    int16_t buf_ref[BLOCK_TOTAL * 2u];
+    int16_t buf_blk[BLOCK_TOTAL * 2u];
+    uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+    unsigned algorithm;
+    unsigned p;
+
+    printf("stage blockprocess\n");
+
+    for (algorithm = 0; algorithm < 32u; algorithm++) {
+        for (p = 0; p < 8u; p++) {
+            unsigned nsplits;
+            slopsix_context ctx_ref;
+            slopsix_context ctx_blk;
+            int mismatch = 0;
+
+            for (nsplits = 0; nsplits < 6u; nsplits++) {
+                if (patterns[p][nsplits] == 0u) {
+                    break;
+                }
+            }
+
+            make_block_patch(dump, (uint8_t)algorithm);
+            ctx_ref = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+                                             SLOPSIX_DEFAULT_SAMPLE_RATE);
+            ctx_blk = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+                                             SLOPSIX_DEFAULT_SAMPLE_RATE);
+            check(slopsix_set_voice(ctx_ref, dump, sizeof(dump)) ==
+                      SLOPSIX_OK &&
+                  slopsix_set_voice(ctx_blk, dump, sizeof(dump)) ==
+                      SLOPSIX_OK,
+                  "the block-process pair takes the patch");
+
+            block_run_split(ctx_ref, ctx_blk, patterns[p], nsplits,
+                            buf_ref, buf_blk, &mismatch);
+
+            if (!block_probe_equal(&SLOPSIX_CONTEXT(ctx_ref)->engines[0],
+                                   &SLOPSIX_CONTEXT(ctx_blk)->engines[0])) {
+                mismatch = 1;
+            }
+
+            check(!mismatch,
+                  "the block process call matches the per-sample loop "
+                  "for the run's splits");
+            if (mismatch) {
+                printf("  algorithm %u, pattern %u\n", algorithm + 1u,
+                       p + 1u);
+            }
+
+            slopsix_destroy_context(ctx_ref);
+            slopsix_destroy_context(ctx_blk);
+        }
+    }
+
+    /* The tick-phase sweep: the sub-blocks must cut at the ticks
+     * wherever they land inside a call.  The prelude advances both
+     * contexts one sample at a time up to offset k, then the rest of
+     * the take renders in 64-frame calls (the block context) against
+     * continued single-frame calls (the reference); every tick position
+     * inside a block passes through this. */
+    for (algorithm = 0; algorithm < 32u; algorithm += 5u) {
+        unsigned k;
+        unsigned take = 768u;
+
+        make_block_patch(dump, (uint8_t)algorithm);
+        for (k = 0; k < 140u; k++) {
+            slopsix_context ctx_ref;
+            slopsix_context ctx_blk;
+            int mismatch = 0;
+            unsigned i;
+            unsigned idx = 0;
+
+            ctx_ref = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+                                             SLOPSIX_DEFAULT_SAMPLE_RATE);
+            ctx_blk = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+                                             SLOPSIX_DEFAULT_SAMPLE_RATE);
+            slopsix_set_voice(ctx_ref, dump, sizeof(dump));
+            slopsix_set_voice(ctx_blk, dump, sizeof(dump));
+            slopsix_note_on(ctx_ref, 48, 90);
+            slopsix_note_on(ctx_blk, 48, 90);
+
+            for (i = 0; i < k; i++) {
+                process_reference(ctx_ref, buf_ref + idx * 2u, 1);
+                slopsix_process(ctx_blk, buf_blk + idx * 2u, 1);
+                idx++;
+            }
+            while (idx < take) {
+                size_t n = (take - idx > 64u) ? 64u : take - idx;
+                size_t t;
+
+                for (t = 0; t < n; t++) {
+                    process_reference(ctx_ref, buf_ref + (idx + t) * 2u, 1);
+                }
+                slopsix_process(ctx_blk, buf_blk + idx * 2u, n);
+                idx += n;
+            }
+
+            if (memcmp(buf_ref, buf_blk, take * 2u * 2u) != 0) {
+                mismatch = 1;
+            }
+            if (!block_probe_equal(&SLOPSIX_CONTEXT(ctx_ref)->engines[0],
+                                   &SLOPSIX_CONTEXT(ctx_blk)->engines[0])) {
+                mismatch = 1;
+            }
+            check(!mismatch,
+                  "the block process call matches the per-sample loop at "
+                  "every tick position");
+            if (mismatch) {
+                printf("  algorithm %u, tick offset %u\n", algorithm + 1u,
+                       k);
+            }
+
+            slopsix_destroy_context(ctx_ref);
+            slopsix_destroy_context(ctx_blk);
+        }
+    }
+}
+
 /* -------------------------------------------------------- the LFO */
 
 static void stage_lfo(void)
@@ -3711,6 +4213,12 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--render") == 0) {
             stage_render();
             ran = 1;
+        } else if (strcmp(argv[i], "--blockgraph") == 0) {
+            stage_blockgraph();
+            ran = 1;
+        } else if (strcmp(argv[i], "--blockprocess") == 0) {
+            stage_blockprocess();
+            ran = 1;
         } else {
             fprintf(stderr, "unknown stage: %s\n", argv[i]);
             return 2;
@@ -3739,6 +4247,8 @@ int main(int argc, char **argv)
         stage_api();
         stage_extras();
         stage_render();
+        stage_blockgraph();
+        stage_blockprocess();
     }
 
     if (failures != 0) {

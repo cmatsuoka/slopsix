@@ -607,3 +607,44 @@ int32_t slopsix_eg_step(slopsix_eg *eg)
 
     return slopsix_eg_advance_level(eg, 1u) >> SLOPSIX_EG_FRAC;
 }
+
+/*
+ * `count` steps in one call: the same arithmetic as `count`
+ * slopsix_eg_step calls, in both cadences, leaving the same state.  The
+ * block renderer fills an operator's level buffer for the whole
+ * sub-block with this and pays the cross-TU call once per operator and
+ * sub-block instead of once per sample.
+ */
+void slopsix_eg_fill(slopsix_eg *eg, int16_t *out, unsigned count)
+{
+    unsigned s;
+
+    if (eg->block_mode) {
+        for (s = 0; s < count; s++) {
+            int32_t value;
+
+            if (eg->block_pos == 0u) {
+                int32_t start = eg->level;
+                int32_t end = slopsix_eg_advance_level(eg, SLOPSIX_EG_BLOCK);
+
+                eg->block_level = start;
+                eg->block_step = ((end - start) + (1 << 5)) >> 6;
+            }
+
+            value = (eg->block_level +
+                     (((int32_t)eg->block_pos + 1) * eg->block_step)) >>
+                    SLOPSIX_EG_FRAC;
+
+            out[s] = (int16_t)value;
+
+            eg->block_pos =
+                (uint8_t)((eg->block_pos + 1u) & (SLOPSIX_EG_BLOCK - 1u));
+        }
+        return;
+    }
+
+    for (s = 0; s < count; s++) {
+        out[s] = (int16_t)(slopsix_eg_advance_level(eg, 1u) >>
+                           SLOPSIX_EG_FRAC);
+    }
+}

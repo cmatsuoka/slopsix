@@ -84,3 +84,49 @@ costs roughly two to three times Dexed's float path, while remaining
 comfortably realtime for a full 16-voice chord.  VDX7's much lower figure
 reflects the price of emulating the entire instrument rather than a
 voice-level synthesis model.
+
+## The per-block render path (2026-11-18)
+
+The DX7 render call was reorganized to the reference emulator's block
+shape: one operator renders a block of samples before the next starts,
+the envelopes fill one level buffer per operator, every routing decision
+resolves once per operator and block, and the render call is cut into
+sub-blocks that end exactly on the LFO/pitch-EG ticks. The evaluation is
+bit-identical to the previous per-sample one: all 32 algorithms' block
+renders were checked against the per-sample walk from randomized carry-in
+states (output and engine state, per span and per chunk boundary), the
+whole public render path against a per-sample reference loop over every
+split pattern and every tick position inside a block, and all 256 ROM
+programs (eight banks, plus the forced-AMS runs) render byte-identically
+to the previous build.
+
+Measurement method: the local-only `local/bench` harness, ROM 1A, one
+pinned CPU (`taskset`), interleaved old/new binaries, seven runs per
+cell, median reported. The CPU governor was `powersave`, so only the
+interleaved comparison should be trusted.
+
+| Patch | Voices | before | after | gain |
+|---|---:|---:|---:|---:|
+| BRASS 1 | 1 | 41.1 | 34.0 | 17.3% |
+| BRASS 1 | 16 | 494.5 | 390.3 | 21.1% |
+| E.PIANO 1 | 1 | 40.4 | 33.4 | 17.5% |
+| E.PIANO 1 | 16 | 450.5 | 379.9 | 15.7% |
+| SYN-LEAD 1 | 1 | 40.6 | 33.4 | 17.7% |
+| SYN-LEAD 1 | 16 | 512.2 | 388.8 | 24.1% |
+
+ns / frame. The gain is wider at sixteen voices, which is where the
+per-sample dispatch cost the change removes concentrates. Dexed's
+figures from the table above are 17.5 ns/frame for one voice and
+233.6 to 271.6 at sixteen, so the remaining gap is the one candidate 8
+(the oscillator core) addresses: slopsix's per-sample quantized
+oscillator and 12-bit DAC paths are kept deliberately.
+
+The archive grew from 47 KB to 65 KB: the block renderer's specialized
+runs inline the operator core a few more times than the walk did, in
+the same speed-first translation unit as the rest of the per-sample
+path (`src/slopsix_algorithm.c`). The table generators, the control-rate
+sources and the public API glue stay size-first.
+
+With this change the optimization candidates' big structural item is
+done; the remaining candidates are the oscillator core (number 8) and
+profile-guided optimization (number 9).

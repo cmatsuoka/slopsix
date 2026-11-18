@@ -1,23 +1,30 @@
 /*
- * slopsix_voice.c - The per-sample render path: the voice loop, the
- * pitch EG's cadence and the voice engine's note-on / release / rewrite.
+ * slopsix_voice.c - The render call's driver: the control-rate cadences,
+ * the voice loop and the voice engine's note-on / release / rewrite.
  *
- * The loop follows the hardware's per-sample walk: every voice's
- * operators render in the graph's order, each voice's carrier sum goes
- * through the compander, the quantized voices sum on the bus, and the
- * once-per-sample output stages turn the bus into the two channels:
+ * The loop follows the hardware's per-sample register flow with the
+ * evaluation per block: every sounding voice's operators render
+ * operator-major over blocks of samples (src/slopsix_algorithm.c), each
+ * voice's carrier sum goes through the compander, the quantized voices
+ * sum on the bus, and the once-per-sample output stages turn the bus
+ * into the two channels:
  *
- *   for each voice:  graph walk -> carrier sum (int32)
- *                    -> compander quantize (12-bit mantissa + shift)
- *   bus sum (wide accumulator, plan decision D-15)
- *   output stages -> int16 L/R
+ *   per sub-block (cut at the cadence ticks):
+ *     for each voice:  block render -> carrier sums for the block
+ *                      (int32) -> compander quantize per sample
+ *                      (12-bit mantissa + shift)
+ *     bus per sample (wide accumulator, plan decision D-15)
+ *     output stages -> int16 L/R, per sample
  *
  * The pitch EG and the LFO are CPU-side processes on global cadences
  * (plan decision D-1): the context's gates fire at the firmware's tick
  * rates (the LFO and its register pushes on every OCF tick, the pitch EG
  * on every second tick), advance the respective staircases for the whole
  * instrument, and rewrite the voices' phase increments - the firmware's
- * PORTA_PROCESS does the same rewrite at the same ticks.
+ * PORTA_PROCESS does the same rewrite at the same ticks.  The sub-blocks
+ * end exactly on the gates' samples, so the tick's updates run between
+ * sub-blocks, at the same sample the per-sample loop runs them: the
+ * tick's sample itself renders with the fresh register values.
  *
  * This translation unit is on the per-sample render path and is compiled
  * speed-first (-O3); the rest of the library is compiled size-first.
@@ -201,28 +208,139 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
 /*
  * The DX7 personality's render call.
  *
- * Per sample: the two CPU-side cadence gates (one global OCF timer on the
- * hardware drives both - the LFO and its two register pushes on every
- * tick, the pitch EG on every second tick; the two accumulators'
- * periods are exact multiples, so the pitch EG's walk lands on every
- * second LFO tick, as the hardware's toggle does), then every sounding
- * voice's graph walk, compander word and bus contribution, and finally
- * the output stages.  A tick that reaches either gate rewrites a sounding
- * voice's phase increments only when its composed pitch offset has moved
- * (the hardware's portamento process carries the composed pitch offset; a
- * static pitch needs no rewrite); a free voice renders nothing and its
- * operators keep the increments they were last keyed with.
+ * The control-rate work runs on the two global cadences (one OCF timer
+ * on the hardware drives both - the LFO and its register pushes on every
+ * tick, the pitch EG on every second tick), and everything else runs per
+ * block: the voices render operator-major over blocks of samples and the
+ * output stages turn each sample of the mixed bus into the two channels.
+ * The call is cut into sub-blocks that end exactly on the cadence ticks -
+ * an integer lookahead over the two cadence accumulators places the next
+ * tick sample - so the sample a tick belongs to is rendered with the
+ * register values that tick pushed, and inside a sub-block the increments
+ * and the amplitude reductions are constants, the shape the block
+ * renderer's loops want.  A tick that reaches either gate rewrites a
+ * sounding voice's phase increments only when its composed pitch offset
+ * has moved (the hardware's portamento process carries the composed pitch
+ * offset; a static pitch needs no rewrite); a free voice renders nothing
+ * and its operators keep the increments they were last keyed with.
  *
- * This is the DX7 personality's entry point: the shared API glue calls it
- * through the context's resolved function pointer, so the sample loop
- * carries no personality branch (plan decision D-18).
+ * Per sub-block: every sounding voice's block render, each carrier sum
+ * quantized by the voice's compander and summed on the bus (plan
+ * decision D-15), then the once-per-sample output stages.
+ *
+ * This is the DX7 personality's entry point: the shared API glue calls
+ * it through the context's resolved function pointer, so the sample
+ * loop carries no personality branch (plan decision D-18).
  */
+
+/* The cadence's fire threshold, the gate's own rate handling. */
+static uint32_t cadence_threshold(uint32_t sample_rate)
+{
+    uint32_t rate = sample_rate;
+
+    if (rate == 0u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
+    }
+    if (rate > SLOPSIX_DEFAULT_SAMPLE_RATE * 8u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
+    }
+
+    return SLOPSIX_CADENCE_TICK_NUM * rate;
+}
+
+/* The samples until the gate fires, one-based: the accumulator fires on
+ * the sample where it has crossed the threshold, so the sub-blocks can
+ * end exactly on it. */
+static uint32_t cadence_distance(const slopsix_cadence *cad,
+                                 uint32_t threshold)
+{
+    uint32_t step = cad->step;
+
+    if (step == 0u) {
+        return UINT32_MAX;
+    }
+
+    return (threshold - cad->acc + step - 1u) / step;
+}
+
+/* The bulk advance over samples that do not reach a fire (the caller
+ * keeps the run shorter than the distance). */
+static void cadence_skip(slopsix_cadence *cad, size_t samples)
+{
+    cad->acc += cad->step * (uint32_t)samples;
+}
+
+/* One sample's advance; nonzero when the gate fires on it. */
+static int cadence_step(slopsix_cadence *cad, uint32_t threshold)
+{
+    cad->acc += cad->step;
+
+    if (cad->acc >= threshold) {
+        cad->acc -= threshold;
+        return 1;
+    }
+
+    return 0;
+}
+
+/* One span of the call: the voices render blocks, the per-voice
+ * compander words sum on the bus, and the output stages run per sample.
+ * The span is cut into the scratch's block size, and the voices are
+ * processed one at a time - the scratch is one voice's worth. */
+static void render_span(slopsix_context_state *state,
+                        const slopsix_algorithm *alg,
+                        int16_t *stereo_out, size_t start, size_t count)
+{
+    slopsix_block_scratch *scratch = &state->block_scratch;
+
+    while (count > 0) {
+        unsigned chunk = (count > SLOPSIX_RENDER_BLOCK)
+                             ? (unsigned)SLOPSIX_RENDER_BLOCK
+                             : (unsigned)count;
+        int32_t *restrict bus = scratch->bus;
+        int32_t *voice_out = scratch->voice_out;
+        unsigned v;
+        unsigned s;
+
+        for (s = 0; s < chunk; s++) {
+            bus[s] = 0;
+        }
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
+                continue;
+            }
+
+            slopsix_voice_render_block(&state->engines[v], alg, scratch,
+                                       voice_out, chunk);
+
+            for (s = 0; s < chunk; s++) {
+                slopsix_compander_word word;
+
+                slopsix_compander_quantize(voice_out[s], &word);
+                bus[s] += slopsix_compander_value(&word);
+            }
+        }
+
+        for (s = 0; s < chunk; s++) {
+            slopsix_output_mix(state, bus[s],
+                               &stereo_out[(start + s) * 2u],
+                               &stereo_out[(start + s) * 2u + 1u]);
+        }
+
+        start += chunk;
+        count -= chunk;
+    }
+}
+
 void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     size_t frames)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
     const slopsix_algorithm *alg;
-    size_t sample;
+    uint32_t lfo_threshold;
+    uint32_t peg_threshold;
+    size_t done = 0;
     size_t i;
 
     if (stereo_out == NULL) {
@@ -238,65 +356,89 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     }
 
     alg = slopsix_algorithm_get(state->patch.algorithm);
+    lfo_threshold = cadence_threshold(state->lfo_cadence.sample_rate);
+    peg_threshold = cadence_threshold(state->pitch_cadence.sample_rate);
 
-    for (sample = 0; sample < frames; sample++) {
-        int32_t bus = 0;
-        int lfo_tick;
-        int peg_tick;
-        unsigned v;
+    while (done < frames) {
+        uint32_t lfo_distance = cadence_distance(&state->lfo_cadence,
+                                                 lfo_threshold);
+        uint32_t peg_distance = cadence_distance(&state->pitch_cadence,
+                                                 peg_threshold);
+        uint32_t tick = (lfo_distance < peg_distance) ? lfo_distance
+                                                      : peg_distance;
+        size_t left = frames - done;
+        size_t plain;
 
-        lfo_tick = slopsix_lfo_cadence_tick(&state->lfo_cadence);
-        peg_tick = slopsix_pitch_eg_cadence_tick(&state->pitch_cadence);
-
-        if (lfo_tick) {
-            slopsix_lfo_tick(state);
+        /* The samples that keep the current register values: up to the
+         * one before the next tick's sample.  A tick lands at least one
+         * sample ahead, so the plain run is one shorter than the
+         * distance; a call that ends before the tick runs plain to its
+         * end. */
+        if (tick == UINT32_MAX || tick - 1u > left) {
+            plain = left;
+        } else {
+            plain = (size_t)(tick - 1u);
         }
-        if (lfo_tick || peg_tick) {
-            /* The LFO's and the bend's share of the pitch offset is the
-             * same for every voice, so compose it once; the pitch EG's
-             * level is per voice.  A voice whose composed offset has not
-             * moved keeps the increments it already has, so a static
-             * pitch costs no rewrite at all. */
-            int32_t lfo_offset = slopsix_mod_pitch_offset(state);
 
-            for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
-                int32_t offset;
+        if (plain > 0) {
+            cadence_skip(&state->lfo_cadence, plain);
+            cadence_skip(&state->pitch_cadence, plain);
+            render_span(state, alg, stereo_out, done, plain);
+            done += plain;
+            if (done == frames) {
+                break;
+            }
+        }
 
-                if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
-                    continue;
-                }
-                if (lfo_tick) {
-                    /* The EGS's amp-mod register has a fresh value: the
-                     * voice's operators' reductions follow it. */
-                    slopsix_voice_engine_update_ams(state,
-                        &state->engines[v]);
-                }
-                if (peg_tick) {
-                    slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
-                }
-                offset = lfo_offset +
-                    slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
-                if (offset != state->engines[v].pitch_offset) {
-                    slopsix_voice_engine_update_frequency(state,
-                        &state->voices[v], &state->engines[v]);
+        /* The next sample is the tick's: the gates advance on it, the
+         * LFO and pitch-EG handlers run on it, and the sample renders
+         * with the values they pushed - the per-sample loop's order. */
+        {
+            int lfo_tick = cadence_step(&state->lfo_cadence, lfo_threshold);
+            int peg_tick = cadence_step(&state->pitch_cadence,
+                                        peg_threshold);
+
+            if (lfo_tick) {
+                slopsix_lfo_tick(state);
+            }
+            if (lfo_tick || peg_tick) {
+                /* The LFO's and the bend's share of the pitch offset is
+                 * the same for every voice, so compose it once; the
+                 * pitch EG's level is per voice.  A voice whose
+                 * composed offset has not moved keeps the increments it
+                 * already has, so a static pitch costs no rewrite at
+                 * all. */
+                int32_t lfo_offset = slopsix_mod_pitch_offset(state);
+                unsigned v;
+
+                for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+                    int32_t offset;
+
+                    if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
+                        continue;
+                    }
+                    if (lfo_tick) {
+                        /* The EGS's amp-mod register has a fresh
+                         * value: the voice's operators' reductions
+                         * follow it. */
+                        slopsix_voice_engine_update_ams(state,
+                            &state->engines[v]);
+                    }
+                    if (peg_tick) {
+                        slopsix_pitch_eg_update(
+                            &state->engines[v].pitch_eg);
+                    }
+                    offset = lfo_offset +
+                        slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
+                    if (offset != state->engines[v].pitch_offset) {
+                        slopsix_voice_engine_update_frequency(state,
+                            &state->voices[v], &state->engines[v]);
+                    }
                 }
             }
         }
 
-        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
-            slopsix_compander_word word;
-            int32_t out;
-
-            if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
-                continue;
-            }
-
-            slopsix_voice_render_sample(&state->engines[v], alg, &out);
-            slopsix_compander_quantize(out, &word);
-            bus += slopsix_compander_value(&word);
-        }
-
-        slopsix_output_mix(state, bus,
-            &stereo_out[sample * 2u], &stereo_out[sample * 2u + 1u]);
+        render_span(state, alg, stereo_out, done, 1);
+        done += 1;
     }
 }
