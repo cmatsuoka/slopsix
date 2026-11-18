@@ -25,6 +25,7 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * reference ladder, until MIDI volume changes it (dx7-output
      * research, the volume section). */
     state->master_volume = 7u;
+    state->master_gain_q16 = slopsix_master_gain_q16(state->master_volume);
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, state->sample_rate);
@@ -744,6 +745,7 @@ static void slopsix_dx7_set_master_volume(slopsix_context_state *state,
     unsigned level_0_7)
 {
     state->master_volume = level_0_7 > 7u ? 7u : level_0_7;
+    state->master_gain_q16 = slopsix_master_gain_q16(state->master_volume);
 }
 
 /* ------------------------------------------------------- the public API */

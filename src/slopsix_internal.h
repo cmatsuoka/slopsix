@@ -759,6 +759,7 @@ typedef struct {
     /* Mix. */
     int32_t pan_q16;            /* 32768 == centre; SLOPSIX_EXTRAS only */
     unsigned master_volume;     /* 0..7 */
+    int32_t master_gain_q16;    /* the cached ladder gain for the volume */
 
     /* Voice management. */
     bool sustain;

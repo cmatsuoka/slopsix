@@ -62,7 +62,7 @@
  * (and once per sample-rate change), never on the sample path.
  *
  * This translation unit is on the per-sample render path and is compiled
- * speed-first (-O2); the rest of the library is compiled size-first.
+ * speed-first (-O3); the rest of the library is compiled size-first.
  */
 #include <string.h>
 
@@ -73,6 +73,11 @@
 static const uint8_t slopsix_filter_order[SLOPSIX_FILTER_SECTIONS] = {
     1u, 2u, 2u
 };
+
+/* The process path unrolls the cascade: one first-order section and two
+ * biquads. */
+typedef char slopsix_filter_cascade_check
+    [SLOPSIX_FILTER_SECTIONS == 3 ? 1 : -1];
 
 /* The reference's -3 dB frequency, in Hz: the corner the rate scaling
  * keeps in place (the research page's response table: -3.00 dB at
@@ -328,14 +333,8 @@ static void slopsix_filter_design(unsigned order, const int32_t *proto,
  * is the backstop that keeps a runaway state from turning into an
  * overflow - it never bites in normal operation, since the section's
  * largest legitimate value is a few times the code's full scale. */
-static int32_t slopsix_filter_step(slopsix_filter_section *section,
-                                    int32_t x)
+static int32_t slopsix_filter_round(int64_t acc)
 {
-    int64_t acc = (int64_t)section->b0 * (int64_t)x +
-                  (int64_t)section->b1 * (int64_t)section->x1 +
-                  (int64_t)section->b2 * (int64_t)section->x2 -
-                  (int64_t)section->a1 * (int64_t)section->y1 -
-                  (int64_t)section->a2 * (int64_t)section->y2;
     int64_t half = (int64_t)1 << 29;
     int32_t y;
 
@@ -351,9 +350,39 @@ static int32_t slopsix_filter_step(slopsix_filter_section *section,
         y = -SLOPSIX_FILTER_LIMIT;
     }
 
+    return y;
+}
+
+static int32_t slopsix_filter_step(slopsix_filter_section *section,
+                                    int32_t x)
+{
+    int64_t acc = (int64_t)section->b0 * (int64_t)x +
+                  (int64_t)section->b1 * (int64_t)section->x1 +
+                  (int64_t)section->b2 * (int64_t)section->x2 -
+                  (int64_t)section->a1 * (int64_t)section->y1 -
+                  (int64_t)section->a2 * (int64_t)section->y2;
+    int32_t y = slopsix_filter_round(acc);
+
     section->x2 = section->x1;
     section->x1 = x;
     section->y2 = section->y1;
+    section->y1 = y;
+
+    return y;
+}
+
+/* The first-order section: its b2 and a2 are exactly zero (the design
+ * leaves the second-order terms out), so the two multiplies are skipped
+ * and the second-order state is not touched. */
+static int32_t slopsix_filter_step_first(slopsix_filter_section *section,
+                                          int32_t x)
+{
+    int64_t acc = (int64_t)section->b0 * (int64_t)x +
+                  (int64_t)section->b1 * (int64_t)section->x1 -
+                  (int64_t)section->a1 * (int64_t)section->y1;
+    int32_t y = slopsix_filter_round(acc);
+
+    section->x1 = x;
     section->y1 = y;
 
     return y;
@@ -404,11 +433,10 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code)
     /* The code in Q12: the shift is a multiplication, because a left
      * shift of a negative value is not defined. */
     int32_t x = code * (1 << SLOPSIX_FILTER_Q12);
-    unsigned i;
 
-    for (i = 0; i < SLOPSIX_FILTER_SECTIONS; i++) {
-        x = slopsix_filter_step(&filter->section[i], x);
-    }
+    x = slopsix_filter_step_first(&filter->section[0], x);
+    x = slopsix_filter_step(&filter->section[1], x);
+    x = slopsix_filter_step(&filter->section[2], x);
 
     return x;
 }

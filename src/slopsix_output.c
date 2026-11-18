@@ -23,7 +23,7 @@
  * output is not on the DAC's integer grid.
  *
  * This translation unit is on the per-sample render path and is compiled
- * speed-first (-O2); the rest of the library is compiled size-first.
+ * speed-first (-O3); the rest of the library is compiled size-first.
  */
 #include "slopsix_internal.h"
 
@@ -168,7 +168,7 @@ void slopsix_output_mix(slopsix_context_state *state, int32_t bus,
     int32_t value = slopsix_filter_process(&state->filter, code);
     int32_t left_code;
     int32_t right_code;
-    int32_t gain;
+    int32_t gain = state->master_gain_q16;
 
 #if defined(SLOPSIX_EXTRAS)
     slopsix_pan_split(state->pan_q16, value, &left_code, &right_code);
@@ -177,7 +177,6 @@ void slopsix_output_mix(slopsix_context_state *state, int32_t bus,
     right_code = value;
 #endif
 
-    gain = slopsix_master_gain_q16(state->master_volume);
     *left = slopsix_output_scale(left_code, gain);
     *right = slopsix_output_scale(right_code, gain);
 }
