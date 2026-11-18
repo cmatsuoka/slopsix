@@ -295,15 +295,14 @@ static void slopsix_patch_parse(slopsix_context_state *state)
             src[11] & 3u, src[12] & 3u);
     }
 
-    /* Algorithm 1..32 -> the graph index 0..31; the firmware's algorithm
-     * register is a three-bit-of-anything field, so the wrap mirrors it. */
+    /* The algorithm field goes to the OPS as the firmware sends it: the
+     * listing's PATCH_ACTIVATE_ALG_MODE composes the $2805 register as
+     * `PATCH_ALGORITHM << 3 | feedback` with no adjustment, and the
+     * field spans the ROM's 0..31 rows (0-based; the panel displays one
+     * more).  Out-of-range bytes wrap, as three bits of the register
+     * would. */
     {
-        unsigned value = dump[SLOPSIX_DUMP_ALGORITHM];
-
-        if (value == 0u) {
-            value = 1u;
-        }
-        state->patch.algorithm = (uint8_t)((value - 1u) & 31u);
+        state->patch.algorithm = (uint8_t)(dump[SLOPSIX_DUMP_ALGORITHM] & 31u);
     }
     state->patch.feedback = dump[SLOPSIX_DUMP_FEEDBACK] & 7u;
     state->patch.osc_sync = dump[SLOPSIX_DUMP_OSC_SYNC] != 0u;

@@ -63,7 +63,7 @@ A row is called an *outlier* for one engine when that engine's distance to the o
 | envelope | 25 | 16 | 23 |
 | spectrum | 10 | 15 | 39 |
 
-Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.492 against 0.684, median envelope distance 2.85 dB against 2.54 dB; slopsix is at least as close on 33/64 spectrum rows and 30/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.467 against 0.684, median envelope distance 2.75 dB against 2.54 dB; slopsix is at least as close on 34/64 spectrum rows and 31/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
 
 ### Population A - VDX7 disagrees with Dexed, slopsix agrees with Dexed
 
@@ -90,56 +90,78 @@ Open items, both **needs more investigation**:
 
 - The fixed-mode operator's output level (the keyboard level scaling and the level composition) and its modulation depth.
 - Whether VDX7's 2361 Hz partial is the same operator at a different level, or a sideband of a different operator.
+- This localization was taken over the earlier engine, which read the
+  dump's algorithm field one row off from the firmware's (resolved
+  2026-11-18, below); the patch's row changed and the numbers are
+  re-measured under the corrected convention, while the fixed-frequency
+  mechanism itself stands (it is row-independent).
 
 ### The algorithms, checked one by one
 
 The engine's algorithm ROM table matches the chip's entry for entry (the
-selector, the feedback-path flag, the C/D control bits and the COM code:
-0 mismatches in 192 entries), and the carrier sets reproduce the
-documented chart. Rendering one patch through all 32 algorithms - the
-algorithm byte rewritten in the bank, so only the algorithm changes -
-against the reference emulator gives:
+selector, the feedback-pair store bit, the C/D control bits and the COM
+code: 0 mismatches in 192 entries), and the carrier sets reproduce the
+documented chart. Two corrections settled on 2026-11-18 - both adopt the
+firmware's own semantics, which VDX7 (the register file shows the raw
+pass-through) and Dexed (its table indexer) already implement:
 
-- **slopsix matches the reference to 0.002 on algorithms 23-26 and 29-31**,
-  the same as Dexed; it is within 0.09-0.15 on the two-carrier chain
-  algorithms (1-14, 18, 21, 27, 32), where Dexed is the one at 0.21.
-- **Seven algorithms deviate more than Dexed does**: 15, 16 and 17 (4-18x
-  farther, 0.235-0.254 against 0.013-0.061) and, in absolute terms
-  small, 19, 20, 22 and 28 (0.034-0.065 against 0.002-0.014).
-- The **C/D control bits are not the cause**: implementing the chip's
-  sum/delayed register model (the register updated by every operator,
-  `msum = (C ? mren : 0) + (D ? signal : 0)`) moves every algorithm's
-  distance by less than 0.01. The change was reverted because it
-  regresses one patch from 0.006 to 0.509; the residual is tracked as
-  research OQ-26.
+- **The algorithm field of the dump is the OPS's 0..31 row.** The
+  listing's PATCH_ACTIVATE_ALG_MODE composes the $2805 register as
+  `PATCH_ALGORITHM << 3 | feedback` with no adjustment, so the dump's
+  byte is the raw row (the panel displays one more). The engine used to
+  read the field as 1..32 - one row off from both references across
+  every render comparison. The earlier per-algorithm sweep numbers in
+  this section were taken across adjacent rows and are retired; the
+  sweep gets re-run on the corrected convention.
+- **The sum/delay register is the die's own model**: `msum = (C ? mren :
+  0) + (D ? signal : 0)`, the selector reads the register's new value
+  (SEL2), the value before the producer's update (SEL3), the feedback
+  pair's last stored value (SEL4, live - a push earlier in the same walk
+  reaches the reader), or the averaged pair (SEL5). The earlier
+  provisional two-bus model let double-writing operators shadow a
+  loaded value, which severed the {4,5}->3 sums of algorithms 7/8/9, the
+  {5,6}->4 sums of 10/11/14/15/26/27, the {4,5,6}->3 sums of 12/13 and
+  the {2,3,5}->1 output sums of 16/17/18 (all 1-based); the die
+  walkthrough pins the accumulate semantics and the chart draws them.
 
-### The operator feedback: a real bug, now localised
+On the corrected engine the two factory banks' median spectral distance
+to VDX7 is 0.467 (was 0.492) and the median envelope distance 2.75 dB
+(was 2.85 dB); slopsix beats Dexed's VDX7 distance on 34/64 spectra
+(was 33/64). The remaining divergences concentrate on the EGS EG-cadence
+items (E-01/E-02, population A above) and the fixed-frequency
+operator's level law (population B above), not on the algorithm
+structure.
 
-The feedback *parameter* loads correctly (the packed byte 111 bits 0-2 is
-the feedback - the reference emulator's sound responds to that byte, and
-so does the engine), and the feedback *division* (the average of the
-last two samples, then the shifter) matches the chip's. But the
-**operator that reads the feedback path is wrong**, and it shows:
+### The operator feedback: resolved (2026-11-18)
 
-- With the feedback at 0 and at 7, **ROM 3B/26 (BANJO) renders
-  bit-identically in the engine** (maximum sample difference 0), while
-  the reference changes by 4343 counts.
-- Where the feedback is audible in the engine, its sign in the sidebands
-  is wrong: ROM 1A/00 (BRASS 1)'s feedback signature (the change in the
-  band vector between the two feedback levels) is +0.062 at 127 Hz where
-  the reference has -0.056.
-- The cause: the engine assigns the self-feedback selector to the
-  operator *before* the column's owner, which for algorithm 7 means
-  operator 6 - a modulator with a tiny output, so the feedback
-  disappears. The reference's die-level model puts the reader one
-  operator lower (operator 4 for algorithm 7), where it is clearly
-  audible. The harness's 32/32 feedback-operator check cannot catch it:
-  it compares the engine against the same alignment-derived table.
+The earlier report had this open as "the operator that reads the
+feedback path is wrong". That identification had two sources, both now
+corrected, and neither was the reader:
 
-Tracked as research OQ-27; the operator itself needs the die's data or a
-capture, and the update timing (the engine reads the path from the
-previous sample, the chip updates the feedback registers during the walk)
-is a second, smaller difference.
+- the **algorithm row shifted by one**, so the analysed row was the
+  neighbour's (BANJO's dump byte 7 is the hardware's algorithm 8, not
+  7);
+- the **register model's shadowing**, which in that row severed the
+  6->{5}->3 sum path that carries the feedback into the carrier
+  operator 3, leaving the loop audibly dead - BANJO rendered
+  bit-identically at feedback 0 and 7 (the old engine's 0 counts against
+  the reference's 4343).
+
+The reader/wiring was right all along: in every checked-in algorithm the
+reader is the operator before the SEL=5 column, with column 1 wrapping
+to operator 6. The feedback pair is pushed **only where a row carries
+the store bit** - in the self-feedback loops the reading operator's own
+row carries it; in algorithms 5 and 6 (0-based rows 4 and 5) the ROM
+puts the bit on operator 5 resp. operator 4, and the engine's old
+implicit "the reader's own output joins the path" rule added a spurious
+contributor there. The pair now also carries the die's push timing, so
+the delayed selector (SEL4, algorithms 20-22 and 24-27, 1-based) sees a
+same-walk push where the old engine was one sample late.
+
+Measured 2026-11-18 on the corrected engine: BANJO (dump byte 7)
+responds to feedback 0 vs 7 with 2143 counts against the reference's
+4342 at the same scenario; the residual difference tracks the model
+items still open, not the feedback wiring.
 
 ### The patch loading, checked against the firmware
 

@@ -2245,7 +2245,7 @@ static void make_init_patch(uint8_t *dump)
 
     dump[126] = 99u; dump[127] = 99u; dump[128] = 99u; dump[129] = 99u;
     dump[130] = 50u; dump[131] = 50u; dump[132] = 50u; dump[133] = 50u;
-    dump[134] = 1u;                       /* algorithm 1 */
+    dump[134] = 0u;                       /* algorithm 1 (0-based field) */
     dump[136] = 1u;                       /* OSC KEY SYNC on */
     dump[144] = 24u;                      /* transpose neutral */
     memcpy(dump + SLOPSIX_DUMP_TRANSPOSE + 1u, name, RENDER_NAME_LEN);

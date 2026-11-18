@@ -157,23 +157,17 @@ extern const uint8_t slopsix_pitch_mod_sens[8];     /* the PMS table */
 #define SLOPSIX_FB_SHIFT(level) \
     (SLOPSIX_FB_SHIFT_MAX + 1u - (unsigned)(level))
 
-/* Evidence grade: provisional (research A-02, A-04).
- * The sum/delay register's membership rule.  The hardware has one
- * sum/delay register; the MREN control bits that decide which operator
- * outputs enter it are not decoded yet, so the working model is used:
- * an operator whose D bit is set writes the first scratch bus, one whose
- * C bit is set writes the second, and the register reads the sum of the
- * two buses (counting an operator that wrote both once).
- *
- * The ROM's first control bit is read as "this operator's output joins
- * the feedback path".  That reading agrees with the analysed engine's
- * feedback structure in 30 of the 32 algorithms; in algorithms 4 and 6
- * the bit sits on operator 4, which the reading takes as an extra
- * contributor to the feedback path.  The feedback operator itself is
- * always the one whose modulation selector is the self-feedback source,
- * which agrees with the decoded table in all 32 algorithms. */
-#define SLOPSIX_BUS_FIRST 1u
-#define SLOPSIX_BUS_SECOND 2u
+/* Evidence grade: die's algorithm-box walkthrough (research A-01, A-02).
+ * The sum/delay register: the walk's one per-voice register keeps its
+ * content where C is set, and loads or adds the current operator's
+ * signal where D is set; the selector reads either the register's new
+ * value (SEL2), the value before the producer's update (SEL3), the
+ * feedback pair's last pushed value (SEL4) or its average (SEL5).  The
+ * ROM's first control bit is the feedback pair's store enable: unlike
+ * the earlier bus model, no operator's output is a member of the path
+ * without its own bit - in the self-feedback loops the reading operator
+ * pushes its own signal (its row carries the bit), while in algorithms 4
+ * and 6 the pair holds operator 4's resp. operator 5's values only. */
 
 /* Evidence grade: bit-synchronous OPS model (research OU-01), matching
  * the output-quantization section of the algorithm page.  The per-voice
@@ -617,20 +611,27 @@ typedef struct {
 typedef enum {
     SLOPSIX_MOD_NONE = 0,
     SLOPSIX_MOD_OPERATOR,          /* the operator computed just before */
-    SLOPSIX_MOD_FEEDBACK,          /* the operator's own feedback path */
-    SLOPSIX_MOD_REGISTER,          /* the sum/delay register */
-    SLOPSIX_MOD_REGISTER_DELAYED,  /* the register's previous sample */
-    SLOPSIX_MOD_FEEDBACK_DELAYED   /* the feedback path's delayed value */
+    SLOPSIX_MOD_FEEDBACK,          /* the feedback path's averaged value */
+    SLOPSIX_MOD_REGISTER,          /* the sum/delay register's new value */
+    SLOPSIX_MOD_REGISTER_DELAYED,  /* the register's value before the
+                                    * producer's own update */
+    SLOPSIX_MOD_FEEDBACK_DELAYED   /* the feedback path's last stored
+                                    * value */
 } slopsix_mod_source;
 
-/* One operator's connection in the graph. */
+/* One operator's connection in the graph.  The selector and the
+ * compensation bits belong to the link into operator N-1 (the register
+ * walk's ROM column reads), and C/D/A configure the registers this
+ * operator's own row drives: C/D the sum/delay register (`mren`), A the
+ * feedback pair */
 typedef struct {
     slopsix_mod_source source;
     uint8_t source_op;  /* the modulating operator, 1..6, when relevant */
     uint8_t carrier;    /* the output joins the voice's carrier sum */
     uint8_t com;        /* the carrier-count compensation code, 0..5 */
-    uint8_t buses;      /* the scratch buses the output is written to */
-    uint8_t fb_out;     /* the output joins the feedback path */
+    uint8_t ctrl_c;     /* the sum/delay register: 1 keeps its content */
+    uint8_t ctrl_d;     /* the sum/delay register: 1 loads the signal */
+    uint8_t fb_out;     /* the output is stored into the feedback pair */
 } slopsix_op_conn;
 
 /* One algorithm's connection data. */
@@ -639,19 +640,25 @@ typedef struct {
 } slopsix_algorithm;
 
 /* A voice's engine state: the operators, their parameters and their
- * frequencies.  The walk's bus state is local to the render call; only
- * the delayed state (the sum/delay register and the feedback path's
- * two registers) and the operators' last samples survive a sample. */
+ * frequencies.  The walk's registers (the pending modulation value and
+ * the sum/delay register are the die's shift-register stages, the two
+ * feedback registers its feedback pair) and the operators' last samples
+ * survive a sample, and the walk reads one operator of them per row in
+ * the hardware's order. */
 typedef struct {
     slopsix_operator ops[SLOPSIX_OP_COUNT];
     slopsix_op_params params[SLOPSIX_OP_COUNT];
     slopsix_eg eg[SLOPSIX_OP_COUNT];  /* the operators' envelopes */
     slopsix_pitch_eg pitch_eg;        /* the voice's pitch envelope */
     int32_t out[SLOPSIX_OP_COUNT];  /* the operators' last samples */
-    int32_t reg_delay;              /* the register's previous sample */
-    int32_t fb_prev;                /* the feedback path's last sum */
-    int32_t fb_prev2;               /* the feedback path's sum before it */
-    int32_t fb_delay;               /* the feedback path's delayed value */
+    int32_t modout;                 /* the next row's modulation value:
+                                     * the processed row's selector
+                                     * produces it and the next row (or
+                                     * the next sample's first row)
+                                     * consumes it */
+    int32_t mren;                   /* the sum/delay register */
+    int32_t fren1;                  /* the feedback path's last value */
+    int32_t fren2;                  /* the feedback path's value before it */
     uint8_t feedback_level;         /* the OPS's 3-bit feedback field */
     int32_t pitch_offset;           /* the last applied log-frequency
                                      * offset (bend + LFO + pitch EG); the
@@ -853,16 +860,17 @@ static inline int32_t slopsix_signal_exp(int32_t log_q10)
 /*
  * The feedback path.
  *
- * The hardware averages the last two samples of the feedback path before
- * feeding them back (the die's two feedback registers and the averaging
- * adder), and the result is divided by a power of two (the 0..6-bit
- * feedback shifter).  The level-to-shift mapping is 7 - level, which a
- * bit-synchronous OPS model corroborates (research O-06); the path's own
- * value is the sum of the outputs that the algorithm's control bits add
- * to it.
+ * The hardware averages the last two stored values of the feedback pair
+ * before feeding them back (the die's two feedback registers and the
+ * averaging adder), and the result is divided by a power of two (the
+ * 0..6-bit feedback shifter).  The level-to-shift mapping is 7 - level,
+ * which a bit-synchronous OPS model corroborates (research O-06); the
+ * path's own value is pushed by the operator whose row carries the
+ * feedback-store control bit (research A-01 - in most algorithms that is
+ * the reading operator itself).
  */
-static inline int32_t slopsix_feedback_scaled(int32_t fb_prev,
-    int32_t fb_prev2, uint8_t feedback_level)
+static inline int32_t slopsix_feedback_scaled(int32_t fren1, int32_t fren2,
+    uint8_t feedback_level)
 {
     int32_t value;
     int32_t shift;
@@ -879,8 +887,8 @@ static inline int32_t slopsix_feedback_scaled(int32_t fb_prev,
         return 0;
     }
 
-    /* The average of the last two samples of the path. */
-    value = (fb_prev + fb_prev2) >> 1;
+    /* The average of the path's last two stored values. */
+    value = (fren1 + fren2) >> 1;
 
     /* The feedback shifter's division. */
     shift = (int32_t)SLOPSIX_FB_SHIFT(feedback_level);

@@ -14,13 +14,28 @@
  *     selector and the compensation code of operator N-1, with the
  *     column labelled operator 1 wrapping around to operator 6;
  *   - the same entry's control bits belong to operator N itself: the
- *     first one adds the operator's output to the feedback path, the
+ *     first one stores the operator's signal into the feedback pair, the
  *     other two are the sum/delay register's control bits.
  *
  * That alignment reproduces the carrier set of all 32 algorithms against
  * the service-manual chart and the feedback operator of all 32
  * algorithms against the analysed engine's feedback structure; the
  * harness checks both (32/32).
+ *
+ * The walk follows the die's register flow (the algorithm's 8-cycle
+ * walkthrough in research A-01): while operator N is computed, its ROM
+ * column's selector produces the modulation value operator N-1
+ * consumes, and the column's C/D bits update the one sum/delay register
+ * with operator N's signal (C keeps the register, D loads or adds the
+ * signal); the A bit pushes the signal into the feedback pair.  The
+ * pending modulation value survives into the next sample, where the
+ * wrapped first row consumes it - that is the column-1 selector's part
+ * (typically the self-feedback average) reaching operator 6.
+ *
+ * The feedback pair is pushed only where a row's A bit says so - the
+ * reading operator's own signal joins the path only when its own row
+ * carries the bit (it does in the self-feedback loops; in algorithms 4
+ * and 6 the pair holds operator 4's resp. operator 5's values instead).
  *
  * This translation unit is on the per-sample render path and is compiled
  * speed-first (-O2); the rest of the library is compiled size-first.
@@ -144,8 +159,8 @@ static void slopsix_algorithm_decode(unsigned index)
             alg->ops[consumer - 1u].source = SLOPSIX_MOD_FEEDBACK_DELAYED;
             break;
         default:
-            /* The self-feedback path: the operator reads its own output
-             * back from the feedback path. */
+            /* The self-feedback path: the walk's pending value becomes
+             * the feedback pair's average. */
             alg->ops[consumer - 1u].source = SLOPSIX_MOD_FEEDBACK;
             slopsix_feedback_operator[index] = (uint8_t)consumer;
             break;
@@ -153,28 +168,20 @@ static void slopsix_algorithm_decode(unsigned index)
     }
 
     /* The control bits belong to the operator the column is labelled
-     * with: the first one adds the operator's output to the feedback
-     * path, the other two are the sum/delay register's control bits.
-     * The ROM's columns run from operator 6 to operator 1, so the column
-     * at index i is labelled with operator 6 - i. */
+     * with: the first one stores the operator's signal into the
+     * feedback pair, the other two are the sum/delay register's
+     * control bits.  The ROM's columns run from operator 6 to operator
+     * 1, so the column at index i is labelled with operator 6 - i. */
     for (i = 0; i < SLOPSIX_OP_COUNT; i++) {
         uint16_t entry = rom[i];
         unsigned op_number = SLOPSIX_OP_COUNT - i;
-        unsigned ctrl_c = (entry & SLOPSIX_ROM_CTRL_C) ? 1u : 0u;
-        unsigned ctrl_d = (entry & SLOPSIX_ROM_CTRL_D) ? 1u : 0u;
 
-        alg->ops[op_number - 1u].buses =
-            (uint8_t)((ctrl_d ? SLOPSIX_BUS_FIRST : 0u) |
-                      (ctrl_c ? SLOPSIX_BUS_SECOND : 0u));
-
+        alg->ops[op_number - 1u].ctrl_c =
+            (uint8_t)((entry & SLOPSIX_ROM_CTRL_C) ? 1u : 0u);
+        alg->ops[op_number - 1u].ctrl_d =
+            (uint8_t)((entry & SLOPSIX_ROM_CTRL_D) ? 1u : 0u);
         alg->ops[op_number - 1u].fb_out =
             (uint8_t)((entry & SLOPSIX_ROM_FB_OUT) ? 1u : 0u);
-
-        /* The feedback operator's own output always joins the feedback
-         * path. */
-        if (alg->ops[op_number - 1u].source == SLOPSIX_MOD_FEEDBACK) {
-            alg->ops[op_number - 1u].fb_out = 1u;
-        }
     }
 
     /* The single-carrier algorithms carry no compensation code. */
@@ -220,98 +227,52 @@ uint8_t slopsix_algorithm_feedback_operator(unsigned index)
 }
 
 /*
- * The sum/delay register's content: the sum of the two scratch buses.
- * An operator that wrote both buses counts once, so the register reads
- * the single value.
- */
-static int32_t slopsix_bus_sum(const int32_t *bus, const int32_t *bus_writer)
-{
-    if (bus_writer[0] == bus_writer[1]) {
-        return bus[0];
-    }
-    return bus[0] + bus[1];
-}
-
-/*
- * The graph walk.
+ * The graph walk (the die's register flow, research A-01).
  *
- * The feedback path holds the sum of the outputs that the algorithm's
- * control bits add to it.  The feedback operator itself is part of that
- * sum, so its own output reaches the path even when no other operator
- * contributes to it.
+ * The operators run in the hardware's order op 6 -> op 1.  As each row's
+ * operator is computed, the row's selector produces the modulation value
+ * the next row's operator consumes - the pending register `modout`; the
+ * row's C/D bits update the sum/delay register with that operator's own
+ * signal (`msum = (C ? mren : 0) + (D ? signal : 0)`, so C keeps the
+ * register and D loads it or adds to it), and its A bit pushes the
+ * signal into the feedback pair.
  *
- * The hardware computes the operators in the order op6 -> op1 and an
- * operator is only ever modulated by a higher-numbered operator, so the
- * walk order is not a free choice (research A-01).  The
- * scratch buses carry the sum/delay register's content: an operator
- * whose control bits select a bus replaces that bus' content, and the
- * register reads the sum of the buses.
+ * `modout` survives the sample: the last processed row (operator 1's,
+ * whose ROM column is labelled operator 1) writes the value operator 6
+ * consumes at the next sample's first row - the wrap that the
+ * self-feedback loops' pending average travels through.  The carriers
+ * sum into the voice output; the compensation (COM) applies to those
+ * operators' levels only, as the sum/delay register's final content is
+ * exactly the carrier sum of every checked-in algorithm.
  */
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
                                   uint8_t amp_mod_register,
                                   int32_t *voice_out)
 {
-    int32_t bus[2];
-    int32_t bus_writer[2];
-    int32_t register_value;
-    int32_t voice_sum;
-    int32_t feedback_path;
-    int op;
+    int32_t voice_sum = 0;
+    unsigned row;
 
-    bus[0] = 0;
-    bus[1] = 0;
-    bus_writer[0] = -1;
-    bus_writer[1] = -1;
-    register_value = 0;
-    voice_sum = 0;
-    feedback_path = 0;
-
-    for (op = SLOPSIX_OP_COUNT - 1; op >= 0; op--) {
-        const slopsix_op_conn *conn = &alg->ops[op];
-        int32_t mod_in = 0;
+    for (row = 0; row < SLOPSIX_OP_COUNT; row++) {
+        /* The ROM row index: row 0 is operator 6, row 5 operator 1;
+         * the connection's index runs the other way. */
+        unsigned index = SLOPSIX_OP_COUNT - 1u - row;
+        const slopsix_op_conn *conn = &alg->ops[index];
+        int32_t msum;
         int32_t sample;
         int32_t log_amp_q8;
         int32_t log_amp_q10;
-
-        switch (conn->source) {
-        case SLOPSIX_MOD_OPERATOR:
-            mod_in = voice->out[conn->source_op - 1u];
-            break;
-        case SLOPSIX_MOD_REGISTER:
-            /* The cached sum of the buses as written so far this sample;
-             * it is recomputed only when a bus is written below. */
-            mod_in = register_value;
-            break;
-        case SLOPSIX_MOD_REGISTER_DELAYED:
-            mod_in = voice->reg_delay;
-            break;
-        case SLOPSIX_MOD_FEEDBACK:
-            /* The feedback path's value: the average of its last two
-             * samples, divided by the feedback shifter. */
-            mod_in = slopsix_feedback_scaled(voice->fb_prev,
-                                             voice->fb_prev2,
-                                             voice->feedback_level);
-            break;
-        case SLOPSIX_MOD_FEEDBACK_DELAYED:
-            mod_in = voice->fb_delay;
-            break;
-        default:
-            /* No modulation input, and the self-feedback path is added
-             * inside the operator itself. */
-            break;
-        }
 
         /* The envelope: the operator's log amplitude is the envelope's
          * level, less the carrier-count compensation the algorithm
          * applies to this operator (Phase 3).  The compensation is zero
          * for a modulator, because the hardware applies it to the
          * carriers only. */
-        if (voice->eg[op].active) {
-            log_amp_q8 = slopsix_eg_step(&voice->eg[op]);
+        if (voice->eg[index].active) {
+            log_amp_q8 = slopsix_eg_step(&voice->eg[index]);
         } else {
             log_amp_q8 =
-                voice->params[op].log_amp_q10 >> SLOPSIX_AMP_Q8_SHIFT;
+                voice->params[index].log_amp_q10 >> SLOPSIX_AMP_Q8_SHIFT;
         }
 
         log_amp_q8 += slopsix_com_q8(conn->com);
@@ -320,7 +281,7 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
          * that are sensitive to it; it never raises it.  The register's
          * value arrives from the context's per-tick composition (the
          * LFO's push); the shift is the whole depth law. */
-        log_amp_q8 -= slopsix_ams_reduction_q8(voice->params[op].ams_sens,
+        log_amp_q8 -= slopsix_ams_reduction_q8(voice->params[index].ams_sens,
             amp_mod_register);
 
         if (log_amp_q8 < 0) {
@@ -330,38 +291,55 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
 
         log_amp_q10 = log_amp_q8 << SLOPSIX_AMP_Q8_SHIFT;
 
-        slopsix_op_render(&voice->ops[op], log_amp_q10, mod_in, &sample);
+        /* The operator's modulation is the value the previous row's
+         * selector produced - operator 6's arrives from the previous
+         * sample's last row (the wrap). */
+        slopsix_op_render(&voice->ops[index], log_amp_q10, voice->modout,
+            &sample);
 
-        voice->out[op] = sample;
+        voice->out[index] = sample;
+
+        /* The sum/delay register's update: C keeps its content, D loads
+         * or adds this operator's signal. */
+        msum = (conn->ctrl_c ? voice->mren : 0) +
+               (conn->ctrl_d ? sample : 0);
+
+        /* The selector feeds the next row.  The register's and the
+         * feedback pair's reads happen before the updates below, as the
+         * die's own window does. */
+        switch (conn->source) {
+        case SLOPSIX_MOD_OPERATOR:
+            voice->modout = sample;
+            break;
+        case SLOPSIX_MOD_REGISTER:
+            voice->modout = msum;
+            break;
+        case SLOPSIX_MOD_REGISTER_DELAYED:
+            voice->modout = voice->mren;
+            break;
+        case SLOPSIX_MOD_FEEDBACK_DELAYED:
+            voice->modout = voice->fren1;
+            break;
+        case SLOPSIX_MOD_FEEDBACK:
+            voice->modout = slopsix_feedback_scaled(voice->fren1,
+                voice->fren2, voice->feedback_level);
+            break;
+        default:
+            voice->modout = 0;
+            break;
+        }
+
+        voice->mren = msum;
+
+        if (conn->fb_out) {
+            voice->fren2 = voice->fren1;
+            voice->fren1 = sample;
+        }
 
         if (conn->carrier) {
             voice_sum += sample;
         }
-        if (conn->buses & SLOPSIX_BUS_FIRST) {
-            bus[0] = sample;
-            bus_writer[0] = op;
-        }
-        if (conn->buses & SLOPSIX_BUS_SECOND) {
-            bus[1] = sample;
-            bus_writer[1] = op;
-        }
-        if (conn->buses != 0u) {
-            register_value = slopsix_bus_sum(bus, bus_writer);
-        }
-        if (conn->fb_out) {
-            feedback_path += sample;
-        }
     }
-
-    /* The register's delayed value is this sample's bus sum, for the next
-     * one. */
-    voice->reg_delay = register_value;
-
-    /* The feedback path's registers: the two last sums, so that the
-     * feedback operator reads their average on the next sample. */
-    voice->fb_delay = feedback_path;
-    voice->fb_prev2 = voice->fb_prev;
-    voice->fb_prev = feedback_path;
 
     *voice_out = voice_sum;
 }
