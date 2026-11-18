@@ -7,7 +7,8 @@ three offsets to the note's word:
 
   * the coarse ratio, log2(coarse), where coarse 0 means the 0.5 ratio;
   * the fine ratio, log2(1 + 0.01 * fine), which raises the ratio by up
-    to 99 percent;
+    to 100 percent (the firmware table has a 101st word, 0x1000, that a
+    serialised fine value of 100 reads);
   * the detune term, which is computed at note-on time from the note's
     absolute pitch (see src/slopsix_pitch.c).
 
@@ -22,7 +23,9 @@ engine's 4096-per-octave word.
             that value times 4096, rounded.
     fine:   floor(24204406.323123 * log(1 + 0.01 * fine) + 0.5) in the
             model's word; the engine's offset is that value divided by
-            4096.
+            4096.  The table has 101 entries (0..100); the firmware's
+            fine lookup is not bounded to 99, and its 101st table word is
+            0x1000, i.e. the 2.0 ratio.
 
 Usage: gen_freq_table.py [--dump]
   --dump   print the generated values, one per line, on stdout.
@@ -33,7 +36,7 @@ import math
 import sys
 
 COARSE_N = 32
-FINE_N = 100
+FINE_N = 101
 
 # The engine's word: 4096 units per octave.
 UNITS_PER_OCTAVE = 4096
@@ -105,7 +108,9 @@ def main():
     print(" * Per-operator frequency-composition offsets, in the engine's")
     print(" * 4096-units-per-octave frequency word.")
     print(" * coarse[n] = log2(n) in 4096/octave units (coarse 0 = the 0.5")
-    print(" * ratio, i.e. -1 octave); fine[n] = log2(1 + 0.01*n).")
+    print(" * ratio, i.e. -1 octave); fine[n] = log2(1 + 0.01*n) for")
+    print(" * n = 0..99, plus the firmware table's 101st word at n = 100")
+    print(" * (log2(2.0), the value a serialised fine of 100 reads).")
     print(" * Evidence grade: emulator-derived model (research P-02, P-04).")
     print(" */")
     print("#include <stdint.h>")
@@ -114,7 +119,7 @@ def main():
         row = ", ".join(str(v) for v in coarse[i:i + 8])
         print(f"    {row},")
     print("};")
-    print("const int16_t slopsix_fine_offset[100] = {")
+    print("const int16_t slopsix_fine_offset[101] = {")
     for i in range(0, FINE_N, 10):
         row = ", ".join(str(v) for v in fine[i:i + 10])
         print(f"    {row},")

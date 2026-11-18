@@ -146,10 +146,20 @@ int32_t slopsix_op_freq_from_voice(const slopsix_op_params *params,
 
     if (params->mode == 0u) {
         /* The operator's own frequency (the coarse and fine ratios) is
-         * added by the EGS after the voice word. */
+         * added by the EGS after the voice word.  The firmware's fine
+         * lookup has 101 words (0..100): a serialised fine value of 100
+         * reads the extra word 0x1000, so coarse 0/fine 100 is the 1.0
+         * ratio, not the 0.5 ratio.  Values above 100 read past the
+         * table on the hardware; the engine clamps them to the last
+         * defined word so the render stays deterministic. */
+        unsigned fine = params->fine;
+
+        if (fine > 100u) {
+            fine = 100u;
+        }
         word = voice_word;
         word += slopsix_coarse_offset[params->coarse & 31u];
-        word += (int32_t)slopsix_fine_offset[params->fine % 100u];
+        word += (int32_t)slopsix_fine_offset[fine];
     } else {
         /* The fixed frequency.  The index is a decade-scaled log2 of
          * the frequency: frequency = 10^(index / 100), so one coarse
@@ -165,8 +175,11 @@ int32_t slopsix_op_freq_from_voice(const slopsix_op_params *params,
          * the note word counts them above note 1; the two constants
          * below perform that re-anchoring, A4's word (23,208) and
          * 4096 * log2(440) = 35,972. */
+        /* The fixed fine term is the raw 0..127 field multiplied by
+         * 136 on the firmware, not the ratio table's index: a serialised
+         * 100 adds a full decade.  Do not wrap it modulo 100. */
         int32_t index = (int32_t)(params->coarse & 3u) * 100 +
-                        (int32_t)(params->fine % 100u);
+                        (int32_t)params->fine;
 
         word = ((4458616 * index) >> 15) -
                (SLOPSIX_LOG2_440_Q10 * 4) + SLOPSIX_WORD_A4;

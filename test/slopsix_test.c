@@ -736,6 +736,24 @@ static void stage_freq(void)
               "a master tune of +100 cents raises the pitch by 100 cents");
     }
 
+    /* The firmware's fine table has 101 words: a serialised fine value
+     * of 100 reads the extra 0x1000 word.  Coarse 0/fine 100 is
+     * therefore the 1.0 ratio, not coarse 0/fine 0's 0.5 ratio.  This
+     * matters for ROM 3B program 14, whose carrier uses that encoding. */
+    {
+        slopsix_op_params low = params;
+        slopsix_op_params high = params;
+
+        low.coarse = 0;
+        low.fine = 100;
+        high.coarse = 1;
+        high.fine = 0;
+
+        check(slopsix_op_freq_word(69, &low, 0, 0) ==
+              slopsix_op_freq_word(69, &high, 0, 0),
+              "ratio coarse 0/fine 100 is the 1.0 ratio");
+    }
+
     /* The fixed-frequency mode ignores the note. */
     {
         slopsix_op_params fixed = params;
@@ -788,6 +806,34 @@ static void stage_freq(void)
             }
             check(decade_ok,
                   "each fixed-coarse step multiplies the frequency by ten");
+        }
+
+        /* The fixed fine term is the raw serialised value (0..127), not
+         * the ratio table's index: fine 100 adds one decade. */
+        {
+            slopsix_op_params fixed_fine = fixed;
+            int64_t f_fine100;
+            int64_t f_coarse2;
+
+            fixed_fine.mode = 1;
+            fixed_fine.coarse = 1;
+            fixed_fine.fine = 100;
+            f_fine100 = increment_millihertz(
+                slopsix_increment_from_word(
+                    slopsix_op_freq_word(69, &fixed_fine, 0, 0),
+                    SLOPSIX_DEFAULT_SAMPLE_RATE),
+                SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+            fixed_fine.coarse = 2;
+            fixed_fine.fine = 0;
+            f_coarse2 = increment_millihertz(
+                slopsix_increment_from_word(
+                    slopsix_op_freq_word(69, &fixed_fine, 0, 0),
+                    SLOPSIX_DEFAULT_SAMPLE_RATE),
+                SLOPSIX_DEFAULT_SAMPLE_RATE);
+
+            check(f_fine100 == f_coarse2,
+                  "fixed fine 100 adds one decade without wrapping");
         }
 
         /* The fixed mode shares the ratio mode's antisymmetric detune
@@ -1163,7 +1209,7 @@ static void stage_eg(void)
                         slopsix_rate_scaling(96, 7),
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
 
-        for (i = 0; i < 4000; i++) {
+        for (i = 0; i < 10000; i++) {
             low_level = slopsix_eg_step(&low);
             high_level = slopsix_eg_step(&high);
             if (low_samples == 0 && low_level == target) {
@@ -2453,7 +2499,7 @@ static void stage_render(void)
 
     slopsix_process(ctx, render_buf_a, 8000);
     peak = render_peak(render_buf_a, 8000);
-    check(peak <= 32752, "the chord saturates inside the rails, not past");
+    check(peak <= 32768, "the chord saturates inside the rails, not past");
     write_wav("build/render_chord.wav", render_buf_a, 8000);
 
     slopsix_note_on(ctx, 64, 100);

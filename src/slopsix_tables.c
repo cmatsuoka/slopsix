@@ -251,7 +251,9 @@ const uint8_t slopsix_com_log[6] = {
  * Per-operator frequency-composition offsets, in the engine's
  * 4096-units-per-octave frequency word.
  * coarse[n] = log2(n) in 4096/octave units (coarse 0 = the 0.5
- * ratio, i.e. -1 octave); fine[n] = log2(1 + 0.01*n).
+ * ratio, i.e. -1 octave); fine[n] = log2(1 + 0.01*n) for
+ * n = 0..99, plus the firmware table's 101st word at n = 100
+ * (log2(2.0), the value a serialised fine of 100 reads).
  * Evidence grade: emulator-derived model (research P-02, P-04).
  */
 #include <stdint.h>
@@ -261,7 +263,7 @@ const int32_t slopsix_coarse_offset[32] = {
     16384, 16742, 17080, 17400, 17703, 17991, 18266, 18529,
     18780, 19021, 19253, 19476, 19691, 19898, 20099, 20292,
 };
-const int16_t slopsix_fine_offset[100] = {
+const int16_t slopsix_fine_offset[101] = {
     0, 58, 117, 174, 231, 288, 344, 399, 454, 509,
     563, 616, 669, 722, 774, 825, 877, 927, 978, 1027,
     1077, 1126, 1175, 1223, 1271, 1318, 1365, 1412, 1458, 1504,
@@ -272,4 +274,5 @@ const int16_t slopsix_fine_offset[100] = {
     3135, 3170, 3204, 3239, 3273, 3306, 3340, 3374, 3407, 3440,
     3473, 3506, 3538, 3571, 3603, 3635, 3667, 3698, 3730, 3761,
     3792, 3823, 3854, 3885, 3916, 3946, 3976, 4006, 4036, 4066,
+    4096,
 };

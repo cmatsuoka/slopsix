@@ -74,7 +74,7 @@ extern const uint8_t slopsix_note_t[128];
 extern const uint16_t slopsix_note_word[128];
 extern const uint8_t slopsix_com_log[6];
 extern const int32_t slopsix_coarse_offset[32];
-extern const int16_t slopsix_fine_offset[100];
+extern const int16_t slopsix_fine_offset[101];
 
 /* The ROM's tables the modulation paths read (checked in verbatim;
  * src/slopsix_lfo.c). */
@@ -520,8 +520,14 @@ static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
  * point, so that a voice at the maximum level sits at the origin of the
  * domain.  The value is the model's domain-conversion constant
  * (research O-07); it is the only place where the absolute level of the
- * engine is anchored. */
-#define SLOPSIX_LEVEL_OFFSET_Q8 4256
+ * engine is anchored.
+ *
+ * 4000 is calibrated against VDX7's raw operator signal: at the earlier
+ * 4256 the engine's operator output was one octave low, which halved the
+ * modulation index (the compander sits downstream and does not cancel
+ * it).  With 4000 the raw signals match VDX7 and the 64-patch median
+ * spectral distance drops from 0.434 to 0.058 (2026-11-18). */
+#define SLOPSIX_LEVEL_OFFSET_Q8 4000
 
 /* The envelope's own fixed point: the Q8 level with 16 fractional bits.
  * The attack's asymptote and its jump target are the model's constants

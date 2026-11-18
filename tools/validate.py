@@ -54,46 +54,81 @@ NATIVE_RATE = 49096
 # report, and it is kept here so that a regeneration does not lose it.
 FINDINGS_SECTION = """## Findings
 
-### The divergence list mixes two populations
+### Status after the level-offset fix
 
-A row is called an *outlier* for one engine when that engine's distance to the other is more than 1.3 times the other distance and larger than 1.0. Over the 64 rows:
+After the 2026-11-18 operator-level offset fix the divergence list is
+empty: every patch's spectral and envelope deviations are inside the
+range the two references span.  The outlier counts are now
 
 | Metric | slopsix outlier | VDX7 outlier | agree |
 |---|---|---|---|
-| envelope | 4 | 41 | 19 |
-| spectrum | 3 | 16 | 45 |
+| envelope | 3 | 43 | 18 |
+| spectrum | 0 | 21 | 43 |
 
-Overall slopsix is *closer* to VDX7 than Dexed is (median spectral distance 0.434 against 0.685, median envelope distance 1.65 dB against 2.54 dB; slopsix is at least as close on 43/64 spectrum rows and 50/64 envelope rows). The divergence list above therefore overstates the problem: it mixes rows where VDX7 is the outlier with rows where slopsix is.
+Overall slopsix is *closer* to VDX7 than Dexed is: median spectral
+distance **0.058** against Dexed's 0.685, median envelope distance
+**1.44 dB** against Dexed's 2.54 dB.  Slopsix is at least as close as
+Dexed on **54/64** spectrum rows and **54/64** envelope rows.
+
+### The operator level offset: corrected (2026-11-18)
+
+The level composition's reference offset was 4256 Q8 units, one octave
+too high.  A per-operator trace against VDX7 showed every raw operator
+signal was exactly half VDX7's at the same EGS registers, while the
+relative levels were correct.  The offset is a domain calibration, and
+the compander sits downstream of the operator graph: changing it does
+not cancel the modulation depth.  The earlier note that offset 4000
+left the factory renders byte-identical was an artifact of the
+pre-fix comparison and is withdrawn.
+
+At offset **4000** the raw operator signals match VDX7 (e.g. ROM 3B
+program 14's operator 4 peaks at 3920 in both), and the timbre follows:
+
+- median spectral distance to VDX7: **0.434 -> 0.058**
+- patches at least as close as Dexed, spectrum: **43/64 -> 54/64**
+- envelope median: **1.65 -> 1.44 dB** (54/64 rows)
+- ROM 1A 30 (TRAIN): the "extra" 977 Hz partial disappears; its spectral
+  S-V is 0.065 against Dexed's 0.046.
+- ROM 1A 25 (TUB BELLS): spectral S-V is 0.154 against Dexed's 0.152.
+- ROM 3B 14: spectral S-V is 0.018, matching the 3x carriers and their
+  sidebands.
+
+The absolute output rises by one octave with the corrected operator
+scale; the output stage's DAC step and compander handle the new level,
+and the chord test now admits the negative rail (-32768).  The remaining
+slopsix outliers are envelope-only (ROM 3B 5/9/24), which is the EGS
+envelope cadence/timing work, not the operator or modulation path.
 
 ### The envelope and spectrum after the EG fixes
 
-After the 2026-11-18 equal-target and rate-scaling fixes, slopsix follows
-VDX7's envelope on most rows: envelope outliers are slopsix 4, VDX7 41,
-agree 19, and the median envelope distance is 1.65 dB against Dexed's
-2.54 dB (50/64 rows at least as close as Dexed). Dexed is now the common
-envelope outlier. The remaining slopsix envelope outliers are ROM 1A
-10/14 and ROM 3B 24/27. The spectral median rose from 0.333 to 0.434
-because the corrected envelopes change the fixed-window spectra; the
-timbre/level path is the next target, not a reason to keep the slower
-envelopes. The remaining slopsix spectral outliers are ROM 3B 10/11/14.
+The equal-target and rate-scaling fixes first put the envelope within
+1.65 dB of VDX7 on 51/64 rows; the later level-offset fix carries that to
+1.44 dB on 54/64 rows.  The spectral median was 0.333 immediately after
+the selector fix and 0.434 after the envelope fixes changed the analysis
+window; it is 0.058 after the level-offset fix.  The envelope-only
+outliers are ROM 3B 5/9/24.
 
-Localised on **ROM 1A program 30** (TRAIN, algorithm 4, feedback 7): slopsix renders an extra partial at 977 Hz (relative amplitude 0.16) that neither VDX7 nor Dexed produces, while it holds the 1140 Hz band at 0.067 against VDX7's 0.23 and the 359 Hz band at 0.064 against VDX7's 0.21. Dexed stays within 0.043 of VDX7 on this patch; slopsix is 0.686 away. The same shape appears on ROM 1A 25 (TUB BELLS), with an extra partial at 917 Hz.
+### The fine-frequency table's 101st word (2026-11-18)
 
-What is known so far:
+ROM 3B program 14 (60's organ) carries a serialised fine value of **100**
+on its carrier operator 1 (coarse 0, fine 100). The firmware's fine
+frequency table is not 100 words long: it has a 101st word, `0x1000`,
+and the firmware indexes it without clamping (the operator's fine byte
+is multiplied by two and added to the table base). The extra word is the
+2.0 ratio, so coarse 0/fine 100 is the 1.0 ratio, not the 0.5 ratio. The
+engine indexed `fine % 100`, wrapping 100 to 0 and dropping that carrier
+by an octave; VDX7 and Dexed both keep it at the note's pitch. The table
+now has 101 entries (`slopsix_fine_offset[100] = 4096`), the ratio path
+clamps a serialised value above 100 to the last defined word, and the
+fixed-frequency path uses the raw fine byte (0..127) as the firmware
+does, without the modulo.
 
-- The extra partial comes from a **fixed-frequency operator**: clearing the OSC MODE bit of operator 4 removes it, clearing operator 3's does not. Both operators are in fixed mode (op3 coarse 10 / fine 99, op4 coarse 22 / fine 57).
-- The fixed-frequency **frequency law is not the bug**: slopsix's model reproduces the ROM's law (`0x16AC + TABLE_OP_FREQ_FIXED[coarse & 3] + 136 * fine`) exactly - both give 976.8 Hz for op3 and 296.9 Hz for op4 in the EGS's frequency units.
-- What differs is the fixed-mode operator's **level and modulation balance**: in VDX7 the fixed operators are nearly inaudible (0.00-0.01 relative amplitude), while in slopsix operator 4 reaches 0.16. VDX7 also carries a small 2361 Hz partial that slopsix lacks.
-
-Open items, both **needs more investigation**:
-
-- The fixed-mode operator's output level (the keyboard level scaling and the level composition) and its modulation depth.
-- Whether VDX7's 2361 Hz partial is the same operator at a different level, or a sideband of a different operator.
-- This localization was taken over the earlier engine, which read the
-  dump's algorithm field one row off from the firmware's (resolved
-  2026-11-18, below); the patch's row changed and the numbers are
-  re-measured under the corrected convention, while the fixed-frequency
-  mechanism itself stands (it is row-independent).
+Alone (at the old level offset) program 14's spectral distance to VDX7
+dropped from **1.59 to 0.85** and the envelope from 0.33 to 0.26 dB.
+After the later level-offset fix the row is **0.018** spectral and
+**0.25 dB** envelope: the fine-table correction and the one-octave
+operator-scale correction together restore the two 3x carriers and their
+modulation sidebands.
 
 ### The algorithms, checked one by one
 
@@ -139,7 +174,7 @@ pass-through) and Dexed (its table indexer) already implement:
 On the corrected engine the two factory banks' median spectral distance
 to VDX7 is 0.434 (was 0.492) and the median envelope distance 1.65 dB
 (was 2.85 dB); slopsix beats Dexed's VDX7 distance on 43/64 spectra
-(was 33/64) and 50/64 envelopes. The remaining divergences concentrate on the EGS EG-cadence
+(was 33/64) and 54/64 envelopes. The remaining divergences concentrate on the EGS EG-cadence
 items (E-01/E-02, population A above) and the fixed-frequency
 operator's level law (population B above); the algorithm walk itself
 now matches the reference.
@@ -161,7 +196,7 @@ later than VDX7, so the EGS rate law is the next target.
 The BANJO trace pinned the EGS key-scaling law: op3 (sens 3) gets delta 6
 and op1 (sens 7) gets 13, while the old `>>3` form gave 4 and 11. Using
 `round(x*sens/7)` cuts BANJO's envelope distance from 9.09 to 2.68 dB and
-the 64-patch envelope median from 2.54 to 1.65 dB (50/64), and MARIMBA
+the 64-patch envelope median from 2.54 to 1.65 dB (51/64; 54/64 after the later level-offset fix), and MARIMBA
 from 11.24 to 3.51 dB (Dexed is 11.81). The fixed-window spectral median
 rises from 0.333 to 0.434 because the corrected envelopes change the
 analysis window; the timbre path is next. The note-dependent `x` mapping

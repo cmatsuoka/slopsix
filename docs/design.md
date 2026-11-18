@@ -51,11 +51,11 @@ read together.
 |---|---|---|
 | O-01 | Phase accumulator | **Partial (hardware + design):** 22-bit increments / 23-bit adder pinned; engine uses a 32-bit state with an explicit 23-bit mask (D-6); note-on phase follows OSC KEY SYNC (OQ-05); the sync reset value is chip-internal. |
 | O-02 | Sine table contents | **Known (recipe):** exact closed-form recipe, generated and internally verified. |
-| O-03 | Amplitude application | **Partial (hardware + firmware + model):** 12-bit log₂ Q8 domain and 14-bit log word pinned; the EGS composes the target as attenuation `(level_reg<<6)+(op_level<<4)` (clamped `0xFF0`); the engine's gain form and 4256 offset are the translation. |
+| O-03 | Amplitude application | **Partial (hardware + firmware + model):** 12-bit log₂ Q8 domain and 14-bit log word pinned; the EGS composes the target as attenuation `(level_reg<<6)+(op_level<<4)` (clamped `0xFF0`); the engine's gain form and 4000 offset are the translation; the offset is calibrated so the raw operator signal matches VDX7 (a one-octave error here halves the modulation index). |
 | O-04 | Exponent conversion | **Known (recipe):** exact closed-form recipe, generated and verified. |
 | O-05 | Modulation input scaling | **Resolved (model):** the 14-bit modulator output is added directly to the 12-bit sine phase index (one period = 4096 units); full-scale deviation ≈±4 periods, no clamp. |
 | O-06 | Self-feedback | **Partial (firmware + hardware + model):** 3-bit parameter and feedback slot resolved; effective division `>>(1+(7−level))`; a capture is still the closing evidence. |
-| O-07 | Output-level 0–99 mapping | **Partial (firmware + model):** `TABLE_LOG` is the exact level curve; the firmware writes `TABLE_LOG[level]>>1` (0..63) as the EGS EG-level register and the EGS target uses it directly. The 4256 offset remains model-grade. |
+| O-07 | Output-level 0–99 mapping | **Partial (firmware + model):** `TABLE_LOG` is the exact level curve; the firmware writes `TABLE_LOG[level]>>1` (0..63) as the EGS EG-level register and the EGS target uses it directly. The 4000 offset is calibrated against VDX7's raw operator signal; it remains model-grade but is no longer an open accuracy gap. |
 
 ## Envelopes and scaling
 
