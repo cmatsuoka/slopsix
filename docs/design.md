@@ -158,7 +158,7 @@ read together.
 |---|---|---|
 | T-01 | Canonical patch set | **Open:** factory/custom patch sets are out-of-tree inputs; the harness must accept them by path. |
 | T-02 | Hardware evidence set | **Open:** captures needed for O-06, A-02, E-01/E-02, L-05, compander/SF numbering, per-algorithm loudness and velocity direction. |
-| T-03 | Harness stages | **Partial:** table, operator, frequency, algorithm/graph, EG, level, COM and bend stages implemented; compander, pan, API and LFO stages planned. |
+| T-03 | Harness stages | **Partial:** table, operator, frequency, algorithm/graph, EG, level, COM, bend, pitch EG, LFO, controller, output, API, extras and render stages implemented. |
 | T-04 | Model comparison | **Partial:** secondary baseline only; L-01's law is resolved, the next A/B targets are the EG curves and compander. |
 
 ## Cross-cutting open questions
@@ -229,12 +229,14 @@ read together.
 - The DX100 personality is compile-time isolated behind `SLOPSIX_DX100`;
   with a feature macro off, its code is absent from the per-sample path and
   asking for that engine at context creation fails.
-- The public API's shape is settled but **not yet in the code**: the header
-  still carries the Phase-1 signatures (`slopsix_create_context(rate)`,
-  `slopsix_set_voice(ctx, bytes)`, `void` setters). The engine parameter,
-  the error-returning setters, the size-parameterised patch I/O and the
-  capability queries land before the DX100 personality (plan Phase 5b;
-  decisions D-7, D-17…D-21).
+- The public API's shape is settled and **is in the code** (plan Phase 5b;
+  decisions D-7, D-17…D-21): the engine parameter in
+  `slopsix_create_context(engine, rate)`, the render entry point resolved
+  at creation and stored in the context, the error-returning setters, the
+  size-parameterised patch I/O and the capability queries. The DX7 is
+  always available and is the default engine; the DX100 personality is not
+  implemented yet, so `SLOPSIX_HAS_DX100` reports 0 and a DX100 context
+  is rejected at creation.
 - Two owner's-manual figures disagree with the chip and the chip wins:
   PMS maximum is ±700 cents (not ±800) and the LFO minimum is about
   0.008 Hz (not 0.0008 Hz).

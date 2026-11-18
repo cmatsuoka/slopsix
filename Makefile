@@ -29,6 +29,11 @@ ifeq ($(CONFIG),dx7)
   TESTBIN := slopsix_test
   TESTRUN := ./slopsix_test
 endif
+# The DX100 configuration.  The macro selects the configuration; the
+# personality's own translation units (and the SLOPSIX_DX100_PERSONALITY
+# macro that says the personality is compiled in) arrive with the DX100
+# implementation phase.  Until then the build carries the DX7 only, and a
+# DX100 context is rejected at context creation.
 ifeq ($(CONFIG),dx100)
   FEATURE_DEFS := -DSLOPSIX_DX100
   ARCHIVE := build/$(CONFIG)/libslopsix.a

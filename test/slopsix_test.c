@@ -20,6 +20,8 @@
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   ctrl        the controllers: scaling, routes and both registers
  *   output      the output stages: compander, DAC step, pan law and master
+ *   api         the public API: engine selection, the patch I/O, the
+ *               setters' error reporting and the capability queries
  *   extras      the pan is an extra: available or a no-op by build
  *   render      the live voice path: patch parse, note render and release
  *
@@ -52,7 +54,7 @@ static void stage_init(void)
 
     printf("stage init\n");
 
-    ctx = slopsix_create_context(0);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, 0);
     check(ctx != NULL, "create_context(0) returns a context");
     if (ctx == NULL) {
         return;
@@ -81,7 +83,7 @@ static void stage_silence(void)
 
     printf("stage silence\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -183,7 +185,7 @@ static void stage_voices(void)
 
     printf("stage voices\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -223,7 +225,7 @@ static void stage_voices(void)
     /* A second note-off of a pedal-held note defers silently: the
      * firmware's voice entries lose their active bit at the first
      * release, so the second one finds nothing to release. */
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -265,7 +267,7 @@ static void stage_voices(void)
         slopsix_context_state *steal_state;
         unsigned n;
 
-        steal_ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+        steal_ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
         if (steal_ctx == NULL) {
             check(0, "create_context returns a context");
             return;
@@ -320,7 +322,7 @@ static void stage_monovoice(void)
 
     printf("stage monovoice\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -1516,7 +1518,7 @@ static void stage_bend(void)
 
     printf("stage bend\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -1593,6 +1595,10 @@ static void stage_bend(void)
           "the step's staircase reaches the full travel");
     check(slopsix_bend_pitch_mod(0u, 11u, 3u) == -16385,
           "the step's downwards staircase is the complement");
+    check(slopsix_bend_pitch_mod(0x3FFFu, 11u, 13u) == 0 &&
+          slopsix_bend_pitch_mod(0u, 11u, 14u) == 0 &&
+          slopsix_bend_pitch_mod(0x2000u, 11u, 15u) == 0,
+          "the step table's zero groups carry no bend");
 
     /* The engine's word: the pitch mod is four times finer than the
      * engine's log-frequency word, so it is shifted right by two. */
@@ -2020,7 +2026,7 @@ static void stage_output(void)
         slopsix_context_state *state;
         int16_t l1, r1, l2, r2;
 
-        ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+        ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
         if (ctx == NULL) {
             check(0, "create_context returns a context");
             return;
@@ -2265,15 +2271,15 @@ static void stage_render(void)
     check(memcmp(dump + SLOPSIX_DUMP_TRANSPOSE + 1u, "RENDRTST", 8) == 0,
           "the reference patch's name sits in the name field");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
     }
     state = SLOPSIX_CONTEXT(ctx);
 
-    check(slopsix_set_voice(ctx, dump) &&
-          slopsix_get_voice(ctx, dump2) &&
+    check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK &&
+          slopsix_get_voice(ctx, dump2, sizeof(dump2)) == SLOPSIX_OK &&
           memcmp(dump, dump2, sizeof(dump)) == 0,
           "the voice dump round-trips");
     check(state->patch.algorithm == 0u && state->patch.feedback == 0u &&
@@ -2348,7 +2354,8 @@ static void stage_render(void)
 
     /* Determinism across a reset: the same calls render the same take. */
     slopsix_reset(ctx);
-    check(slopsix_set_voice(ctx, dump), "the reset context takes the patch");
+    check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
+          "the reset context takes the patch");
     slopsix_note_on(ctx, 69, 100);
     slopsix_process(ctx, render_buf_b, RENDER_FRAMES);
     check(memcmp(render_buf_a, render_buf_b, sizeof(render_buf_a)) == 0,
@@ -2358,7 +2365,7 @@ static void stage_render(void)
      * seventeenth that steals the oldest; the whole take is
      * deterministic across a reset. */
     slopsix_reset(ctx);
-    slopsix_set_voice(ctx, dump);
+    slopsix_set_voice(ctx, dump, sizeof(dump));
     for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
         slopsix_note_on(ctx, (uint8_t)(48u + i), 100);
     }
@@ -2378,7 +2385,7 @@ static void stage_render(void)
           "the chord's seventeenth note steals the oldest voice");
 
     slopsix_reset(ctx);
-    slopsix_set_voice(ctx, dump);
+    slopsix_set_voice(ctx, dump, sizeof(dump));
     for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
         slopsix_note_on(ctx, (uint8_t)(48u + i), 100);
     }
@@ -2407,7 +2414,7 @@ static void stage_lfo(void)
 
     printf("stage lfo\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -2733,7 +2740,7 @@ static void stage_lfo(void)
         int peg_fires = 0;
         int locked = 1;
 
-        host_ctx = slopsix_create_context(44100u);
+        host_ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, 44100u);
         if (host_ctx == NULL) {
             check(0, "create_context returns a context");
         } else {
@@ -2791,7 +2798,7 @@ static void stage_ctrl(void)
 
     printf("stage ctrl\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -3033,6 +3040,168 @@ static void stage_ctrl(void)
     slopsix_destroy_context(ctx);
 }
 
+/* ------------------------------------------- Phase 5b: the public API */
+
+/*
+ * The API shape: the engine selection, the size-parameterised patch I/O,
+ * the setters' error reporting and the capability queries.
+ */
+static void stage_api(void)
+{
+    slopsix_context ctx;
+    uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+    uint8_t dump2[SLOPSIX_VOICE_DUMP_SIZE];
+    int16_t buffer[16];
+    size_t i;
+
+    printf("stage api\n");
+
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, 44100u);
+    check(ctx != NULL, "create_context returns a DX7 context");
+    if (ctx == NULL) {
+        return;
+    }
+
+    /* The capability queries. */
+    check(slopsix_context_engine(ctx) == SLOPSIX_ENGINE_DX7,
+          "the context reports the engine it was created for");
+    check(slopsix_voice_count(ctx) == 16u,
+          "the DX7 reports its sixteen voices");
+    check(slopsix_operator_count(ctx) == 6u,
+          "the DX7 reports its six operators");
+    check(slopsix_algorithm_count(ctx) == 32u,
+          "the DX7 reports its 32 algorithms");
+    check(slopsix_voice_dump_size(ctx) == 156u,
+          "the DX7 reports its 156-byte dump");
+    check(slopsix_context_sample_rate(ctx) == 44100u,
+          "the context reports its sample rate");
+    check(slopsix_context_engine(NULL) == SLOPSIX_ENGINE_COUNT &&
+          slopsix_voice_count(NULL) == 0u &&
+          slopsix_operator_count(NULL) == 0u &&
+          slopsix_algorithm_count(NULL) == 0u &&
+          slopsix_voice_dump_size(NULL) == 0u &&
+          slopsix_context_sample_rate(NULL) == 0u,
+          "a null context answers zero");
+
+    /* The engine selection: an engine that is not in the build is
+     * rejected at creation, not at render time. */
+    {
+        slopsix_context dx100 =
+            slopsix_create_context(SLOPSIX_ENGINE_DX100, 0);
+        slopsix_context unknown =
+            slopsix_create_context((slopsix_engine)99, 0);
+
+#if SLOPSIX_HAS_DX100
+        check(dx100 != NULL,
+              "a DX100 context is created in a build with the personality");
+        if (dx100 != NULL) {
+            check(slopsix_context_engine(dx100) == SLOPSIX_ENGINE_DX100,
+                  "the DX100 context reports its engine");
+            slopsix_destroy_context(dx100);
+        }
+#else
+        check(dx100 == NULL,
+              "a DX100 context is rejected when the personality is absent");
+#endif
+        check(unknown == NULL, "an unknown engine is rejected at creation");
+    }
+
+    /* The patch I/O is size-parameterised and validates the size. */
+    memset(dump, 0, sizeof(dump));
+    dump[SLOPSIX_DUMP_ALGORITHM] = 1u;
+    check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
+          "a dump of the engine's own size loads");
+    check(slopsix_set_voice(ctx, dump, sizeof(dump) - 1u) ==
+          SLOPSIX_ERR_RANGE,
+          "a dump of the wrong size is rejected");
+    check(slopsix_get_voice(ctx, dump2, sizeof(dump2)) == SLOPSIX_OK &&
+          memcmp(dump, dump2, sizeof(dump)) == 0,
+          "the dump round-trips");
+    check(slopsix_get_voice(ctx, dump2, sizeof(dump2) + 1u) ==
+          SLOPSIX_ERR_RANGE,
+          "a read of the wrong size is rejected");
+    check(slopsix_set_voice(ctx, NULL, sizeof(dump)) == SLOPSIX_ERR_INVALID,
+          "a null dump is rejected");
+    check(slopsix_set_voice(NULL, dump, sizeof(dump)) == SLOPSIX_ERR_INVALID,
+          "a null context is rejected");
+    check(slopsix_get_voice(NULL, dump2, sizeof(dump2)) ==
+          SLOPSIX_ERR_INVALID,
+          "a null context is rejected on the read");
+
+    /* The setters report what they did. */
+    check(slopsix_set_pitch_bend(ctx, 0x4000u) == SLOPSIX_ERR_RANGE,
+          "a bend above 14 bits is reported");
+    check(SLOPSIX_CONTEXT(ctx)->pitch_bend == 0x3FFFu,
+          "the bend is clamped to 14 bits");
+    check(slopsix_set_pitch_bend(ctx, 0x2000u) == SLOPSIX_OK,
+          "a bend inside the range is accepted");
+    check(slopsix_set_pitch_bend_range(ctx, 13u, 0u) == SLOPSIX_ERR_RANGE,
+          "a bend range above twelve semitones is reported");
+    check(SLOPSIX_CONTEXT(ctx)->bend_range == 0u,
+          "a bend range above twelve takes the hardware's validation form");
+    check(slopsix_set_pitch_bend_range(ctx, 2u, 13u) == SLOPSIX_OK &&
+          SLOPSIX_CONTEXT(ctx)->bend_step == 13u,
+          "a bend step in the register's 4-bit domain is stored as it is");
+    check(slopsix_set_pitch_bend_range(ctx, 2u, 16u) == SLOPSIX_ERR_RANGE &&
+          SLOPSIX_CONTEXT(ctx)->bend_step == 0u,
+          "a bend step outside the 4-bit domain takes the validation form");
+    check(slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_MOD_WHEEL, 200u) ==
+          SLOPSIX_ERR_RANGE,
+          "a controller value above 127 is reported");
+    check(slopsix_set_ctrl_value(ctx, (slopsix_ctrl_source)9, 0u) ==
+          SLOPSIX_ERR_INVALID,
+          "an unknown controller source is invalid");
+    check(slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_FOOT, 0x8u) ==
+          SLOPSIX_ERR_RANGE,
+          "unknown routing bits are reported");
+    check(slopsix_set_master_volume(ctx, 9u) == SLOPSIX_ERR_RANGE,
+          "a master volume above seven is reported");
+    check(SLOPSIX_CONTEXT(ctx)->master_volume == 7u,
+          "the master volume is clamped to seven");
+    check(slopsix_note_on(ctx, 60u, 200u) == SLOPSIX_ERR_RANGE,
+          "a velocity above 127 is reported");
+    check(slopsix_note_off(ctx, 128u) == SLOPSIX_ERR_RANGE,
+          "a note off above 127 is reported");
+    check(slopsix_note_on(ctx, 60u, 100u) == SLOPSIX_OK,
+          "a note event inside the range is accepted");
+    check(slopsix_set_master_volume(NULL, 3u) == SLOPSIX_ERR_INVALID,
+          "a null context is rejected by the setters");
+
+    /* The pan is an extra: without the extras build the call says so. */
+#if SLOPSIX_HAS_EXTRAS
+    check(slopsix_set_pan(ctx, 0) == SLOPSIX_OK,
+          "the extras build accepts the pan");
+    check(slopsix_set_pan(ctx, SLOPSIX_Q16_ONE + 1) == SLOPSIX_ERR_RANGE,
+          "a pan beyond hard right is reported");
+    check(SLOPSIX_CONTEXT(ctx)->pan_q16 == SLOPSIX_Q16_ONE,
+          "the pan is clamped to hard right");
+#else
+    check(slopsix_set_pan(ctx, 0) == SLOPSIX_ERR_UNSUPPORTED,
+          "the pan is unsupported without the extras build");
+    check(SLOPSIX_CONTEXT(ctx)->pan_q16 == SLOPSIX_Q16_ONE / 2,
+          "the output stays at centre without the extras build");
+#endif
+
+    /* The render path still runs through the resolved entry point. */
+    for (i = 0; i < sizeof(buffer) / sizeof(buffer[0]); i++) {
+        buffer[i] = 1234;
+    }
+    slopsix_process(ctx, buffer, 8u);
+    check(buffer[0] != 1234 || buffer[1] != 1234,
+          "the render call writes the buffer");
+
+    /* The reset returns the context to its defaults. */
+    slopsix_set_master_volume(ctx, 3u);
+    slopsix_set_pitch_bend(ctx, 0x3000u);
+    slopsix_reset(ctx);
+    check(SLOPSIX_CONTEXT(ctx)->master_volume == 7u,
+          "the reset restores the master volume");
+    check(SLOPSIX_CONTEXT(ctx)->pitch_bend == 0x2000u,
+          "the reset restores the bend");
+
+    slopsix_destroy_context(ctx);
+}
+
 /* ------------------------------------------------------------ extras: the pan */
 
 static void stage_extras(void)
@@ -3043,7 +3212,7 @@ static void stage_extras(void)
 
     printf("stage extras\n");
 
-    ctx = slopsix_create_context(SLOPSIX_DEFAULT_SAMPLE_RATE);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, SLOPSIX_DEFAULT_SAMPLE_RATE);
     if (ctx == NULL) {
         check(0, "create_context returns a context");
         return;
@@ -3137,6 +3306,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--output") == 0) {
             stage_output();
             ran = 1;
+        } else if (strcmp(argv[i], "--api") == 0) {
+            stage_api();
+            ran = 1;
         } else if (strcmp(argv[i], "--extras") == 0) {
             stage_extras();
             ran = 1;
@@ -3167,6 +3339,7 @@ int main(int argc, char **argv)
         stage_lfo();
         stage_ctrl();
         stage_output();
+        stage_api();
         stage_extras();
         stage_render();
     }

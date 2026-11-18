@@ -14,6 +14,9 @@
 #define SLOPSIX_VOICE_COUNT 16
 #define SLOPSIX_OP_COUNT    6
 
+/* The DX7's algorithm count (the OPS's 32 connection tables). */
+#define SLOPSIX_ALGORITHM_COUNT 32
+
 /* The engine's anchor rate; the tables and rate constants derive from it
  * at context creation (research F-04). */
 #define SLOPSIX_DEFAULT_SAMPLE_RATE 49096u
@@ -724,8 +727,44 @@ typedef struct {
     slopsix_lfo_cadence lfo_cadence;
 } slopsix_context_state;
 
-/* The context handle is the context state; the public API uses void *. */
-#define SLOPSIX_CONTEXT(ctx) ((slopsix_context_state *)(ctx))
+/* ------------------------------------------------------- the personality */
+
+/*
+ * The context implementation.
+ *
+ * The context is opaque to the host, and it carries the selected engine
+ * and that engine's own state.  The render entry point is resolved at
+ * creation and stored here, so the render call is one indirect call per
+ * buffer and neither the sample loop nor the voice loop carries a
+ * personality branch (plan decision D-18).
+ *
+ * The DX7's state is the first member, so the DX7 path's own code can
+ * reach it without a branch; the accessor macros below do that.
+ */
+typedef struct {
+    slopsix_engine engine;
+    uint32_t sample_rate;
+    void (*process)(slopsix_context ctx, int16_t *stereo_out, size_t frames);
+
+    slopsix_context_state dx7;
+} slopsix_context_impl;
+
+/* The context handle is the context implementation; the public API uses
+ * void *. */
+#define SLOPSIX_IMPL(ctx) ((slopsix_context_impl *)(ctx))
+
+/* The DX7 path's state inside a context.  Only the DX7 path uses it. */
+#define SLOPSIX_CONTEXT(ctx) (&SLOPSIX_IMPL(ctx)->dx7)
+
+/* The DX7 personality's own entry points.  They live in the DX7's own
+ * translation units; the shared API glue calls them through the
+ * personality's dispatch. */
+void slopsix_dx7_init(slopsix_context_state *state, uint32_t sample_rate);
+void slopsix_dx7_reset(slopsix_context_state *state);
+void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
+    uint32_t sample_rate);
+void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
+    size_t frames);
 
 /* ------------------------------------------------------ internal API */
 

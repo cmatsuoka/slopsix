@@ -12,7 +12,7 @@
 
 #include "slopsix_internal.h"
 
-static void slopsix_context_defaults(slopsix_context_state *state)
+static void slopsix_dx7_defaults(slopsix_context_state *state)
 {
     memset(state, 0, sizeof(*state));
     state->sample_rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
@@ -35,37 +35,33 @@ static void slopsix_context_defaults(slopsix_context_state *state)
     slopsix_mod_process_input_sources(state);
 }
 
-slopsix_context slopsix_create_context(uint32_t sample_rate)
+void slopsix_dx7_init(slopsix_context_state *state, uint32_t sample_rate)
 {
-    slopsix_context_state *state;
-
-    state = (slopsix_context_state *)calloc(1, sizeof(*state));
-    if (state == NULL) {
-        return NULL;
-    }
-
-    slopsix_context_defaults(state);
+    slopsix_dx7_defaults(state);
     if (sample_rate != 0u) {
         state->sample_rate = sample_rate;
         slopsix_pitch_eg_cadence_init(&state->pitch_cadence, sample_rate);
         slopsix_lfo_cadence_init(&state->lfo_cadence, sample_rate);
     }
-
-    return (slopsix_context)state;
 }
 
-void slopsix_destroy_context(slopsix_context ctx)
+void slopsix_dx7_reset(slopsix_context_state *state)
 {
-    free(ctx);
+    uint32_t rate = state->sample_rate;
+
+    slopsix_dx7_defaults(state);
+    state->sample_rate = rate;
+    slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
+    slopsix_lfo_cadence_init(&state->lfo_cadence, rate);
 }
 
-void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
+void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
+    uint32_t sample_rate)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
     unsigned i;
     unsigned k;
 
-    if (state == NULL || sample_rate == 0u) {
+    if (sample_rate == 0u) {
         return;
     }
     state->sample_rate = sample_rate;
@@ -88,48 +84,160 @@ void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
     }
 }
 
-void slopsix_reset(slopsix_context ctx)
-{
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-    uint32_t rate;
+/* ---------------------------------------------------- the shared glue */
 
-    if (state == NULL) {
+slopsix_context slopsix_create_context(slopsix_engine engine,
+    uint32_t sample_rate)
+{
+    slopsix_context_impl *impl;
+
+    switch (engine) {
+    case SLOPSIX_ENGINE_DX7:
+        break;
+    case SLOPSIX_ENGINE_DX100:
+        /* The DX100 personality is planned but is not part of any build
+         * yet: its translation units arrive with the DX100 phase.  The
+         * request is rejected here, predictably, rather than producing a
+         * context that could not render (library page §0.2's rule: an
+         * absent personality is rejected at creation). */
+        return NULL;
+    default:
+        return NULL;
+    }
+
+    impl = (slopsix_context_impl *)calloc(1, sizeof(*impl));
+    if (impl == NULL) {
+        return NULL;
+    }
+
+    impl->engine = engine;
+    switch (engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_init(&impl->dx7, sample_rate);
+        impl->sample_rate = impl->dx7.sample_rate;
+        impl->process = slopsix_dx7_process;
+        break;
+    default:
+        free(impl);
+        return NULL;
+    }
+
+    return (slopsix_context)impl;
+}
+
+void slopsix_destroy_context(slopsix_context ctx)
+{
+    free(ctx);
+}
+
+void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL || sample_rate == 0u) {
         return;
     }
-    rate = state->sample_rate;
-    slopsix_context_defaults(state);
-    state->sample_rate = rate;
-    slopsix_pitch_eg_cadence_init(&state->pitch_cadence, rate);
-    slopsix_lfo_cadence_init(&state->lfo_cadence, rate);
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_sample_rate(&impl->dx7, sample_rate);
+        impl->sample_rate = impl->dx7.sample_rate;
+        break;
+    default:
+        break;
+    }
+}
+
+void slopsix_reset(slopsix_context ctx)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_reset(&impl->dx7);
+        break;
+    default:
+        break;
+    }
 }
 
 /* The per-sample render lives in src/slopsix_voice.c (the per-sample
  * path is compiled speed-first); this file owns the context, the patch
  * and the note events. */
 
-static void slopsix_patch_parse(slopsix_context_state *state);
-
-bool slopsix_set_voice(slopsix_context ctx, const uint8_t *voice_156)
+/*
+ * The render call: the personality's entry point was resolved at
+ * creation, so this is one indirect call per buffer and the sample loop
+ * carries no personality branch (plan decision D-18).
+ */
+void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    size_t i;
 
-    if (state == NULL || voice_156 == NULL) {
-        return false;
+    if (impl == NULL || impl->process == NULL) {
+        /* The render call always writes deterministic output, even on a
+         * null context. */
+        if (stereo_out != NULL) {
+            for (i = 0; i < frames * 2u; i++) {
+                stereo_out[i] = 0;
+            }
+        }
+        return;
     }
-    memcpy(state->voice_dump, voice_156, SLOPSIX_VOICE_DUMP_SIZE);
-    slopsix_patch_parse(state);
-    return true;
+
+    impl->process(ctx, stereo_out, frames);
 }
 
-bool slopsix_get_voice(const void *ctx, uint8_t *out_voice_156)
-{
-    const slopsix_context_state *state = (const slopsix_context_state *)ctx;
+static void slopsix_patch_parse(slopsix_context_state *state);
 
-    if (state == NULL || out_voice_156 == NULL) {
-        return false;
+slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,
+    size_t size)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL || data == NULL) {
+        return SLOPSIX_ERR_INVALID;
     }
-    memcpy(out_voice_156, state->voice_dump, SLOPSIX_VOICE_DUMP_SIZE);
-    return true;
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        /* The dump's size is the engine's own; a mismatch is a host
+         * error and the dump is not loaded (library page §3). */
+        if (size != SLOPSIX_VOICE_DUMP_SIZE) {
+            return SLOPSIX_ERR_RANGE;
+        }
+        memcpy(impl->dx7.voice_dump, data, SLOPSIX_VOICE_DUMP_SIZE);
+        slopsix_patch_parse(&impl->dx7);
+        return SLOPSIX_OK;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
+slopsix_error slopsix_get_voice(const slopsix_context ctx, uint8_t *out,
+    size_t size)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+
+    if (impl == NULL || out == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        if (size != SLOPSIX_VOICE_DUMP_SIZE) {
+            return SLOPSIX_ERR_RANGE;
+        }
+        memcpy(out, impl->dx7.voice_dump, SLOPSIX_VOICE_DUMP_SIZE);
+        return SLOPSIX_OK;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
 }
 
 /* ------------------------------------------------------- patch activation */
@@ -446,17 +554,16 @@ static void slopsix_mono_note_off(slopsix_context_state *state, uint8_t note)
     }
 }
 
-void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity)
+/* --------------------------------------------------- the note events */
+
+/*
+ * The DX7's note events.  The poly and mono paths are the firmware's own
+ * bookkeeping (see the section above); the public entry points dispatch
+ * to them per personality.
+ */
+static void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
+    uint8_t velocity)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL || note > 127u) {
-        return;
-    }
-    if (velocity > 127u) {
-        velocity = 127u;
-    }
-
     if (state->mono) {
         slopsix_mono_note_on(state, note, velocity);
         return;
@@ -472,14 +579,8 @@ void slopsix_note_on(slopsix_context ctx, uint8_t note, uint8_t velocity)
     }
 }
 
-void slopsix_note_off(slopsix_context ctx, uint8_t note)
+static void slopsix_dx7_note_off(slopsix_context_state *state, uint8_t note)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
-
     if (state->mono) {
         slopsix_mono_note_off(state, note);
         return;
@@ -487,13 +588,8 @@ void slopsix_note_off(slopsix_context ctx, uint8_t note)
     slopsix_poly_release_note(state, note);
 }
 
-void slopsix_all_notes_off(slopsix_context ctx)
+static void slopsix_dx7_all_notes_off(slopsix_context_state *state)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
     /* CC 123 "All Notes Off" semantics: act as if every key were released.
      * Voices held by the sustain pedal keep ringing until pedal-up; this is
      * deliberately weaker than an all-sound-off, which would bypass the
@@ -518,13 +614,8 @@ void slopsix_all_notes_off(slopsix_context ctx)
     slopsix_poly_release_all(state, true);
 }
 
-void slopsix_set_sustain(slopsix_context ctx, bool on)
+static void slopsix_dx7_set_sustain(slopsix_context_state *state, bool on)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
     state->sustain = on;
     if (!on) {
         /* Pedal-up releases every voice the pedal was holding; the keys
@@ -533,13 +624,8 @@ void slopsix_set_sustain(slopsix_context ctx, bool on)
     }
 }
 
-void slopsix_set_mono_mode(slopsix_context ctx, bool mono)
+static void slopsix_dx7_set_mono_mode(slopsix_context_state *state, bool mono)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
     state->mono = mono;
     if (mono) {
         /* The mode switch clears the key-event bookkeeping; the voices
@@ -551,13 +637,11 @@ void slopsix_set_mono_mode(slopsix_context ctx, bool mono)
     }
 }
 
-void slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
-{
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+/* ------------------------------------------------ the parameter setters */
 
-    if (state == NULL) {
-        return;
-    }
+static void slopsix_dx7_set_pitch_bend(slopsix_context_state *state,
+    uint16_t bend)
+{
     state->pitch_bend = bend;
     /* The bend is part of the pitch-modification register's word: the
      * context recomposes it so the change is audible without waiting for
@@ -566,29 +650,25 @@ void slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
     slopsix_refresh_pitch(state);
 }
 
-void slopsix_set_pitch_bend_range(slopsix_context ctx,
-                                  uint8_t range_semitones,
-                                  uint8_t step)
+static void slopsix_dx7_set_pitch_bend_range(slopsix_context_state *state,
+    uint8_t range_semitones,
+    uint8_t step)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
-    /* The hardware validates both to 0..12 and clears larger values. */
+    /* The hardware validates the range to 0..12 and clears a larger one
+     * (P-05: the power-up check and the panel max table).  The step is a
+     * 4-bit register exposed as it is (plan D-3): the bend parse reads
+     * the step table's sixteen groups, and the zero groups 13..15 make
+     * the bending inert - the hardware's own validation would clear
+     * them, so a panel path never leaves them in the register. */
     state->bend_range = range_semitones > 12u ? 0u : range_semitones;
-    state->bend_step = step > 12u ? 0u : step;
+    state->bend_step = step > 15u ? 0u : step;
     state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
     slopsix_refresh_pitch(state);
 }
 
-void slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
+static void slopsix_dx7_set_master_tune(slopsix_context_state *state,
+    int32_t cents_q16)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
     state->master_tune_q16 = cents_q16;
     slopsix_refresh_pitch(state);
 }
@@ -609,38 +689,26 @@ static void slopsix_mod_refresh(slopsix_context_state *state)
     state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
 }
 
-void slopsix_set_ctrl_value(slopsix_context ctx,
-                            slopsix_ctrl_source src, uint8_t value_0_127)
+static void slopsix_dx7_set_ctrl_value(slopsix_context_state *state,
+    slopsix_ctrl_source src,
+    uint8_t value_0_127)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL || (unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
-        return;
-    }
     state->ctrl_value[src] = value_0_127 > 127u ? 127u : value_0_127;
     slopsix_mod_refresh(state);
 }
 
-void slopsix_set_ctrl_range(slopsix_context ctx,
-                            slopsix_ctrl_source src, uint8_t range_0_99)
+static void slopsix_dx7_set_ctrl_range(slopsix_context_state *state,
+    slopsix_ctrl_source src,
+    uint8_t range_0_99)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL || (unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
-        return;
-    }
     state->ctrl_range[src] = range_0_99 > 99u ? 99u : range_0_99;
     slopsix_mod_refresh(state);
 }
 
-void slopsix_set_ctrl_assign(slopsix_context ctx,
-                             slopsix_ctrl_source src, unsigned flags)
+static void slopsix_dx7_set_ctrl_assign(slopsix_context_state *state,
+    slopsix_ctrl_source src,
+    unsigned flags)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL || (unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
-        return;
-    }
     /* The hardware's routing byte holds the three bits: pitch,
      * amplitude and EG bias (the firmware's M_MOD_WHEEL_ASSIGN_FLAGS). */
     state->ctrl_assign[src] = flags & (SLOPSIX_ASSIGN_PITCH |
@@ -649,14 +717,12 @@ void slopsix_set_ctrl_assign(slopsix_context ctx,
     slopsix_mod_refresh(state);
 }
 
-void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
-{
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
-
-    if (state == NULL) {
-        return;
-    }
 #if defined(SLOPSIX_EXTRAS)
+/* The pan is an extra, so the routine exists only in the extras build:
+ * without it the output stays mono at centre and the public call reports
+ * the feature as absent. */
+static void slopsix_dx7_set_pan(slopsix_context_state *state, int32_t pan_q16)
+{
     if (pan_q16 < 0) {
         pan_q16 = 0;
     }
@@ -664,18 +730,457 @@ void slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
         pan_q16 = SLOPSIX_Q16_ONE;
     }
     state->pan_q16 = pan_q16;
-#else
-    /* Panning is an extra: without it the output stays mono at centre. */
+}
+#endif
+
+static void slopsix_dx7_set_master_volume(slopsix_context_state *state,
+    unsigned level_0_7)
+{
+    state->master_volume = level_0_7 > 7u ? 7u : level_0_7;
+}
+
+/* ------------------------------------------------------- the public API */
+
+/*
+ * The public setters and note events.  Each one resolves the context's
+ * personality and reports what it did:
+ *
+ *   SLOPSIX_OK             the request was applied as it was given
+ *   SLOPSIX_ERR_RANGE      a value was out of range and was clamped
+ *   SLOPSIX_ERR_UNSUPPORTED the engine does not have the feature; the
+ *                           value is left unchanged
+ *   SLOPSIX_ERR_INVALID    the call itself was malformed
+ */
+slopsix_error slopsix_note_on(slopsix_context ctx, uint8_t note,
+    uint8_t velocity)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (note > 127u) {
+        note = 127u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+    if (velocity > 127u) {
+        velocity = 127u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_note_on(&impl->dx7, note, velocity);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_note_off(slopsix_context ctx, uint8_t note)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (note > 127u) {
+        note = 127u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_note_off(&impl->dx7, note);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_all_notes_off(slopsix_context ctx)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_all_notes_off(&impl->dx7);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_sustain(&impl->dx7, on);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_mono_mode(&impl->dx7, mono);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (bend > 0x3FFFu) {
+        bend = 0x3FFFu;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_pitch_bend(&impl->dx7, bend);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_pitch_bend_range(slopsix_context ctx,
+    uint8_t range_semitones,
+    uint8_t step)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (range_semitones > 12u || step > 15u) {
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_pitch_bend_range(&impl->dx7, range_semitones, step);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_master_tune(&impl->dx7, cents_q16);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_ctrl_value(slopsix_context ctx,
+    slopsix_ctrl_source src,
+    uint8_t value_0_127)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if ((unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (value_0_127 > 127u) {
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_ctrl_value(&impl->dx7, src, value_0_127);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_ctrl_range(slopsix_context ctx,
+    slopsix_ctrl_source src,
+    uint8_t range_0_99)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if ((unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (range_0_99 > 99u) {
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_ctrl_range(&impl->dx7, src, range_0_99);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_ctrl_assign(slopsix_context ctx,
+    slopsix_ctrl_source src,
+    unsigned flags)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    unsigned known = SLOPSIX_ASSIGN_PITCH | SLOPSIX_ASSIGN_AMP |
+                     SLOPSIX_ASSIGN_EG;
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if ((unsigned)src >= SLOPSIX_CTRL_SRC_COUNT) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if ((flags & ~known) != 0u) {
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_ctrl_assign(&impl->dx7, src, flags);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+#if defined(SLOPSIX_EXTRAS)
+    slopsix_error err = SLOPSIX_OK;
+#endif
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+#if !defined(SLOPSIX_EXTRAS)
+    /* Panning is an extra: without the macro the feature is absent, the
+     * output stays mono at centre and the call says so. */
     (void)pan_q16;
+    return SLOPSIX_ERR_UNSUPPORTED;
+#else
+    if (pan_q16 < 0) {
+        pan_q16 = 0;
+        err = SLOPSIX_ERR_RANGE;
+    }
+    if (pan_q16 > SLOPSIX_Q16_ONE) {
+        pan_q16 = SLOPSIX_Q16_ONE;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_pan(&impl->dx7, pan_q16);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
 #endif
 }
 
-void slopsix_set_master_volume(slopsix_context ctx, unsigned level_0_7)
+slopsix_error slopsix_set_master_volume(slopsix_context ctx,
+    unsigned level_0_7)
 {
-    slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
 
-    if (state == NULL) {
-        return;
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
     }
-    state->master_volume = level_0_7 > 7u ? 7u : level_0_7;
+    if (level_0_7 > 7u) {
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_master_volume(&impl->dx7, level_0_7);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+/* ------------------------------------------------------- the capabilities */
+
+/* The engine's shape: the numbers a host needs to write engine-agnostic
+ * code (library page §0.2). */
+static void slopsix_engine_shape(slopsix_engine engine, size_t *voices,
+    size_t *operators, size_t *algorithms, size_t *dump_size)
+{
+    *voices = 0u;
+    *operators = 0u;
+    *algorithms = 0u;
+    *dump_size = 0u;
+
+    switch (engine) {
+    case SLOPSIX_ENGINE_DX7:
+        *voices = SLOPSIX_VOICE_COUNT;
+        *operators = SLOPSIX_OP_COUNT;
+        *algorithms = SLOPSIX_ALGORITHM_COUNT;
+        *dump_size = SLOPSIX_VOICE_DUMP_SIZE;
+        break;
+    default:
+        break;
+    }
+}
+
+slopsix_engine slopsix_context_engine(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+
+    if (impl == NULL) {
+        return SLOPSIX_ENGINE_COUNT;
+    }
+    return impl->engine;
+}
+
+size_t slopsix_voice_count(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+    size_t voices;
+    size_t operators;
+    size_t algorithms;
+    size_t dump_size;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    slopsix_engine_shape(impl->engine, &voices, &operators, &algorithms,
+        &dump_size);
+    return voices;
+}
+
+size_t slopsix_operator_count(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+    size_t voices;
+    size_t operators;
+    size_t algorithms;
+    size_t dump_size;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    slopsix_engine_shape(impl->engine, &voices, &operators, &algorithms,
+        &dump_size);
+    return operators;
+}
+
+size_t slopsix_algorithm_count(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+    size_t voices;
+    size_t operators;
+    size_t algorithms;
+    size_t dump_size;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    slopsix_engine_shape(impl->engine, &voices, &operators, &algorithms,
+        &dump_size);
+    return algorithms;
+}
+
+size_t slopsix_voice_dump_size(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+    size_t voices;
+    size_t operators;
+    size_t algorithms;
+    size_t dump_size;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    slopsix_engine_shape(impl->engine, &voices, &operators, &algorithms,
+        &dump_size);
+    return dump_size;
+}
+
+uint32_t slopsix_context_sample_rate(const slopsix_context ctx)
+{
+    const slopsix_context_impl *impl = (const slopsix_context_impl *)ctx;
+
+    if (impl == NULL) {
+        return 0u;
+    }
+    return impl->sample_rate;
 }

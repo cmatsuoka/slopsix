@@ -174,7 +174,7 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
 }
 
 /*
- * The render call.
+ * The DX7 personality's render call.
  *
  * Per sample: the two CPU-side cadence gates (one global OCF timer on the
  * hardware drives both - the LFO and its two register pushes on every
@@ -187,8 +187,13 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
  * (the hardware's portamento process carries the composed pitch offset; a
  * static pitch needs no rewrite); a free voice renders nothing and its
  * operators keep the increments they were last keyed with.
+ *
+ * This is the DX7 personality's entry point: the shared API glue calls it
+ * through the context's resolved function pointer, so the sample loop
+ * carries no personality branch (plan decision D-18).
  */
-void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
+void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
+    size_t frames)
 {
     slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
     const slopsix_algorithm *alg;

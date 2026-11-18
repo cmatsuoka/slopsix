@@ -302,14 +302,14 @@ int main(void)
         }
     }
 
-    ctx = slopsix_create_context(sample_rate);
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7, sample_rate);
     if (ctx == 0) {
         fprintf(stderr, "Could not create the slopsix context.\n");
         goto cleanup;
     }
 
     make_default_patch(voice);
-    if (!slopsix_set_voice(ctx, voice)) {
+    if (slopsix_set_voice(ctx, voice, sizeof(voice)) != SLOPSIX_OK) {
         fprintf(stderr, "Could not load the built-in voice.\n");
         goto cleanup;
     }
