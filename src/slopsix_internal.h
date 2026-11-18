@@ -666,6 +666,12 @@ typedef struct {
     uint8_t ams_sens;      /* the amplitude modulation sensitivity, 0..3 */
     int8_t kls[SLOPSIX_KLS_GROUPS]; /* the keyboard level scaling offsets,
                                      * one per key-code group */
+    /* The amplitude modulation's reduction, in the Q8 domain (a
+     * negative quantity the render path subtracts from the operator's
+     * log amplitude).  The EGS's amp-mod register changes only on the
+     * LFO's ticks, so the reduction is composed then (and at note-on)
+     * and the render path only reads it. */
+    int32_t ams_reduction_q8;
 } slopsix_op_params;
 
 /* ------------------------------------------------- the operator graph */
@@ -696,6 +702,11 @@ typedef struct {
                          * relevant */
     uint8_t carrier;    /* the output joins the voice's carrier sum */
     uint8_t com;        /* the carrier-count compensation code, 0..5 */
+    int32_t com_q8;     /* the code's compensation in the Q8 domain: the
+                         * negative value the carrier's log amplitude
+                         * carries.  It is algorithm data, so it is
+                         * decoded once with the algorithm's table and
+                         * only read by the render path. */
     uint8_t ctrl_c;     /* the sum/delay register: 1 keeps its content */
     uint8_t ctrl_d;     /* the sum/delay register: 1 loads the signal */
     uint8_t fb_out;     /* the output is stored into the feedback pair */
@@ -1018,8 +1029,8 @@ static inline void slopsix_op_render(slopsix_operator *op,
 /*
  * The carrier-count compensation, in the Q8 domain: a negative value
  * that the carrier's log amplitude carries (research A-05).  The code
- * is static per algorithm, so it is composed on the render path per
- * sample; it is inline for the same reason as the helpers above.
+ * is static per algorithm, so it is composed once when the algorithm's
+ * table is decoded and read from there by the render path.
  */
 static inline int32_t slopsix_com_q8(uint8_t com)
 {
@@ -1040,7 +1051,10 @@ static inline int32_t slopsix_com_q8(uint8_t com)
  * `amp_mod_register` is the per-tick value of the EGS's amp-mod register
  * (src/slopsix_lfo.c); the shift is the whole depth law, and sensitivity
  * 0 disables the path (an operator without sensitivity is never
- * modulated).  Inline for the same reason as the helpers above.
+ * modulated).  The register changes only on the LFO's ticks, so the
+ * reduction is composed at note-on and on every tick and cached in the
+ * voice's operator parameters; the render path only reads the cached
+ * value.
  */
 static inline int32_t slopsix_ams_reduction_q8(uint8_t ams_sens,
     uint8_t amp_mod_register)
@@ -1332,7 +1346,6 @@ const slopsix_algorithm *slopsix_algorithm_get(unsigned index);
 uint8_t slopsix_algorithm_feedback_operator(unsigned index);
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
-                                  uint8_t amp_mod_register,
                                   int32_t *voice_out);
 
 /* The voice path (Phase 5).  The note-on fills one voice's engine from
@@ -1348,6 +1361,8 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
 void slopsix_voice_engine_release(slopsix_voice_engine *engine);
 void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     const slopsix_voice *slot, slopsix_voice_engine *engine);
+void slopsix_voice_engine_update_ams(slopsix_context_state *state,
+    slopsix_voice_engine *engine);
 void slopsix_refresh_pitch(slopsix_context_state *state);
 
 /* ------------------------------------------------- the envelope (Phase 3) */

@@ -130,6 +130,7 @@ static void slopsix_algorithm_decode(unsigned index)
         com = (entry >> SLOPSIX_ROM_COM_SHIFT) & SLOPSIX_ROM_COM_MASK;
 
         alg->ops[consumer - 1u].com = (uint8_t)com;
+        alg->ops[consumer - 1u].com_q8 = slopsix_com_q8((uint8_t)com);
         alg->ops[consumer - 1u].carrier = (uint8_t)(com != 0u ? 1u : 0u);
         alg->ops[op - 1u].source = SLOPSIX_MOD_NONE;
         alg->ops[op - 1u].source_op = 0u;
@@ -247,7 +248,6 @@ uint8_t slopsix_algorithm_feedback_operator(unsigned index)
  */
 void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                                   const slopsix_algorithm *alg,
-                                  uint8_t amp_mod_register,
                                   int32_t *voice_out)
 {
     int32_t voice_sum = 0;
@@ -275,14 +275,15 @@ void slopsix_voice_render_sample(slopsix_voice_engine *voice,
                 voice->params[index].log_amp_q10 >> SLOPSIX_AMP_Q8_SHIFT;
         }
 
-        log_amp_q8 += slopsix_com_q8(conn->com);
+        log_amp_q8 += conn->com_q8;
 
         /* The amplitude modulation lowers the level of the operators
          * that are sensitive to it; it never raises it.  The register's
          * value arrives from the context's per-tick composition (the
-         * LFO's push); the shift is the whole depth law. */
-        log_amp_q8 -= slopsix_ams_reduction_q8(voice->params[index].ams_sens,
-            amp_mod_register);
+         * LFO's push); the reduction it causes is composed there and
+         * cached in the voice's operator parameters, and the shift is
+         * the whole depth law. */
+        log_amp_q8 -= voice->params[index].ams_reduction_q8;
 
         if (log_amp_q8 < 0) {
             /* The compensation can mute a carrier at full level. */

@@ -963,9 +963,9 @@ static void stage_graph(void)
         int32_t plain_out;
 
         slopsix_voice_render_sample(&voice,
-                                    slopsix_algorithm_get(0), 0u, &out);
+                                    slopsix_algorithm_get(0), &out);
         slopsix_voice_render_sample(&plain,
-                                    slopsix_algorithm_get(0), 0u,
+                                    slopsix_algorithm_get(0),
                                     &plain_out);
         samples[i] = out;
 
@@ -993,7 +993,7 @@ static void stage_graph(void)
             int32_t out;
 
             slopsix_voice_render_sample(&again,
-                                        slopsix_algorithm_get(0), 0u,
+                                        slopsix_algorithm_get(0),
                                         &out);
             if (out != samples[i]) {
                 deterministic = 0;
@@ -1012,7 +1012,7 @@ static void stage_graph(void)
         build_voice(&other, 6, 60, 4095);   /* algorithm 7 */
         for (i = 0; i < 256; i++) {
             slopsix_voice_render_sample(&other,
-                                        slopsix_algorithm_get(6), 0u,
+                                        slopsix_algorithm_get(6),
                                         &out);
             sum += out;
         }
@@ -1556,7 +1556,7 @@ static void stage_level(void)
 
         for (i = 0; i < 512; i++) {
             slopsix_voice_render_sample(&voice, slopsix_algorithm_get(0),
-                                        0u, &out);
+                                        &out);
             if (out != 0) {
                 nonzero++;
             }
@@ -1593,7 +1593,7 @@ static void stage_com(void)
     for (i = 0; i < 512; i++) {
         int32_t out = 0;
 
-        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(31), 0u,
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(31),
                                     &out);
         if (out > peak_many) {
             peak_many = out;
@@ -1616,7 +1616,7 @@ static void stage_com(void)
     for (i = 0; i < 512; i++) {
         int32_t out = 0;
 
-        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(15), 0u,
+        slopsix_voice_render_sample(&voice, slopsix_algorithm_get(15),
                                     &out);
         if (out > peak_one) {
             peak_one = out;

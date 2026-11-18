@@ -103,6 +103,13 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
         vp->ams_sens = pop->ams_sens;
         vp->log_amp_q10 = 0;
 
+        /* The amplitude modulation's reduction, composed from the EGS's
+         * amp-mod register's current value: the register changes only
+         * on the LFO's ticks, and the tick handler refreshes the cached
+         * value from then on. */
+        vp->ams_reduction_q8 = slopsix_ams_reduction_q8(vp->ams_sens,
+            state->lfo.amp_mod_register);
+
         /* The level pipeline: the patch's operator level, this note's
          * keyboard scaling correction and the key's velocity compose
          * the operator's played level (research E-05, E-07).  The rate
@@ -139,6 +146,24 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
     slot->state = SLOPSIX_VOICE_ON;
     slot->held = true;
     slot->seq = ++state->voice_seq;
+}
+
+/*
+ * The engine's amplitude-modulation refresh (the EGS's amp-mod register's
+ * side): the register's value changes only on the LFO's ticks, so every
+ * sounding voice recomposes its operators' reductions there and the
+ * render path only reads the cached values.
+ */
+void slopsix_voice_engine_update_ams(slopsix_context_state *state,
+    slopsix_voice_engine *engine)
+{
+    unsigned k;
+
+    for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
+        engine->params[k].ams_reduction_q8 =
+            slopsix_ams_reduction_q8(engine->params[k].ams_sens,
+                state->lfo.amp_mod_register);
+    }
 }
 
 /*
@@ -240,6 +265,12 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
                 if (state->voices[v].state == SLOPSIX_VOICE_FREE) {
                     continue;
                 }
+                if (lfo_tick) {
+                    /* The EGS's amp-mod register has a fresh value: the
+                     * voice's operators' reductions follow it. */
+                    slopsix_voice_engine_update_ams(state,
+                        &state->engines[v]);
+                }
                 if (peg_tick) {
                     slopsix_pitch_eg_update(&state->engines[v].pitch_eg);
                 }
@@ -260,8 +291,7 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
                 continue;
             }
 
-            slopsix_voice_render_sample(&state->engines[v], alg,
-                state->lfo.amp_mod_register, &out);
+            slopsix_voice_render_sample(&state->engines[v], alg, &out);
             slopsix_compander_quantize(out, &word);
             bus += slopsix_compander_value(&word);
         }
