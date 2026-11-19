@@ -5,9 +5,12 @@
 - Silence sounding voices when a patch is loaded.
 - Implement portamento and glissando.
 - Evaluate the render path in operator-major blocks.
-- Performance improvements include the use of `-O3` in the per-sample path,
-  trimming of the output stage fixed cost, and removal of dead operator
-  output storage.
+- Performance improvements: use `-O3` in the per-sample path, trim output
+  stage fixed cost, and removal of dead operator output storage.
+- Fix the sample-rate rescale: the phase increment is now scaled by the
+  anchor rate divided by the host rate, so the pitch no longer follows the
+  rate squared on hosts other than 49,096 Hz.  Very low host rates saturate
+  the increment instead of wrapping it.
 
 ## 0.1.0 (2026-11-18)
 

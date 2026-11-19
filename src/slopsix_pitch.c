@@ -233,7 +233,10 @@ int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
  *
  * The increment counts phase units per sample at the engine's own rate
  * of 49,096 Hz, so it is rescaled for a different host rate; the
- * frequency itself is rate-independent.
+ * frequency itself is rate-independent.  A higher host rate consumes
+ * the same pitch in fewer phase units per sample, so the rescale is
+ * reciprocal: increment * anchor / rate, not increment * rate /
+ * anchor.
  */
 uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
 {
@@ -259,31 +262,30 @@ uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
 
     /* Rescale from the engine's 49,096 Hz to the host's rate.
      *
-     * floor(a * b / c) is kept inside 32-bit arithmetic with the
-     * identity  a * b / c = q1 * q2 * c + q1 * r2 + q2 * r1 +
-     * r1 * r2 / c,  where q and r are quotient and remainder of a and
-     * b by c; with c = 49,096 the remainder product stays under 2^32.
-     * The rate is capped at eight times the anchor rate, where the
-     * rescaled increment saturates: every partial product then fits in
-     * 32 bits for any host rate, and the increment aliases the
-     * accumulator above that pitch in the same way the 23-bit phase
-     * addition always does. */
-    if (sample_rate != SLOPSIX_DEFAULT_SAMPLE_RATE) {
-        uint32_t anchor = SLOPSIX_DEFAULT_SAMPLE_RATE;
-        uint32_t rate = sample_rate;
-        uint32_t r1 = increment % anchor;
-        uint32_t r2;
-        uint32_t q1 = increment / anchor;
-        uint32_t q2;
+     * The anchor-rate increment is a phase step per anchor sample, so the
+     * host step is increment * anchor / rate, rounded to nearest.  The
+     * product needs the 64-bit intermediate: the top anchor-rate increment
+     * is nearly 2^22, and its product with the anchor is about 2.06e11
+     * whatever the rate.
+     *
+     * Like the cadence gate and the filter's design, the rate is capped
+     * at eight times the anchor rate and a zero rate means the anchor.
+     * A host rate below about 48 Hz pushes the quotient itself past 32
+     * bits at the top pitch; there it saturates instead of wrapping to
+     * an arbitrary increment. */
+    if (sample_rate != SLOPSIX_DEFAULT_SAMPLE_RATE && sample_rate != 0u) {
+        uint64_t anchor = SLOPSIX_DEFAULT_SAMPLE_RATE;
+        uint64_t rate = sample_rate;
+        uint64_t quotient;
 
         if (rate > anchor * 8u) {
             rate = anchor * 8u;
         }
-        q2 = rate / anchor;
-        r2 = rate % anchor;
-
-        increment = q1 * q2 * anchor + q1 * r2 + q2 * r1 +
-                    r1 * r2 / anchor;
+        quotient = ((uint64_t)increment * anchor + rate / 2u) / rate;
+        if (quotient > UINT32_MAX) {
+            quotient = UINT32_MAX;
+        }
+        increment = (uint32_t)quotient;
     }
 
     return increment;

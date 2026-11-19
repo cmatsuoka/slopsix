@@ -745,6 +745,51 @@ static void stage_freq(void)
               "a master tune of +100 cents raises the pitch by 100 cents");
     }
 
+    /* The pitch is rate-independent: the anchor-rate increment, rescaled
+     * for the host rate, must render the same frequency at every rate.
+     * This is reciprocal (anchor / rate); scaling by rate / anchor
+     * instead makes the pitch follow the rate squared. */
+    {
+        static const uint32_t rates[] = { 44100u, 48000u, 88200u, 96000u };
+        slopsix_op_params base = params;
+        int32_t word = slopsix_op_freq_word(69, &base, 0, 0);
+        int64_t f_anchor = increment_millihertz(
+            slopsix_increment_from_word(word, SLOPSIX_DEFAULT_SAMPLE_RATE),
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        int rate_ok = 1;
+        unsigned i;
+
+        for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+            uint32_t inc = slopsix_increment_from_word(word, rates[i]);
+            int64_t f = increment_millihertz(inc, rates[i]);
+            int64_t diff = f - f_anchor;
+
+            if (diff < 0) {
+                diff = -diff;
+            }
+            if (diff * 1731 > f_anchor) {
+                rate_ok = 0;
+            }
+        }
+        check(rate_ok, "the rendered pitch is the same at every sample rate");
+
+        /* A host rate below about 48 Hz wraps the rescaled increment of
+         * the top pitches, so the degenerate rates are checked on the
+         * top key's word: at one hertz the increment saturates instead
+         * of wrapping, and a zero rate has no rescale - it is the
+         * anchor, as the cadence gate treats it. */
+        {
+            int32_t word_high = slopsix_op_freq_word(127, &base, 0, 0);
+
+            check(slopsix_increment_from_word(word_high, 1u) == UINT32_MAX,
+                  "a one-hertz rate saturates the increment");
+        }
+        check(slopsix_increment_from_word(word, 0u) ==
+                  slopsix_increment_from_word(word,
+                                              SLOPSIX_DEFAULT_SAMPLE_RATE),
+              "a zero rate rescales like the anchor rate");
+    }
+
     /* The firmware's fine table has 101 words: a serialised fine value
      * of 100 reads the extra 0x1000 word.  Coarse 0/fine 100 is
      * therefore the 1.0 ratio, not coarse 0/fine 0's 0.5 ratio.  This
