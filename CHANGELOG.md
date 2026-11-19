@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-19)
 
+- Add output volume control.
 - Silence sounding voices when a patch is loaded.
 - Add a Q16 host output volume (`slopsix_set_output_volume`), composed
   with the hardware master-volume ladder in the final conversion's cached
@@ -12,10 +13,10 @@
   stage fixed cost, and removal of dead operator output storage.
 - Compile the algorithm schedule and block renderer at `-O2`: this keeps
   the archive at about 56 KB instead of 70 KB, with the render within a
-  few percent of the all-`-O3` build.
+  few percent of the all `-O3` build.
 - Fix the sample-rate rescale: the phase increment is now scaled by the
   anchor rate divided by the host rate, so the pitch no longer follows the
-  rate squared on hosts other than 49,096 Hz.  Very low host rates saturate
+  rate squared on hosts other than 49,096 Hz. Very low host rates saturate
   the increment instead of wrapping it.
 
 ## 0.1.0 (2026-11-18)
