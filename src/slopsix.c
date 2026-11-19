@@ -23,6 +23,17 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
     state->bend_step = 0u;
     state->master_tune_q16 = 0;
     state->pan_q16 = SLOPSIX_Q16_ONE / 2;
+#if defined(SLOPSIX_DX7S)
+    /* DX7S defaults: Poly key mode, no unison detune, and the Mk1's
+     * pitch-EG span (8 octaves) with velocity and rate scaling off/zero
+     * (plan D7S-8).  These are the neutral values a DX7S context must
+     * reproduce the Mk1's pre-output render with. */
+    state->key_mode = SLOPSIX_KEY_POLY;
+    state->unison_detune = 0u;
+    state->patch.peg_range = SLOPSIX_PEG_RANGE_DEFAULT;
+    state->patch.peg_velocity = 0u;
+    state->patch.peg_rate_scaling = 0u;
+#endif
     /* The hardware's own reset value: P_DAC = 7, the top tap of the DAC
      * reference ladder, until MIDI volume changes it (dx7-output
      * research, the volume section). */
@@ -126,6 +137,16 @@ slopsix_context slopsix_create_context(slopsix_engine engine,
     switch (engine) {
     case SLOPSIX_ENGINE_DX7:
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if !SLOPSIX_HAS_DX7S
+        /* The DX7S personality's translation units are absent from this
+         * build: reject the request at creation, as an absent personality
+         * must be (library page §0.2).  The case is present so the engine
+         * switch is complete in every configuration. */
+        return NULL;
+#else
+        break;
+#endif
     case SLOPSIX_ENGINE_DX100:
         /* The DX100 personality is planned but is not part of any build
          * yet: its translation units arrive with the DX100 phase.  The
@@ -149,6 +170,16 @@ slopsix_context slopsix_create_context(slopsix_engine engine,
         impl->sample_rate = impl->dx7.sample_rate;
         impl->process = slopsix_dx7_process;
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_init(&impl->dx7, sample_rate);
+        impl->sample_rate = impl->dx7.sample_rate;
+        impl->process = slopsix_dx7s_process;
+        break;
+#else
+        free(impl);
+        return NULL;
+#endif
     default:
         free(impl);
         return NULL;
@@ -175,6 +206,12 @@ void slopsix_set_sample_rate(slopsix_context ctx, uint32_t sample_rate)
         slopsix_dx7_set_sample_rate(&impl->dx7, sample_rate);
         impl->sample_rate = impl->dx7.sample_rate;
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_set_sample_rate(&impl->dx7, sample_rate);
+        impl->sample_rate = impl->dx7.sample_rate;
+#endif
+        break;
     default:
         break;
     }
@@ -191,6 +228,11 @@ void slopsix_reset(slopsix_context ctx)
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
         slopsix_dx7_reset(&impl->dx7);
+        break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_reset(&impl->dx7);
+#endif
         break;
     default:
         break;
@@ -253,6 +295,7 @@ slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         /* The dump's size is the engine's own; a mismatch is a host
          * error and the dump is not loaded (library page §3). */
         if (size != SLOPSIX_VOICE_DUMP_SIZE) {
@@ -278,6 +321,7 @@ slopsix_error slopsix_get_voice(const slopsix_context ctx, uint8_t *out,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         if (size != SLOPSIX_VOICE_DUMP_SIZE) {
             return SLOPSIX_ERR_RANGE;
         }
@@ -997,6 +1041,7 @@ slopsix_error slopsix_note_on(slopsix_context ctx, uint8_t note,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_note_on(&impl->dx7, note, velocity);
         break;
     default:
@@ -1021,6 +1066,7 @@ slopsix_error slopsix_note_off(slopsix_context ctx, uint8_t note)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_note_off(&impl->dx7, note);
         break;
     default:
@@ -1040,6 +1086,7 @@ slopsix_error slopsix_all_notes_off(slopsix_context ctx)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_all_notes_off(&impl->dx7);
         break;
     default:
@@ -1059,6 +1106,7 @@ slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_sustain(&impl->dx7, on);
         break;
     default:
@@ -1078,6 +1126,7 @@ slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_mono_mode(&impl->dx7, mono);
         break;
     default:
@@ -1103,6 +1152,7 @@ slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_portamento_time(&impl->dx7, time_0_99);
         break;
     default:
@@ -1126,6 +1176,7 @@ slopsix_error slopsix_set_portamento_mode(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_portamento_mode(&impl->dx7, mode);
         break;
     default:
@@ -1145,6 +1196,7 @@ slopsix_error slopsix_set_portamento_pedal(slopsix_context ctx, bool on)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_portamento_pedal(&impl->dx7, on);
         break;
     default:
@@ -1164,6 +1216,7 @@ slopsix_error slopsix_set_glissando(slopsix_context ctx, bool on)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_glissando(&impl->dx7, on);
         break;
     default:
@@ -1188,6 +1241,7 @@ slopsix_error slopsix_set_pitch_bend(slopsix_context ctx, uint16_t bend)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_pitch_bend(&impl->dx7, bend);
         break;
     default:
@@ -1213,6 +1267,7 @@ slopsix_error slopsix_set_pitch_bend_range(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_pitch_bend_range(&impl->dx7, range_semitones, step);
         break;
     default:
@@ -1232,6 +1287,7 @@ slopsix_error slopsix_set_master_tune(slopsix_context ctx, int32_t cents_q16)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_master_tune(&impl->dx7, cents_q16);
         break;
     default:
@@ -1260,6 +1316,7 @@ slopsix_error slopsix_set_ctrl_value(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_ctrl_value(&impl->dx7, src, value_0_127);
         break;
     default:
@@ -1288,6 +1345,7 @@ slopsix_error slopsix_set_ctrl_range(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_ctrl_range(&impl->dx7, src, range_0_99);
         break;
     default:
@@ -1318,6 +1376,7 @@ slopsix_error slopsix_set_ctrl_assign(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_ctrl_assign(&impl->dx7, src, flags);
         break;
     default:
@@ -1355,6 +1414,7 @@ slopsix_error slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_pan(&impl->dx7, pan_q16);
         break;
     default:
@@ -1380,6 +1440,7 @@ slopsix_error slopsix_set_midi_volume(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_master_volume(&impl->dx7, level_0_7);
         break;
     default:
@@ -1409,6 +1470,7 @@ slopsix_error slopsix_set_output_gain(slopsix_context ctx,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_output_gain(&impl->dx7, gain_q16);
         break;
     default:
@@ -1432,6 +1494,7 @@ static void slopsix_engine_shape(slopsix_engine engine, size_t *voices,
 
     switch (engine) {
     case SLOPSIX_ENGINE_DX7:
+    case SLOPSIX_ENGINE_DX7S:
         *voices = SLOPSIX_VOICE_COUNT;
         *operators = SLOPSIX_OP_COUNT;
         *algorithms = SLOPSIX_ALGORITHM_COUNT;

@@ -541,7 +541,35 @@ typedef struct {
      * not from a register (research fw VOICE_ADD). */
     uint8_t lfo_sync;       /* the dump's LFO SYNC byte, any value != 0 syncs */
     uint8_t lfo_delay;      /* the dump's LFO DELAY byte, 0..99 */
+#if defined(SLOPSIX_DX7S)
+    /* DX7S-only patch parameters.  They are not part of the 156-byte Mk1
+     * dump (plan D7S-6/D7S-11); they live here so a patch load leaves the
+     * API-set values alone.  D7S-4 gives them their composition. */
+    uint8_t peg_range;        /* SLOPSIX_PEG_RANGE_*, 0..3 */
+    uint8_t peg_velocity;     /* 0 = off, 1 = on */
+    uint8_t peg_rate_scaling; /* 0..7 */
+#endif
 } slopsix_patch_state;
+
+#if defined(SLOPSIX_DX7S)
+/* The DX7S's key modes (research dx7s §7, §18).  They are the
+ * personality's own field; the DX7's `mono` bookkeeping stays untouched.
+ * The four modes are the owner's manual's Poly / Mono / Unison Poly /
+ * Unison Mono (16 / 1 / 4 / 1 notes). */
+#define SLOPSIX_KEY_POLY         0u
+#define SLOPSIX_KEY_MONO         1u
+#define SLOPSIX_KEY_UNISON_POLY  2u
+#define SLOPSIX_KEY_UNISON_MONO  3u
+
+/* The DX7S pitch-EG range's four values (owner's manual: 1/2, 1, 2 and 8
+ * octaves; 1/2 = 6 semitones).  8 octaves is the Mk1-equivalent default,
+ * so a neutral DX7S context reproduces the Mk1 pitch-EG span. */
+#define SLOPSIX_PEG_RANGE_HALF_OCTAVE 0u
+#define SLOPSIX_PEG_RANGE_1_OCTAVE    1u
+#define SLOPSIX_PEG_RANGE_2_OCTAVES   2u
+#define SLOPSIX_PEG_RANGE_8_OCTAVES   3u
+#define SLOPSIX_PEG_RANGE_DEFAULT     SLOPSIX_PEG_RANGE_8_OCTAVES
+#endif
 
 /* The note the firmware hands to its note-table conversion: the dump's
  * transpose byte counts from 24, so its neutral value is 24 and the
@@ -825,6 +853,13 @@ typedef struct {
     /* The LFO's amplitude modulation reaches the walk as a per-tick,
      * instrument-wide register value (src/slopsix_lfo.c), so it is not
      * cached per voice. */
+#if defined(SLOPSIX_DX7S)
+    /* The DX7S per-voice LFO (D7S-2 fills and advances it).  The DX7 build
+     * compiles this member out, so its struct layout is unchanged.  The
+     * type carries the phase, delay accumulator, fade, S&H holder, cached
+     * amplitude and the composed pitch-modification word. */
+    slopsix_lfo lfo;
+#endif
 } slopsix_voice_engine;
 
 /* --------------------------------------------------------- context state */
@@ -870,6 +905,12 @@ typedef struct {
     /* Voice management. */
     bool sustain;
     bool mono;
+#if defined(SLOPSIX_DX7S)
+    /* DX7S voice management (D7S-3 uses these); the DX7's `mono` above
+     * keeps its own Mk1 semantics. */
+    uint8_t key_mode;        /* SLOPSIX_KEY_*, poly by default */
+    uint8_t unison_detune;   /* 0..7, neutral by default */
+#endif
 
     /* Portamento and glissando (the firmware's function parameters and
      * the portamento pedal).  `porta_rate` is the cached rate increment
@@ -978,6 +1019,18 @@ void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
     uint32_t sample_rate);
 void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     size_t frames);
+
+#if defined(SLOPSIX_DX7S_PERSONALITY)
+/* The DX7S personality's own entry points.  They live under src/dx7s/ and
+ * are compiled in only when SLOPSIX_DX7S_PERSONALITY is defined; the state
+ * is the shared context state (the DX7S is a superset of the DX7 path). */
+void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate);
+void slopsix_dx7s_reset(slopsix_context_state *state);
+void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
+    uint32_t sample_rate);
+void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
+    size_t frames);
+#endif
 
 /* ------------------------------------------------------ internal API */
 

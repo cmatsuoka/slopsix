@@ -4,6 +4,7 @@
 #   all            the archive and the test binary for the default build
 #   check          regenerate-and-compare the tables, then run the harness
 #   check-dx7      the default configuration (feature macros off)
+#   check-dx7s     the DX7S personality build
 #   check-dx100    the DX100 personality build
 #   check-extras   the extras build (conveniences beyond the original hardware)
 #   example        build the OpenAL terminal keyboard player
@@ -26,8 +27,8 @@ PYTHON ?= python3
 
 CONFIG ?= dx7
 
-# The three configurations the feature macros select.  The DX7 build is
-# the default and the macro-off one; it must pass on every change.
+# The configurations the feature macros select.  The DX7 build is the
+# default and the macro-off one; it must pass on every change.
 ifeq ($(CONFIG),dx7)
   FEATURE_DEFS :=
   ARCHIVE := libslopsix.a
@@ -39,6 +40,17 @@ endif
 # macro that says the personality is compiled in) arrive with the DX100
 # implementation phase.  Until then the build carries the DX7 only, and a
 # DX100 context is rejected at context creation.
+# The DX7S configuration.  As with the DX100, the macro selects the
+# configuration; the personality's own translation units (and the
+# SLOPSIX_DX7S_PERSONALITY macro) arrive with the DX7S implementation
+# phases.  Until then the build carries the DX7 only, and a DX7S context
+# is rejected at creation.
+ifeq ($(CONFIG),dx7s)
+  FEATURE_DEFS := -DSLOPSIX_DX7S
+  ARCHIVE := build/$(CONFIG)/libslopsix.a
+  TESTBIN := build/$(CONFIG)/slopsix_test
+  TESTRUN := $(TESTBIN)
+endif
 ifeq ($(CONFIG),dx100)
   FEATURE_DEFS := -DSLOPSIX_DX100
   ARCHIVE := build/$(CONFIG)/libslopsix.a
@@ -122,7 +134,7 @@ TABLES := build/tables/logsin_table.c \
           build/tables/freq_table.c \
           build/tables/filter_table.c
 
-.PHONY: all check check-dx7 check-dx100 check-extras example tables \
+.PHONY: all check check-dx7 check-dx7s check-dx100 check-extras example tables \
         tables-install check-tables validate-render validate clean
 
 all: $(ARCHIVE) $(TESTBIN)
@@ -210,6 +222,9 @@ check: check-tables $(TESTBIN)
 
 check-dx7:
 	$(MAKE) CONFIG=dx7 check
+
+check-dx7s:
+	$(MAKE) CONFIG=dx7s check
 
 check-dx100:
 	$(MAKE) CONFIG=dx100 check
