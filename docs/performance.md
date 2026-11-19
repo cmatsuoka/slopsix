@@ -6,7 +6,7 @@ firmware boot, host mixing, WAV encoding and file I/O are outside the timer.
 
 ## Environment and method
 
-- **Date:** 2026-11-18
+- **Date:** 2026-11-19
 - **CPU:** AMD Ryzen 9 7900X (12 cores / 24 threads), pinned to one core
 - **OS / compiler:** Linux, GCC/G++ 15.2.0
 - **Sample rate:** 49,096 Hz (the DX7 native rate)
@@ -41,33 +41,33 @@ BRASS 1, note 60:
 
 | Engine | Realtime factor | ns / frame | Throughput vs slopsix |
 |---|---:|---:|---:|
-| slopsix | 598x | 34.1 | 1.00x |
-| Dexed | 1,163x | 17.5 | 1.94x |
-| VDX7 | 20.6x | 986.8 | 0.03x |
+| slopsix | 566x | 36.0 | 1.00x |
+| Dexed | 1,160x | 17.6 | 2.05x |
+| VDX7 | 20.7x | 986.1 | 0.04x |
 
 ## 16 voices
 
 | Patch | Engine | Realtime factor | ns / frame | Throughput vs slopsix |
 |---|---|---:|---:|---:|
-| BRASS 1 | slopsix | 52.2x | 390.5 | 1.00x |
-| BRASS 1 | Dexed | 75.0x | 271.5 | 1.44x |
-| BRASS 1 | VDX7 | 18.7x | 1,087.1 | 0.36x |
-| E.PIANO 1 | slopsix | 52.7x | 386.2 | 1.00x |
-| E.PIANO 1 | Dexed | 87.3x | 233.2 | 1.66x |
-| E.PIANO 1 | VDX7 | 17.8x | 1,143.1 | 0.34x |
-| SYN-LEAD 1 | slopsix | 50.5x | 403.4 | 1.00x |
-| SYN-LEAD 1 | Dexed | 83.6x | 243.6 | 1.66x |
-| SYN-LEAD 1 | VDX7 | 17.1x | 1,189.7 | 0.34x |
+| BRASS 1 | slopsix | 50.8x | 401.4 | 1.00x |
+| BRASS 1 | Dexed | 74.6x | 273.1 | 1.47x |
+| BRASS 1 | VDX7 | 18.6x | 1,095.3 | 0.37x |
+| E.PIANO 1 | slopsix | 52.2x | 390.4 | 1.00x |
+| E.PIANO 1 | Dexed | 76.2x | 267.1 | 1.46x |
+| E.PIANO 1 | VDX7 | 18.8x | 1,084.9 | 0.36x |
+| SYN-LEAD 1 | slopsix | 51.3x | 397.1 | 1.00x |
+| SYN-LEAD 1 | Dexed | 95.6x | 213.0 | 1.86x |
+| SYN-LEAD 1 | VDX7 | 19.2x | 1,058.6 | 0.37x |
 
 ## Interpretation
 
-- **Dexed is about 1.4x to 1.9x faster than slopsix** in these scenarios.
-  On one note the gap is 1.9x; at 16 voices it narrows to about 1.4x for
-  BRASS 1 and to about 1.7x for the two other patches.
-- **Slopsix costs scale with active voices.**  One note costs 34.1 ns per
-  frame and 16 notes cost 386 to 403 ns, so the per-voice cost falls from
-  34.1 to about 24 ns as fixed per-buffer work is amortised.  Dexed's cost
-  is almost exactly linear in voices (17.5 ns for one, 14.6 to 17.0 ns per
+- **Dexed is about 1.5x to 2.0x faster than slopsix** in these scenarios.
+  On one note the gap is 2.0x; at 16 voices it ranges from 1.46x (E.PIANO)
+  to 1.86x (SYN-LEAD).
+- **Slopsix costs scale with active voices.**  One note costs 36.0 ns per
+  frame and 16 notes cost 390 to 401 ns, so the per-voice cost falls from
+  36.0 to about 24 ns as fixed per-buffer work is amortised.  Dexed's cost
+  is almost exactly linear in voices (17.6 ns for one, 16.7 to 17.1 ns per
   voice at 16), so the different scaling is part of why the gap depends on
   polyphony.
 - **VDX7 is not a per-voice engine.**  It emulates the HD6303 firmware and
@@ -80,7 +80,7 @@ BRASS 1, note 60:
   least 50x realtime.
 
 The practical reading for slopsix is that its 12-bit-exact integer path
-costs roughly 1.4 to 2 times Dexed's float path, while remaining
+costs roughly 1.5 to 2 times Dexed's float path, while remaining
 comfortably realtime for a full 16-voice chord.  VDX7's much lower figure
 reflects the price of emulating the entire instrument rather than a
 voice-level synthesis model.
@@ -117,8 +117,8 @@ interleaved comparison should be trusted.
 ns / frame. The gain is wider at sixteen voices, which is where the
 per-sample dispatch cost the change removes concentrates. The comparison
 tables above were measured with this render path. Dexed's figures from
-those tables are 17.5 ns/frame for one voice and 233.2 to 271.5 at
-sixteen, so the remaining gap of about 1.4x to 1.9x is what the one
+those tables are 17.6 ns/frame for one voice and 213.0 to 273.1 at
+sixteen, so the remaining gap of about 1.5x to 2.0x is what the one
 candidate 8 (the oscillator core) addresses: slopsix's per-sample
 quantized oscillator and 12-bit DAC paths are kept deliberately.
 
