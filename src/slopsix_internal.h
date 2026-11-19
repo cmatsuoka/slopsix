@@ -910,6 +910,7 @@ typedef struct {
      * keeps its own Mk1 semantics. */
     uint8_t key_mode;        /* SLOPSIX_KEY_*, poly by default */
     uint8_t unison_detune;   /* 0..7, neutral by default */
+    uint8_t lfo_mode;        /* SLOPSIX_LFO_SINGLE/MULTI, single by default */
 #endif
 
     /* Portamento and glissando (the firmware's function parameters and
@@ -1020,7 +1021,7 @@ void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
 void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     size_t frames);
 
-#if defined(SLOPSIX_DX7S_PERSONALITY)
+#if SLOPSIX_HAS_DX7S
 /* The DX7S personality's own entry points.  They live under src/dx7s/ and
  * are compiled in only when SLOPSIX_DX7S_PERSONALITY is defined; the state
  * is the shared context state (the DX7S is a superset of the DX7 path). */
@@ -1030,7 +1031,28 @@ void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
     uint32_t sample_rate);
 void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
     size_t frames);
+
+/* The per-voice LFO engine (src/dx7s/slopsix_lfo.c): patch activation
+ * fills every voice's parameters, the tick advances all sixteen voice
+ * LFOs on the shared OCF gate, and note-on resets the keyed voice's own
+ * delay/fade/phase. */
+void slopsix_dx7s_lfo_patch_activate(slopsix_context_state *state,
+    const uint8_t *dump);
+void slopsix_dx7s_lfo_tick(slopsix_context_state *state);
+void slopsix_dx7s_lfo_note_on(slopsix_context_state *state,
+    slopsix_voice_engine *engine);
 #endif
+
+/* The shared render-span helpers (src/slopsix_voice.c): the DX7S process
+ * loop reuses the same cadence arithmetic and voice mix as the DX7 loop. */
+uint32_t slopsix_cadence_threshold(uint32_t sample_rate);
+uint32_t slopsix_cadence_distance(const slopsix_cadence *cad,
+    uint32_t threshold);
+void slopsix_cadence_skip(slopsix_cadence *cad, size_t samples);
+int slopsix_cadence_step(slopsix_cadence *cad, uint32_t threshold);
+void slopsix_render_span(slopsix_context_state *state,
+    const slopsix_algorithm *alg, int16_t *stereo_out, size_t start,
+    size_t count);
 
 /* ------------------------------------------------------ internal API */
 
@@ -1445,6 +1467,15 @@ int32_t slopsix_bend_context_offset(const slopsix_context_state *state);
  * per render call; the state itself carries no cadence. */
 void slopsix_lfo_tick(slopsix_context_state *state);
 
+/* The same per-tick work on one LFO state: the DX7S personality's
+ * per-voice LFO reuses it with the voice's own state instead of the
+ * context's. */
+void slopsix_lfo_tick_one(slopsix_context_state *state, slopsix_lfo *lfo);
+
+/* The waveform recipe as a pure phase->amplitude step (the DX7S's
+ * per-voice LFO calls it as well; the recipes are not duplicated). */
+void slopsix_lfo_wave_step(slopsix_lfo *lfo, unsigned sh_flag);
+
 /* The LFO's life cycle: the shared cadence gate (above) and the note-on
  * hook - the firmware's VOICE_ADD side, which clears the delay
  * accumulator and the fade factor when the patch's delay is not 0, and
@@ -1453,6 +1484,9 @@ void slopsix_lfo_tick(slopsix_context_state *state);
  * firmware's voice-add paths do. */
 void slopsix_lfo_note_on(slopsix_context_state *state);
 
+/* The note-on reset on one LFO state (the DX7S per-voice hook). */
+void slopsix_lfo_note_on_one(slopsix_context_state *state, slopsix_lfo *lfo);
+
 /* The patch activation's LFO parse: the dump's bytes 137..143 through the
  * firmware's own activation scaling - the two closed laws for the
  * increments, the shared value scale's high bytes for the depths, the
@@ -1460,6 +1494,9 @@ void slopsix_lfo_note_on(slopsix_context_state *state);
  * algorithm page §6.6). */
 void slopsix_lfo_patch_activate(slopsix_context_state *state,
     const uint8_t *dump);
+
+/* The parameter half of the patch activation, on one LFO state. */
+void slopsix_lfo_activate(slopsix_lfo *lfo, const uint8_t *dump);
 
 /* The two activation laws, exposed for the harness's checks: the speed
  * parameter's increment (speed 0 seeds the accumulator with 11) and the
@@ -1473,6 +1510,8 @@ uint16_t slopsix_lfo_delay_increment(uint8_t delay);
  * setters recompute it so a bend change is audible without waiting for
  * the next tick. */
 int16_t slopsix_mod_pitch_word(const slopsix_context_state *state);
+int16_t slopsix_mod_pitch_word_one(const slopsix_context_state *state,
+    const slopsix_lfo *lfo);
 
 /* The controller arithmetic: the four input sources' scaled inputs, the
  * amplitude-modulation factor and the EG-bias total, recomputed whenever
@@ -1497,6 +1536,8 @@ void slopsix_mod_process_input_sources(slopsix_context_state *state);
  * controller setters recompose it with the last tick's amplitude, so a
  * controller change is audible without waiting for the next tick. */
 void slopsix_mod_pitch_term_update(slopsix_context_state *state);
+void slopsix_mod_pitch_term_update_one(slopsix_context_state *state,
+    slopsix_lfo *lfo);
 
 /* The composed register word's contribution to the voice's log-frequency
  * word, in the engine's 4096-per-octave units (floor division by the

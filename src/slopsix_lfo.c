@@ -38,6 +38,10 @@
  * (the algorithm page §§4.5, 6.5, 6.6); the three tables at the bottom
  * are the ROM's, verbatim.
  *
+ * The DX7S per-voice LFO (src/dx7s/slopsix_lfo.c) reuses these recipes:
+ * its per-voice tick calls the same wave and register steps with the
+ * voice's own state.  Nothing here is duplicated.
+ *
  * This translation unit runs at control rate, so it is compiled
  * size-first.
  */
@@ -87,17 +91,14 @@ uint16_t slopsix_lfo_delay_increment(uint8_t delay)
 }
 
 /*
- * The patch activation's LFO parse: the dump's bytes 137..143 through the
- * firmware's own activation (research fw PATCH_ACTIVATE_LFO).  The sync
- * and delay bytes stay raw in the patch state - the note-on path reads
- * them from the patch buffer, not from a register - and anything larger
- * than a byte's own range is clamped here, once, as the other dump
- * fields are.
+ * The parameter half of the patch activation: the dump's bytes 137..143
+ * through the firmware's own activation (research fw PATCH_ACTIVATE_LFO).
+ * The shared DX7 path calls this for the context-wide LFO; the DX7S calls
+ * it for every voice.  Anything larger than a byte's own range is clamped
+ * here, once, as the other dump fields are.
  */
-void slopsix_lfo_patch_activate(slopsix_context_state *state,
-    const uint8_t *dump)
+void slopsix_lfo_activate(slopsix_lfo *lfo, const uint8_t *dump)
 {
-    slopsix_lfo *lfo = &state->lfo;
     uint8_t speed = dump[SLOPSIX_DUMP_LFO_SPEED];
     uint8_t delay = dump[SLOPSIX_DUMP_LFO_DELAY];
     uint8_t depth;
@@ -136,8 +137,19 @@ void slopsix_lfo_patch_activate(slopsix_context_state *state,
         }
         lfo->pitch_mod_sens = slopsix_pitch_mod_sens[sens];
     }
+}
+
+void slopsix_lfo_patch_activate(slopsix_context_state *state,
+    const uint8_t *dump)
+{
+    uint8_t delay = dump[SLOPSIX_DUMP_LFO_DELAY];
+
+    slopsix_lfo_activate(&state->lfo, dump);
 
     /* The note-on path's own bytes. */
+    if (delay > 99u) {
+        delay = 99u;
+    }
     state->patch.lfo_delay = delay;
     state->patch.lfo_sync = dump[SLOPSIX_DUMP_LFO_SYNC] != 0u;
 }
@@ -230,7 +242,7 @@ void slopsix_mod_process_input_sources(slopsix_context_state *state)
  * 0x8000).  Any waveform value the selection chain does not name falls
  * through to the sample-and-hold, exactly as the hardware reads it.
  */
-static void slopsix_lfo_wave(slopsix_lfo *lfo, unsigned sh_flag)
+void slopsix_lfo_wave_step(slopsix_lfo *lfo, unsigned sh_flag)
 {
     uint16_t phase = lfo->phase;
     unsigned high = phase >> 8;
@@ -310,9 +322,8 @@ static void slopsix_lfo_wave(slopsix_lfo *lfo, unsigned sh_flag)
  * outputs; the controller factors arrive through the recomposition the
  * setters run (slopsix_mod_process_input_sources).
  */
-void slopsix_lfo_tick(slopsix_context_state *state)
+void slopsix_lfo_tick_one(slopsix_context_state *state, slopsix_lfo *lfo)
 {
-    slopsix_lfo *lfo = &state->lfo;
     uint16_t delay_sum = (uint16_t)((uint32_t)lfo->delay_acc +
                                     lfo->delay_increment);
     uint16_t phase_sum;
@@ -343,7 +354,7 @@ void slopsix_lfo_tick(slopsix_context_state *state)
                (lfo->phase_increment ^ phase_sum)) & 0x8000u;
     lfo->phase = phase_sum;
 
-    slopsix_lfo_wave(lfo, sh_flag);
+    slopsix_lfo_wave_step(lfo, sh_flag);
 
     /* The amp-mod register (algorithm page §4.5).  The amplitude
      * factor: the LFO's depth term plus the amp-routed sources' clamped
@@ -374,11 +385,16 @@ void slopsix_lfo_tick(slopsix_context_state *state)
     /* The pitch-modification word (algorithm page §6.5): the factor and
      * the sensitivity-scaled amplitude, times one byte of each other,
      * right by one. */
-    slopsix_mod_pitch_term_update(state);
+    slopsix_mod_pitch_term_update_one(state, lfo);
 
     /* The register's word: the wave's term plus the current bend,
      * wrapped at 16 bits. */
-    lfo->pitch_mod_word = slopsix_mod_pitch_word(state);
+    lfo->pitch_mod_word = slopsix_mod_pitch_word_one(state, lfo);
+}
+
+void slopsix_lfo_tick(slopsix_context_state *state)
+{
+    slopsix_lfo_tick_one(state, &state->lfo);
 }
 
 /* --------------------------------------------------- the word conversions */
@@ -392,9 +408,9 @@ void slopsix_lfo_tick(slopsix_context_state *state)
  * the controller setters run it with the last tick's, so a controller
  * change is audible without waiting for the next tick.
  */
-void slopsix_mod_pitch_term_update(slopsix_context_state *state)
+void slopsix_mod_pitch_term_update_one(slopsix_context_state *state,
+    slopsix_lfo *lfo)
 {
-    slopsix_lfo *lfo = &state->lfo;
     unsigned factor;
     int32_t magnitude;
     int32_t h;
@@ -418,6 +434,11 @@ void slopsix_mod_pitch_term_update(slopsix_context_state *state)
     lfo->pitch_mod_term = (int16_t)slopsix_floor_div((int32_t)factor * h, 1);
 }
 
+void slopsix_mod_pitch_term_update(slopsix_context_state *state)
+{
+    slopsix_mod_pitch_term_update_one(state, &state->lfo);
+}
+
 /*
  * The pitch-modification register's word for a context: the LFO's
  * per-tick share plus the current bend, wrapped at 16 bits - the
@@ -426,13 +447,19 @@ void slopsix_mod_pitch_term_update(slopsix_context_state *state)
  * next tick; the controller setters recompose the term beside the bend
  * the same way.
  */
-int16_t slopsix_mod_pitch_word(const slopsix_context_state *state)
+int16_t slopsix_mod_pitch_word_one(const slopsix_context_state *state,
+    const slopsix_lfo *lfo)
 {
     int32_t bend = slopsix_bend_pitch_mod(state->pitch_bend,
                                           state->bend_range, state->bend_step);
 
-    return (int16_t)(uint16_t)((uint16_t)state->lfo.pitch_mod_term +
+    return (int16_t)(uint16_t)((uint16_t)lfo->pitch_mod_term +
                                (uint16_t)bend);
+}
+
+int16_t slopsix_mod_pitch_word(const slopsix_context_state *state)
+{
+    return slopsix_mod_pitch_word_one(state, &state->lfo);
 }
 
 /*
@@ -457,10 +484,8 @@ int32_t slopsix_mod_pitch_offset(const slopsix_context_state *state)
  * resets neither, and the LFO state is global, so every note-on runs
  * this.
  */
-void slopsix_lfo_note_on(slopsix_context_state *state)
+void slopsix_lfo_note_on_one(slopsix_context_state *state, slopsix_lfo *lfo)
 {
-    slopsix_lfo *lfo = &state->lfo;
-
     if (state->patch.lfo_delay != 0u) {
         lfo->delay_acc = 0u;
         lfo->fade = 0u;
@@ -468,6 +493,11 @@ void slopsix_lfo_note_on(slopsix_context_state *state)
     if (state->patch.lfo_sync != 0u) {
         lfo->phase = 0x7FFFu;
     }
+}
+
+void slopsix_lfo_note_on(slopsix_context_state *state)
+{
+    slopsix_lfo_note_on_one(state, &state->lfo);
 }
 
 /* ------------------------------------------------------------ ROM tables */

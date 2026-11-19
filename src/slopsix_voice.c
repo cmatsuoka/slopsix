@@ -31,6 +31,22 @@
  */
 #include "slopsix_internal.h"
 
+/* The amp-mod register the voice's operators follow: the context-wide
+ * register in Single mode (the Mk1 path) and the voice's own in the
+ * DX7S's Multi mode. */
+static inline uint8_t slopsix_voice_ams_register(
+    const slopsix_context_state *state, const slopsix_voice_engine *engine)
+{
+#if defined(SLOPSIX_DX7S)
+    if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
+        return engine->lfo.amp_mod_register;
+    }
+#else
+    (void)engine;
+#endif
+    return state->lfo.amp_mod_register;
+}
+
 /*
  * The voice's frequency rewrite: the effective note (the key plus the
  * patch's transpose), the master tune and the voice's current pitch
@@ -52,19 +68,38 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
      * per-tick wave term) enters the word converted into the engine's
      * 4096-per-octave units, beside the pitch EG's staircase level: the
      * chip adds the register's word to each voice's frequency, while the
-     * pitch EG's level is folded into the voice-frequency word itself. */
-    int32_t pitch_offset = slopsix_mod_pitch_offset(state) +
-        slopsix_pitch_eg_offset(&engine->pitch_eg);
+     * pitch EG's level is folded into the voice-frequency word itself.
+     *
+     * In the DX7S's Multi LFO mode every voice has its own register word;
+     * in Single mode the context-wide Mk1 word is used unchanged. */
+    int32_t pitch_offset;
     /* The firmware's PORTA_PROCESS feeds the EGS a frequency word of its
      * own: the note target glides through the portamento buffer, and
      * glissando, while it is on, quantizes that to semitones.  Both
      * buffers carry the hardware's two zero low bits, so the word is
      * masked here just before the ratio and detune are added. */
-    int32_t base = state->glissando ? slot->gliss_current
-                                    : slot->porta_current;
-    int32_t voice = slopsix_voice_word_from_base(base & ~3,
-        state->master_tune_q16, pitch_offset);
+    int32_t base;
+    int32_t voice;
     unsigned op;
+
+#if defined(SLOPSIX_DX7S)
+    if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
+        int16_t word = slopsix_mod_pitch_word_one(state, &engine->lfo);
+
+        engine->lfo.pitch_mod_word = word;
+        pitch_offset = slopsix_floor_div((int32_t)word,
+            SLOPSIX_PITCH_MOD_TO_LOG_SHIFT) +
+            slopsix_pitch_eg_offset(&engine->pitch_eg);
+    } else
+#endif
+    {
+        pitch_offset = slopsix_mod_pitch_offset(state) +
+            slopsix_pitch_eg_offset(&engine->pitch_eg);
+    }
+
+    base = state->glissando ? slot->gliss_current : slot->porta_current;
+    voice = slopsix_voice_word_from_base(base & ~3,
+        state->master_tune_q16, pitch_offset);
 
     for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
         int32_t word =
@@ -166,9 +201,10 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
         /* The amplitude modulation's reduction, composed from the EGS's
          * amp-mod register's current value: the register changes only
          * on the LFO's ticks, and the tick handler refreshes the cached
-         * value from then on. */
+         * value from then on.  In the DX7S's Multi mode the register is
+         * the voice's own. */
         vp->ams_reduction_q8 = slopsix_ams_reduction_q8(vp->ams_sens,
-            state->lfo.amp_mod_register);
+            slopsix_voice_ams_register(state, engine));
 
         /* The level pipeline: the patch's operator level, this note's
          * keyboard scaling correction and the key's velocity compose
@@ -191,9 +227,17 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
         state->patch.peg_levels);
     slopsix_pitch_eg_note_on(&engine->pitch_eg);
 
-    /* The LFO's note-on side: the global delay/fade and sync resets, as
-     * the firmware's voice-add paths run them on every key event. */
-    slopsix_lfo_note_on(state);
+    /* The LFO's note-on side: in Single mode the global delay/fade and
+     * sync resets, as the firmware's voice-add paths run them on every
+     * key event; in Multi mode only this voice's LFO is reset. */
+#if SLOPSIX_HAS_DX7S
+    if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
+        slopsix_dx7s_lfo_note_on(state, engine);
+    } else
+#endif
+    {
+        slopsix_lfo_note_on(state);
+    }
 
     if (state->patch.osc_sync) {
         for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
@@ -218,11 +262,11 @@ void slopsix_voice_engine_update_ams(slopsix_context_state *state,
     slopsix_voice_engine *engine)
 {
     unsigned k;
+    uint8_t reg = slopsix_voice_ams_register(state, engine);
 
     for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
         engine->params[k].ams_reduction_q8 =
-            slopsix_ams_reduction_q8(engine->params[k].ams_sens,
-                state->lfo.amp_mod_register);
+            slopsix_ams_reduction_q8(engine->params[k].ams_sens, reg);
     }
 }
 
@@ -303,7 +347,7 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
  */
 
 /* The cadence's fire threshold, the gate's own rate handling. */
-static uint32_t cadence_threshold(uint32_t sample_rate)
+uint32_t slopsix_cadence_threshold(uint32_t sample_rate)
 {
     uint32_t rate = sample_rate;
 
@@ -320,8 +364,8 @@ static uint32_t cadence_threshold(uint32_t sample_rate)
 /* The samples until the gate fires, one-based: the accumulator fires on
  * the sample where it has crossed the threshold, so the sub-blocks can
  * end exactly on it. */
-static uint32_t cadence_distance(const slopsix_cadence *cad,
-                                 uint32_t threshold)
+uint32_t slopsix_cadence_distance(const slopsix_cadence *cad,
+    uint32_t threshold)
 {
     uint32_t step = cad->step;
 
@@ -334,13 +378,13 @@ static uint32_t cadence_distance(const slopsix_cadence *cad,
 
 /* The bulk advance over samples that do not reach a fire (the caller
  * keeps the run shorter than the distance). */
-static void cadence_skip(slopsix_cadence *cad, size_t samples)
+void slopsix_cadence_skip(slopsix_cadence *cad, size_t samples)
 {
     cad->acc += cad->step * (uint32_t)samples;
 }
 
 /* One sample's advance; nonzero when the gate fires on it. */
-static int cadence_step(slopsix_cadence *cad, uint32_t threshold)
+int slopsix_cadence_step(slopsix_cadence *cad, uint32_t threshold)
 {
     cad->acc += cad->step;
 
@@ -356,9 +400,9 @@ static int cadence_step(slopsix_cadence *cad, uint32_t threshold)
  * compander words sum on the bus, and the output stages run per sample.
  * The span is cut into the scratch's block size, and the voices are
  * processed one at a time - the scratch is one voice's worth. */
-static void render_span(slopsix_context_state *state,
-                        const slopsix_algorithm *alg,
-                        int16_t *stereo_out, size_t start, size_t count)
+void slopsix_render_span(slopsix_context_state *state,
+    const slopsix_algorithm *alg, int16_t *stereo_out, size_t start,
+    size_t count)
 {
     slopsix_block_scratch *scratch = &state->block_scratch;
 
@@ -425,14 +469,14 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     }
 
     alg = slopsix_algorithm_get(state->patch.algorithm);
-    lfo_threshold = cadence_threshold(state->lfo_cadence.sample_rate);
-    peg_threshold = cadence_threshold(state->pitch_cadence.sample_rate);
+    lfo_threshold = slopsix_cadence_threshold(state->lfo_cadence.sample_rate);
+    peg_threshold = slopsix_cadence_threshold(state->pitch_cadence.sample_rate);
 
     while (done < frames) {
-        uint32_t lfo_distance = cadence_distance(&state->lfo_cadence,
-                                                 lfo_threshold);
-        uint32_t peg_distance = cadence_distance(&state->pitch_cadence,
-                                                 peg_threshold);
+        uint32_t lfo_distance = slopsix_cadence_distance(
+            &state->lfo_cadence, lfo_threshold);
+        uint32_t peg_distance = slopsix_cadence_distance(
+            &state->pitch_cadence, peg_threshold);
         uint32_t tick = (lfo_distance < peg_distance) ? lfo_distance
                                                       : peg_distance;
         size_t left = frames - done;
@@ -450,9 +494,9 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
         }
 
         if (plain > 0) {
-            cadence_skip(&state->lfo_cadence, plain);
-            cadence_skip(&state->pitch_cadence, plain);
-            render_span(state, alg, stereo_out, done, plain);
+            slopsix_cadence_skip(&state->lfo_cadence, plain);
+            slopsix_cadence_skip(&state->pitch_cadence, plain);
+            slopsix_render_span(state, alg, stereo_out, done, plain);
             done += plain;
             if (done == frames) {
                 break;
@@ -463,8 +507,8 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
          * LFO and pitch-EG handlers run on it, and the sample renders
          * with the values they pushed - the per-sample loop's order. */
         {
-            int lfo_tick = cadence_step(&state->lfo_cadence, lfo_threshold);
-            int peg_tick = cadence_step(&state->pitch_cadence,
+            int lfo_tick = slopsix_cadence_step(&state->lfo_cadence, lfo_threshold);
+            int peg_tick = slopsix_cadence_step(&state->pitch_cadence,
                                         peg_threshold);
             uint16_t porta_changed = 0;
 
@@ -518,7 +562,7 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
             }
         }
 
-        render_span(state, alg, stereo_out, done, 1);
+        slopsix_render_span(state, alg, stereo_out, done, 1);
         done += 1;
     }
 }

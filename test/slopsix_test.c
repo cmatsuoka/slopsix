@@ -20,6 +20,8 @@
  *   porta       portamento and glissando: the rate/step law, the half-bank
  *               cadence and the poly/mono mode matrix
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
+ *   plfo        the DX7S per-voice LFO: shared recipes, per-voice delay
+ *               and reset, the stagger and neutral Single-mode parity
  *   ctrl        the controllers: scaling, routes and both registers
  *   filter      the analog tail: the reconstruction filter's design,
  *               its DC gain and its response
@@ -3065,6 +3067,238 @@ static void block_check_algorithm(unsigned algorithm, int eg_block_mode)
     }
 }
 
+/* ------------------------------------------- Phase D7S-2: per-voice LFO */
+
+static void stage_plfo(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+#if SLOPSIX_HAS_DX7S
+    unsigned v;
+    unsigned i;
+#endif
+
+    printf("stage plfo\n");
+
+    /* The Mk1 path: there is no per-voice LFO mode, and every voice reads
+     * the one global amp-mod register. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7 context");
+    if (ctx != NULL) {
+        state = SLOPSIX_CONTEXT(ctx);
+        check(slopsix_set_lfo_mode(ctx, SLOPSIX_LFO_SINGLE) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no per-voice LFO mode");
+        state->lfo.amp_mod_register = 42u;
+        state->engines[0].params[0].ams_sens = 3u;
+        state->engines[1].params[0].ams_sens = 3u;
+        slopsix_voice_engine_update_ams(state, &state->engines[0]);
+        slopsix_voice_engine_update_ams(state, &state->engines[1]);
+        check(state->engines[0].params[0].ams_reduction_q8 ==
+              state->engines[1].params[0].ams_reduction_q8,
+              "the Mk1 voices share the global amp-mod register");
+        slopsix_destroy_context(ctx);
+    }
+
+#if SLOPSIX_HAS_DX7S
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7S context");
+    if (ctx == NULL) {
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+
+    check(state->lfo_mode == (uint8_t)SLOPSIX_LFO_SINGLE,
+          "the DX7S LFO defaults to Single");
+    check(slopsix_set_lfo_mode(ctx, SLOPSIX_LFO_MULTI) == SLOPSIX_OK &&
+          state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI,
+          "the DX7S LFO mode switches to Multi");
+    check(slopsix_set_lfo_mode(ctx, (slopsix_lfo_mode)9) ==
+          SLOPSIX_ERR_INVALID,
+          "an unknown LFO mode is rejected");
+
+    /* The per-voice engine exercises the shared wave recipes: every voice
+     * at a different phase and waveform must compute what the shared
+     * phase-to-amplitude step computes. */
+    for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+        slopsix_lfo *lfo = &state->engines[v].lfo;
+
+        lfo->phase = (uint16_t)(0x0500u * v + 0x1234u);
+        lfo->phase_increment = 0u;
+        lfo->delay_increment = 0u;
+        lfo->delay_acc = 0u;
+        lfo->fade = 0u;
+        lfo->sh_acc = 0u;
+        lfo->amplitude = 0;
+        lfo->waveform = (uint8_t)(v % 6u);
+        lfo->pitch_mod_depth = 0u;
+        lfo->amp_mod_depth = 0u;
+        lfo->pitch_mod_sens = 0u;
+    }
+    slopsix_dx7s_lfo_tick(state);
+    {
+        int ok = 1;
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            slopsix_lfo ref;
+
+            memset(&ref, 0, sizeof(ref));
+            ref.waveform = state->engines[v].lfo.waveform;
+            ref.phase = state->engines[v].lfo.phase;
+            slopsix_lfo_wave_step(&ref, 0u);
+            if (state->engines[v].lfo.amplitude != ref.amplitude) {
+                ok = 0;
+            }
+        }
+        check(ok, "the per-voice LFOs use the shared wave recipes");
+    }
+
+    /* Each voice's delay fade follows its own accumulator/countdown. */
+    for (v = 0; v < 2u; v++) {
+        slopsix_lfo *lfo = &state->engines[v].lfo;
+
+        lfo->delay_acc = 0u;
+        lfo->fade = 0u;
+        lfo->phase = 0u;
+        lfo->phase_increment = 0u;
+        lfo->waveform = 0u;
+        lfo->delay_increment = (v == 0u)
+            ? slopsix_lfo_delay_increment(0u)
+            : slopsix_lfo_delay_increment(99u);
+    }
+    for (i = 0; i < 20u; i++) {
+        slopsix_dx7s_lfo_tick(state);
+    }
+    check(state->engines[0].lfo.fade > 0u &&
+          state->engines[1].lfo.fade == 0u,
+          "each voice's delay fade runs on its own countdown");
+    for (i = 0; i < 1100u; i++) {
+        slopsix_dx7s_lfo_tick(state);
+    }
+    check(state->engines[0].lfo.fade == 0xFFu &&
+          state->engines[1].lfo.fade > 0u,
+          "the second voice's fade reaches full depth only after its own "
+          "countdown");
+
+    /* Note-on resets are per voice: sync seeds the keyed voice's phase,
+     * and a non-zero delay clears only that voice's delay/fade pair. */
+    state->patch.lfo_sync = true;
+    state->patch.lfo_delay = 0u;
+    state->engines[0].lfo.phase = 0x1234u;
+    state->engines[1].lfo.phase = 0x5678u;
+    slopsix_dx7s_lfo_note_on(state, &state->engines[0]);
+    check(state->engines[0].lfo.phase == 0x7FFFu &&
+          state->engines[1].lfo.phase == 0x5678u,
+          "LFO sync seeds only the keyed voice's phase");
+
+    state->patch.lfo_sync = false;
+    state->patch.lfo_delay = 5u;
+    state->engines[0].lfo.delay_acc = 123u;
+    state->engines[0].lfo.fade = 45u;
+    state->engines[1].lfo.delay_acc = 123u;
+    state->engines[1].lfo.fade = 45u;
+    slopsix_dx7s_lfo_note_on(state, &state->engines[0]);
+    check(state->engines[0].lfo.delay_acc == 0u &&
+          state->engines[0].lfo.fade == 0u &&
+          state->engines[1].lfo.delay_acc == 123u &&
+          state->engines[1].lfo.fade == 45u,
+          "a patch delay clears only the keyed voice's fade countdown");
+
+    /* The stagger: two voices keyed apart, with LFO sync on, run different
+     * phases and therefore different amplitudes at the same sample. */
+    state->patch.lfo_sync = true;
+    state->patch.lfo_delay = 0u;
+    for (v = 0; v < 2u; v++) {
+        slopsix_lfo *lfo = &state->engines[v].lfo;
+
+        lfo->phase = 0u;
+        lfo->phase_increment = slopsix_lfo_speed_increment(50u);
+        lfo->delay_increment = slopsix_lfo_delay_increment(99u);
+        lfo->delay_acc = 0u;
+        lfo->fade = 0u;
+        lfo->sh_acc = 0u;
+        lfo->amplitude = 0;
+        lfo->waveform = 0u;
+        lfo->pitch_mod_depth = 0u;
+        lfo->amp_mod_depth = 0u;
+        lfo->pitch_mod_sens = 0u;
+    }
+    slopsix_dx7s_lfo_note_on(state, &state->engines[0]);
+    for (i = 0; i < 20u; i++) {
+        slopsix_dx7s_lfo_tick(state);
+    }
+    slopsix_dx7s_lfo_note_on(state, &state->engines[1]);
+    for (i = 0; i < 10u; i++) {
+        slopsix_dx7s_lfo_tick(state);
+    }
+    check(state->engines[0].lfo.phase != state->engines[1].lfo.phase &&
+          state->engines[0].lfo.amplitude !=
+              state->engines[1].lfo.amplitude,
+          "two voices keyed apart show the per-voice modulation stagger");
+
+    /* Reset returns the personality state to its defaults. */
+    slopsix_reset(ctx);
+    {
+        int zero = 1;
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            if (state->engines[v].lfo.phase != 0u ||
+                state->engines[v].lfo.delay_acc != 0u ||
+                state->engines[v].lfo.fade != 0u ||
+                state->engines[v].lfo.amplitude != 0) {
+                zero = 0;
+            }
+        }
+        check(state->lfo_mode == (uint8_t)SLOPSIX_LFO_SINGLE && zero,
+              "reset parks every per-voice LFO and returns to Single mode");
+    }
+    slopsix_destroy_context(ctx);
+
+    /* Neutral parity: in Single mode with the Mk1-equivalent parameters,
+     * the DX7S pre-output render is the DX7 render bit for bit. */
+    {
+        slopsix_context dx7 = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_context dx7s = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+
+        check(dx7 != NULL && dx7s != NULL,
+              "both contexts are created for the parity check");
+        if (dx7 != NULL && dx7s != NULL) {
+            make_init_patch(dump);
+            /* Give the shared LFO real work in Single mode: pitch and
+             * amplitude modulation with sync on. */
+            dump[SLOPSIX_DUMP_LFO_SPEED] = 50u;
+            dump[SLOPSIX_DUMP_LFO_DELAY] = 10u;
+            dump[SLOPSIX_DUMP_LFO_PMD] = 50u;
+            dump[SLOPSIX_DUMP_LFO_AMD] = 50u;
+            dump[SLOPSIX_DUMP_LFO_SYNC] = 1u;
+            dump[SLOPSIX_DUMP_LFO_WAVE] = 0u;
+            dump[SLOPSIX_DUMP_LFO_PMS] = 7u;
+            for (i = 0; i < 6u; i++) {
+                dump[i * SLOPSIX_DUMP_OP_BLOCK + 14u] = 3u;
+            }
+            check(slopsix_set_voice(dx7, dump, sizeof(dump)) == SLOPSIX_OK &&
+                  slopsix_set_voice(dx7s, dump, sizeof(dump)) == SLOPSIX_OK,
+                  "both contexts take the reference patch");
+            slopsix_note_on(dx7, 69u, 100u);
+            slopsix_note_on(dx7s, 69u, 100u);
+            slopsix_process(dx7, render_buf_a, 512u);
+            slopsix_process(dx7s, render_buf_b, 512u);
+            check(memcmp(render_buf_a, render_buf_b,
+                        512u * 2u * sizeof(int16_t)) == 0,
+                  "a neutral DX7S Single-mode render equals the DX7 render "
+                  "bit for bit");
+        }
+        slopsix_destroy_context(dx7);
+        slopsix_destroy_context(dx7s);
+    }
+#endif
+}
+
 static void stage_blockgraph(void)
 {
     unsigned algorithm;
@@ -4637,6 +4871,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--lfo") == 0) {
             stage_lfo();
             ran = 1;
+        } else if (strcmp(argv[i], "--plfo") == 0) {
+            stage_plfo();
+            ran = 1;
         } else if (strcmp(argv[i], "--ctrl") == 0) {
             stage_ctrl();
             ran = 1;
@@ -4684,6 +4921,7 @@ int main(int argc, char **argv)
         stage_pitcheg();
         stage_porta();
         stage_lfo();
+        stage_plfo();
         stage_ctrl();
         stage_filter();
         stage_output();

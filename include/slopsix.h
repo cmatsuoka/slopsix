@@ -201,6 +201,19 @@ slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on);
  * behaviour follow the hardware's function panel. */
 slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono);
 
+/* DX7S LFO distribution.  Single is the Mk1's one instrument-wide LFO;
+ * Multi gives every voice its own LFO with the same settings and an
+ * independent phase/delay history.  The parameter is not part of the
+ * 156-byte Mk1 dump, so it defaults to Single.  An engine without the
+ * DX7S personality reports SLOPSIX_ERR_UNSUPPORTED. */
+typedef enum {
+    SLOPSIX_LFO_SINGLE = 0,
+    SLOPSIX_LFO_MULTI = 1
+} slopsix_lfo_mode;
+
+slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
+    slopsix_lfo_mode mode);
+
 /* ------------------------------------------------------------- portamento */
 
 /* The hardware's two portamento modes.  In fingered mode a legato press

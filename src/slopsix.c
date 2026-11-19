@@ -30,6 +30,7 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * reproduce the Mk1's pre-output render with. */
     state->key_mode = SLOPSIX_KEY_POLY;
     state->unison_detune = 0u;
+    state->lfo_mode = SLOPSIX_LFO_SINGLE;
     state->patch.peg_range = SLOPSIX_PEG_RANGE_DEFAULT;
     state->patch.peg_velocity = 0u;
     state->patch.peg_rate_scaling = 0u;
@@ -423,6 +424,12 @@ static void slopsix_patch_parse(slopsix_context_state *state)
             slopsix_param99(dump[SLOPSIX_DUMP_PEG_LEVEL + i]);
     }
     slopsix_lfo_patch_activate(state, dump);
+#if SLOPSIX_HAS_DX7S
+    /* The DX7S has one LFO per voice; every voice's parameters follow the
+     * same activated patch values.  The runtime phase/delay/fade state is
+     * left alone, so a patch load does not re-seed the voices. */
+    slopsix_dx7s_lfo_patch_activate(state, dump);
+#endif
 }
 
 /* ------------------------------------------------------- voice management
@@ -920,6 +927,18 @@ static void slopsix_mod_refresh(slopsix_context_state *state)
     slopsix_mod_process_input_sources(state);
     slopsix_mod_pitch_term_update(state);
     state->lfo.pitch_mod_word = slopsix_mod_pitch_word(state);
+#if SLOPSIX_HAS_DX7S
+    if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
+        unsigned v;
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            slopsix_lfo *lfo = &state->engines[v].lfo;
+
+            slopsix_mod_pitch_term_update_one(state, lfo);
+            lfo->pitch_mod_word = slopsix_mod_pitch_word_one(state, lfo);
+        }
+    }
+#endif
 }
 
 static void slopsix_dx7_set_ctrl_value(slopsix_context_state *state,
@@ -1129,6 +1148,50 @@ slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono)
     case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_mono_mode(&impl->dx7, mono);
         break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
+    slopsix_lfo_mode mode)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (mode != SLOPSIX_LFO_SINGLE && mode != SLOPSIX_LFO_MULTI) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        {
+            slopsix_context_state *state = &impl->dx7;
+
+            if (state->lfo_mode != (uint8_t)mode) {
+                state->lfo_mode = (uint8_t)mode;
+                if (mode == SLOPSIX_LFO_MULTI) {
+                    unsigned v;
+
+                    /* The per-voice LFOs start from the context-wide
+                     * LFO's current state; note-on then seeds a voice's
+                     * own phase when the patch asks for LFO sync. */
+                    for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+                        state->engines[v].lfo = state->lfo;
+                    }
+                }
+                slopsix_refresh_pitch(state);
+            }
+        }
+        break;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
     default:
         return SLOPSIX_ERR_UNSUPPORTED;
     }

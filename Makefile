@@ -40,13 +40,13 @@ endif
 # macro that says the personality is compiled in) arrive with the DX100
 # implementation phase.  Until then the build carries the DX7 only, and a
 # DX100 context is rejected at context creation.
-# The DX7S configuration.  As with the DX100, the macro selects the
-# configuration; the personality's own translation units (and the
-# SLOPSIX_DX7S_PERSONALITY macro) arrive with the DX7S implementation
-# phases.  Until then the build carries the DX7 only, and a DX7S context
-# is rejected at creation.
+# The DX7S configuration.  SLOPSIX_DX7S selects the configuration and
+# SLOPSIX_DX7S_PERSONALITY says the personality's own translation units
+# under src/dx7s/ are part of the build; the two travel together here.
 ifeq ($(CONFIG),dx7s)
-  FEATURE_DEFS := -DSLOPSIX_DX7S
+  FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY
+  DX7S_CORE_SRCS := src/dx7s/slopsix_lfo.c
+  DX7S_PERF_SRCS := src/dx7s/slopsix_voice.c
   ARCHIVE := build/$(CONFIG)/libslopsix.a
   TESTBIN := build/$(CONFIG)/slopsix_test
   TESTRUN := $(TESTBIN)
@@ -112,6 +112,12 @@ PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_filter.c \
              src/slopsix_voice.c
 
+# The optional personality's translation units (only CONFIG=dx7s sets
+# these).  The per-voice LFO is control-rate (size-first); the DX7S
+# process loop is on the render path (speed-first).
+CORE_SRCS += $(DX7S_CORE_SRCS)
+PERF_SRCS += $(DX7S_PERF_SRCS)
+
 # The algorithm schedule and block renderer.  This is on the render path but
 # is compiled at -O2: -O3 expands the schedule decode and the specialized
 # block runs (the operator core is inlined once per run) without a
@@ -140,17 +146,17 @@ TABLES := build/tables/logsin_table.c \
 all: $(ARCHIVE) $(TESTBIN)
 
 $(BUILD)/%.o: src/%.c $(HEADERS)
-	@mkdir -p $(BUILD)
+	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) -c $< -o $@
 
 # The per-sample path is compiled speed-first.
 $(PERF_OBJS): $(BUILD)/%.o: src/%.c $(HEADERS)
-	@mkdir -p $(BUILD)
+	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_FAST) $(INCLUDES) $(FEATURE_DEFS) -c $< -o $@
 
 # The algorithm schedule and block renderer stay at -O2 (see above).
 $(ALG_OBJS): $(BUILD)/%.o: src/%.c $(HEADERS)
-	@mkdir -p $(BUILD)
+	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_ALGORITHM) $(INCLUDES) $(FEATURE_DEFS) -c $< -o $@
 
 $(ARCHIVE): $(OBJS)

@@ -79,6 +79,15 @@ slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on);
 slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono);
 ```
 
+DX7S LFO distribution (`SLOPSIX_LFO_SINGLE` or `SLOPSIX_LFO_MULTI`;
+Single is the default and the Mk1's shared LFO, Multi gives every voice its
+own LFO; other engines report `SLOPSIX_ERR_UNSUPPORTED`):
+
+```c
+slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
+                                   slopsix_lfo_mode mode);
+```
+
 Portamento (`SLOPSIX_PORTA_FINGERED` or `SLOPSIX_PORTA_FULL_TIME`) and
 glissando:
 
