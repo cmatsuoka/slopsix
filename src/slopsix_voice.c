@@ -188,6 +188,22 @@ void slopsix_voice_engine_release(slopsix_voice_engine *engine)
     slopsix_pitch_eg_note_off(&engine->pitch_eg);
 }
 
+/*
+ * The patch activation's silence: the firmware's VOICE_RESET_EGS writes
+ * the maximum operator level to every voice and keys every EGS voice
+ * off.  The engine mirrors it on the operator envelopes; the voice stays
+ * in the allocation's key-event bookkeeping, so a key still held keeps
+ * its slot but makes no sound until it is released and struck again.
+ */
+void slopsix_voice_engine_silence(slopsix_voice_engine *engine)
+{
+    unsigned k;
+
+    for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
+        slopsix_eg_silence(&engine->eg[k]);
+    }
+}
+
 /* The pitch state of every sounding voice: a bend, its range, the master
  * tune or the host sample rate leaves the phase increments stale, so the
  * setters rewrite them.  Voices the pedal holds and released tails are

@@ -204,6 +204,21 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames)
 
 static void slopsix_patch_parse(slopsix_context_state *state);
 
+/* PATCH_ACTIVATE opens with VOICE_RESET_EGS, which silences every EGS
+ * voice before the new registers are loaded (research fw §5).  The
+ * firmware leaves its CPU-side key-event buffer alone, so a key that is
+ * still down keeps its voice allocated; it simply stops sounding. */
+static void slopsix_patch_silence_voices(slopsix_context_state *state)
+{
+    unsigned i;
+
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        if (state->voices[i].state != SLOPSIX_VOICE_FREE) {
+            slopsix_voice_engine_silence(&state->engines[i]);
+        }
+    }
+}
+
 slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,
     size_t size)
 {
@@ -221,6 +236,7 @@ slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,
             return SLOPSIX_ERR_RANGE;
         }
         memcpy(impl->dx7.voice_dump, data, SLOPSIX_VOICE_DUMP_SIZE);
+        slopsix_patch_silence_voices(&impl->dx7);
         slopsix_patch_parse(&impl->dx7);
         return SLOPSIX_OK;
     default:

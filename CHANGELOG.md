@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+- A patch load now silences sounding voices, as the hardware's patch
+  activation does; a key still held keeps its allocated voice but stops
+  sounding until it is released and struck again.
 - Evaluate the render path in operator-major blocks.
 - Performance improvements include the use of `-O3` in the per-sample path,
   trimming of the output stage fixed cost, and removal of dead operator

@@ -151,7 +151,13 @@ void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames);
 /* Load a voice dump into the live voice.  `size` is the dump's length:
  * the engine's own size (156 bytes for the DX7).  A mismatch is reported
  * as SLOPSIX_ERR_RANGE and the dump is not loaded.  Values are taken
- * as-is (checksums and SYSEX framing are host concerns). */
+ * as-is (checksums and SYSEX framing are host concerns).
+ *
+ * As on the hardware, a patch load silences any voice that is already
+ * sounding: the patch activation resets the voice chips before the new
+ * registers take effect.  A key still held keeps its allocated voice,
+ * but that voice stays silent until the key is released and struck
+ * again. */
 slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,
     size_t size);
 

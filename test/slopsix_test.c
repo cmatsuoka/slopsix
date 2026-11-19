@@ -2746,6 +2746,34 @@ static void stage_render(void)
           "the release ends in silence");
     write_wav("build/render_release.wav", render_buf_b, RENDER_FRAMES / 2);
 
+    /* A patch load while a note is held silences it: the hardware's patch
+     * activation resets every EGS voice before loading the new registers.
+     * The held key keeps its voice allocated, as the firmware's key-event
+     * bookkeeping does. */
+    slopsix_reset(ctx);
+    check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
+          "the patch loads before the held note");
+    slopsix_note_on(ctx, 69, 100);
+    slopsix_process(ctx, render_buf_b, RENDER_FRAMES / 2);
+    check(render_ms(render_buf_b, RENDER_FRAMES / 2 - 1000, 1000) > 0,
+          "the held note sounds before the patch load");
+    check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
+          "a patch load while the note is held succeeds");
+    check(state->engines[0].eg[0].level ==
+              (SLOPSIX_EG_MIN_Q8 << SLOPSIX_EG_FRAC),
+          "the patch load silences the held voice's envelope");
+    check(state->voices[0].state == SLOPSIX_VOICE_ON &&
+          state->voices[0].held,
+          "the held key keeps its voice allocated");
+    memset(render_buf_b, 0x77, sizeof(render_buf_b));
+    slopsix_process(ctx, render_buf_b, RENDER_FRAMES / 2);
+    check(render_ms(render_buf_b, RENDER_FRAMES / 2 - 1000, 1000) == 0,
+          "a patch load silences a sounding voice");
+    slopsix_note_off(ctx, 69);
+    slopsix_process(ctx, render_buf_b, RENDER_FRAMES / 4);
+    check(render_ms(render_buf_b, RENDER_FRAMES / 4 - 1000, 1000) == 0,
+          "the silenced voice stays silent through its key release");
+
     /* Determinism across a reset: the same calls render the same take. */
     slopsix_reset(ctx);
     check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,

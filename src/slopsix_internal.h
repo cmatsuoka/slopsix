@@ -1483,6 +1483,9 @@ void slopsix_voice_render_block(slopsix_voice_engine *voice,
 void slopsix_voice_engine_note_on(slopsix_context_state *state,
     slopsix_voice *slot, slopsix_voice_engine *engine);
 void slopsix_voice_engine_release(slopsix_voice_engine *engine);
+/* The patch activation's VOICE_RESET_EGS side: silence every operator's
+ * envelope without touching the voice's key bookkeeping. */
+void slopsix_voice_engine_silence(slopsix_voice_engine *engine);
 void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     const slopsix_voice *slot, slopsix_voice_engine *engine);
 void slopsix_voice_engine_update_ams(slopsix_context_state *state,
@@ -1530,6 +1533,9 @@ void slopsix_eg_init(slopsix_eg *eg, const uint8_t rates[4],
     uint8_t rate_scaling, uint32_t sample_rate);
 void slopsix_eg_note_on(slopsix_eg *eg);
 void slopsix_eg_note_off(slopsix_eg *eg);
+/* Bring the envelope to the domain's silence floor and the finished
+ * stage, as the firmware's patch activation does to every voice. */
+void slopsix_eg_silence(slopsix_eg *eg);
 int32_t slopsix_eg_step(slopsix_eg *eg);
 
 /* The envelope stepped `count` times, one result per sample, leaving

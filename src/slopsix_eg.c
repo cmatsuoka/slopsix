@@ -510,6 +510,27 @@ void slopsix_eg_note_off(slopsix_eg *eg)
     slopsix_eg_advance(eg, 3u);
 }
 
+void slopsix_eg_silence(slopsix_eg *eg)
+{
+    int32_t silence = SLOPSIX_EG_MIN_Q8 << SLOPSIX_EG_FRAC;
+
+    /* The firmware's VOICE_RESET_EGS sets the operator level registers
+     * to their maximum attenuation and then keys every voice off, so
+     * the envelope comes to rest on the domain's floor.  Stage 4 is the
+     * finished state: it holds the level without moving. */
+    eg->level = silence;
+    eg->target = silence;
+    eg->inc = 0;
+    eg->static_count = 0;
+    eg->stage = 4u;
+    eg->active = 1u;
+    eg->rising = 0u;
+    eg->down = 0u;
+    eg->block_pos = 0u;
+    eg->block_level = silence;
+    eg->block_step = 0;
+}
+
 /*
  * One envelope step.
  *

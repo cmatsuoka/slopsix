@@ -113,6 +113,7 @@ read together.
 | V-07 | LCD and panel | **Decided:** host-side. |
 | V-08 | Patch I/O shape | **Decided:** one size-parameterised `slopsix_set_voice`/`slopsix_get_voice` pair; the engine validates the dump size against its own (156 bytes DX7, 67 bytes DX100) and reports a range error on a mismatch. The dump's format stays a host concern. |
 | V-09 | Shared calls across personalities | **Decided:** the calls both engines can serve are the same calls; the per-engine difference lives behind them and is reported through the error code (`SLOPSIX_ERR_UNSUPPORTED` for a feature an engine lacks). Setters return `slopsix_error`. The engine's shape is queryable (`slopsix_context_engine`, `slopsix_voice_count`, `slopsix_operator_count`, `slopsix_algorithm_count`, `slopsix_voice_dump_size`, `slopsix_context_sample_rate`), so host code can be written once. |
+| V-10 | Patch load while sounding | **Resolved (firmware):** patch activation begins with `VOICE_RESET_EGS` — every operator level register goes to maximum attenuation and every EGS voice takes a key-off/key-on/key-off sequence — so a program change silences sounding voices. The CPU-side key-event bookkeeping is not cleared, so a held key keeps its voice allocated but silent until it is released and struck again. |
 
 ## DX100 specifics
 
