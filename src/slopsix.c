@@ -12,6 +12,8 @@
 
 #include "slopsix_internal.h"
 
+static void slopsix_dx7_refresh_output_gain(slopsix_context_state *state);
+
 static void slopsix_dx7_defaults(slopsix_context_state *state)
 {
     memset(state, 0, sizeof(*state));
@@ -25,7 +27,9 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * reference ladder, until MIDI volume changes it (dx7-output
      * research, the volume section). */
     state->master_volume = 7u;
-    state->master_gain_q16 = slopsix_master_gain_q16(state->master_volume);
+    /* The host's output gain: unity until a host asks otherwise. */
+    state->output_volume_q16 = SLOPSIX_Q16_ONE;
+    slopsix_dx7_refresh_output_gain(state);
     /* Portamento: time 0 is instantaneous (rate 0xFF), fingered mode,
      * no pedal and no glissando - the hardware's reset state.  The
      * three pitch buffers start at the firmware's C2 reset word. */
@@ -918,11 +922,47 @@ static void slopsix_dx7_set_pan(slopsix_context_state *state, int32_t pan_q16)
 }
 #endif
 
+/* Compose the two gains the final conversion applies - the hardware's DAC
+ * reference ladder and the host's output volume - into the one Q16 gain
+ * the sample path uses.  Both factors are Q16, so the product is taken in
+ * 64 bits and shifted back to Q16; doing it here keeps the per-sample path
+ * at one multiply.
+ *
+ * The shift truncates rather than rounds: both factors are non-negative,
+ * so the product is too and the truncation only ever drops the low bit of
+ * the product (the gain is at most unity, so the drop is at most one
+ * Q16 unit - far below the DAC's step).  The final conversion itself
+ * rounds half away from zero; the two conventions differ only in this
+ * sub-LSB amount. */
+static void slopsix_dx7_refresh_output_gain(slopsix_context_state *state)
+{
+    int64_t gain = (int64_t)slopsix_master_gain_q16(state->master_volume) *
+        (int64_t)state->output_volume_q16;
+
+    state->master_gain_q16 = (int32_t)(gain >> 16);
+}
+
 static void slopsix_dx7_set_master_volume(slopsix_context_state *state,
     unsigned level_0_7)
 {
     state->master_volume = level_0_7 > 7u ? 7u : level_0_7;
-    state->master_gain_q16 = slopsix_master_gain_q16(state->master_volume);
+    slopsix_dx7_refresh_output_gain(state);
+}
+
+static void slopsix_dx7_set_output_volume(slopsix_context_state *state,
+    int32_t volume_q16)
+{
+    /* Clamp here as well as in the public wrapper: the internal setter is
+     * the one that feeds the gain composition, and a negative or
+     * oversized value would invert or overload the final conversion. */
+    if (volume_q16 < 0) {
+        volume_q16 = 0;
+    }
+    if (volume_q16 > SLOPSIX_Q16_ONE) {
+        volume_q16 = SLOPSIX_Q16_ONE;
+    }
+    state->output_volume_q16 = volume_q16;
+    slopsix_dx7_refresh_output_gain(state);
 }
 
 /* ------------------------------------------------------- the public API */
@@ -1341,6 +1381,35 @@ slopsix_error slopsix_set_master_volume(slopsix_context ctx,
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
         slopsix_dx7_set_master_volume(&impl->dx7, level_0_7);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_output_volume(slopsix_context ctx,
+    int32_t volume_q16)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (volume_q16 < 0) {
+        volume_q16 = 0;
+        err = SLOPSIX_ERR_RANGE;
+    }
+    if (volume_q16 > SLOPSIX_Q16_ONE) {
+        volume_q16 = SLOPSIX_Q16_ONE;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_output_volume(&impl->dx7, volume_q16);
         break;
     default:
         return SLOPSIX_ERR_UNSUPPORTED;

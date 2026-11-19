@@ -861,7 +861,11 @@ typedef struct {
     /* Mix. */
     int32_t pan_q16;            /* 32768 == centre; SLOPSIX_EXTRAS only */
     unsigned master_volume;     /* 0..7 */
-    int32_t master_gain_q16;    /* the cached ladder gain for the volume */
+    int32_t output_volume_q16;  /* host output gain, Q16; unity by default */
+    /* The final conversion's cached gain: the ladder tap times the host's
+     * output volume.  Both are applied here, at parameter-change time, so
+     * the sample path keeps its single multiply (see slopsix_output.c). */
+    int32_t master_gain_q16;
 
     /* Voice management. */
     bool sustain;
@@ -1237,8 +1241,9 @@ static inline int64_t slopsix_floor_div64(int64_t value, unsigned shift)
  * a wide bus, the sum passes the master DAC's 12-bit code step with
  * saturation, the analog tail's reconstruction filter follows (the
  * board's low-pass after the DAC and the sample-and-hold circuits, §8.1),
- * the optional pan splits the mono result (SLOPSIX_EXTRAS), and the 3-bit
- * master volume scales the DAC's reference before the int16 conversion.
+ * the optional pan splits the mono result (SLOPSIX_EXTRAS), and the host's
+ * output volume composed with the 3-bit master volume scales the DAC's
+ * reference before the int16 conversion.
  * The stages are distinct functions with their own fixed widths, so a
  * later extension can replace the quantization or the conversion without
  * touching the mixer (plan decision D-15).

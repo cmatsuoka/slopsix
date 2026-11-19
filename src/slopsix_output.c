@@ -10,7 +10,9 @@
  *              ->  the analog tail's reconstruction filter (the DX7's
  *                 own stage, src/slopsix_filter.c)
  *              ->  optional pan split (SLOPSIX_EXTRAS only)
- *              ->  3-bit master volume (the DAC reference ladder)
+ *              ->  the output volume (host gain, Q16) composed with the
+ *                  hardware's 3-bit master volume (the DAC reference
+ *                  ladder) into one cached Q16 gain
  *              ->  int16 conversion with rounding
  *
  * The stages are separate functions with their own fixed widths, so a

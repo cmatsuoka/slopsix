@@ -3,6 +3,9 @@
 ## 0.2.0 (unreleased)
 
 - Silence sounding voices when a patch is loaded.
+- Add a Q16 host output volume (`slopsix_set_output_volume`), composed
+  with the hardware master-volume ladder in the final conversion's cached
+  gain so the sample path gains no multiply.
 - Implement portamento and glissando.
 - Evaluate the render path in operator-major blocks.
 - Performance improvements: use `-O3` in the per-sample path, trim output
