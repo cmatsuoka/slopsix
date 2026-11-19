@@ -70,7 +70,7 @@
  * Every translation unit that reads a table declares it here, once. */
 extern const int16_t slopsix_logsin_quarter[1024];
 extern const uint16_t slopsix_exp_q11[1024];
-extern const uint8_t slopsix_note_t[128];
+extern const uint8_t slopsix_note_code[128];
 extern const uint16_t slopsix_note_word[128];
 extern const uint8_t slopsix_com_log[6];
 extern const int32_t slopsix_coarse_offset[32];
@@ -573,22 +573,11 @@ typedef struct {
 } slopsix_patch_state;
 
 #if defined(SLOPSIX_DX7S)
-/* The DX7S's key modes (research dx7s §7, §18).  They are the
- * personality's own field; the DX7's `mono` bookkeeping stays untouched.
- * The four modes are the owner's manual's Poly / Mono / Unison Poly /
- * Unison Mono (16 / 1 / 4 / 1 notes). */
-#define SLOPSIX_KEY_POLY         0u
-#define SLOPSIX_KEY_MONO         1u
-#define SLOPSIX_KEY_UNISON_POLY  2u
-#define SLOPSIX_KEY_UNISON_MONO  3u
-
-/* The DX7S pitch-EG range's four values (owner's manual: 1/2, 1, 2 and 8
- * octaves; 1/2 = 6 semitones).  8 octaves is the Mk1-equivalent default,
- * so a neutral DX7S context reproduces the Mk1 pitch-EG span. */
-#define SLOPSIX_PEG_RANGE_HALF_OCTAVE 0u
-#define SLOPSIX_PEG_RANGE_1_OCTAVE    1u
-#define SLOPSIX_PEG_RANGE_2_OCTAVES   2u
-#define SLOPSIX_PEG_RANGE_8_OCTAVES   3u
+/* The DX7S's key modes and pitch-EG range are the public enums
+ * slopsix_key_mode and slopsix_peg_range (include/slopsix.h): the
+ * personality's own state uses those values, and the DX7's `mono`
+ * bookkeeping stays untouched.  8 octaves is the Mk1-equivalent range
+ * default, so a neutral DX7S context reproduces the Mk1 pitch-EG span. */
 #define SLOPSIX_PEG_RANGE_DEFAULT     SLOPSIX_PEG_RANGE_8_OCTAVES
 #endif
 

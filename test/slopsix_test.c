@@ -22,6 +22,8 @@
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   plfo        the DX7S per-voice LFO: shared recipes, per-voice delay
  *               and reset, the stagger and neutral Single-mode parity
+ *   params      the DX7S-only parameters: gated per personality, their
+ *               ranges and the neutral defaults
  *   ctrl        the controllers: scaling, routes and both registers
  *   filter      the analog tail: the reconstruction filter's design,
  *               its DC gain and its response
@@ -149,10 +151,10 @@ static void stage_tables(void)
     check(monotonic_exp, "exp is monotonically increasing");
 
     /* Note table: the firmware's key-code bytes and the composed word. */
-    check(slopsix_note_t[0] == 0, "note_t[0] == 0 (key-code-0 default)");
-    check(slopsix_note_t[1] == 0, "note_t[1] == 0");
-    check(slopsix_note_t[13] == 16, "note_t[13] == 16");
-    check(slopsix_note_t[127] == 168, "note_t[127] == 168");
+    check(slopsix_note_code[0] == 0, "note_code[0] == 0 (key-code-0 default)");
+    check(slopsix_note_code[1] == 0, "note_code[1] == 0");
+    check(slopsix_note_code[13] == 16, "note_code[13] == 16");
+    check(slopsix_note_code[127] == 168, "note_code[127] == 168");
     check(slopsix_note_word[13] == 4096,
           "note_word[13] == 4096 (one octave, 4096 units per octave)");
     check(slopsix_note_word[69] == 23208,
@@ -3158,6 +3160,108 @@ static void parity_capture_mix(void *vstate, int32_t bus, int16_t *left,
 }
 #endif
 
+static void stage_personality_params(void)
+{
+    slopsix_context ctx;
+
+    printf("stage personality params\n");
+
+    /* The DX7 personality has none of the DX7S-only parameters: every
+     * setter must say so and leave the context alone, so a host that loads
+     * a DX7S patch and applies its extension parameters through one shared
+     * path cannot make the DX7 sound like a DX7S. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7 context");
+    if (ctx != NULL) {
+        check(slopsix_set_key_mode(ctx, SLOPSIX_KEY_MONO) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no key mode");
+        check(slopsix_set_unison_detune(ctx, 7u) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no unison detune");
+        check(slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_HALF_OCTAVE) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no pitch-EG range");
+        check(slopsix_set_peg_velocity(ctx, true) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no pitch-EG velocity switch");
+        check(slopsix_set_peg_rate_scaling(ctx, 7u) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no pitch-EG rate scaling");
+
+        /* A malformed value is reported as such regardless of engine. */
+        check(slopsix_set_key_mode(ctx, (slopsix_key_mode)9) ==
+              SLOPSIX_ERR_INVALID,
+              "an unknown key mode is rejected");
+        check(slopsix_set_peg_range(ctx, (slopsix_peg_range)9) ==
+              SLOPSIX_ERR_INVALID,
+              "an unknown pitch-EG range is rejected");
+        slopsix_destroy_context(ctx);
+    }
+
+#if SLOPSIX_HAS_DX7S
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7S context");
+    if (ctx != NULL) {
+        slopsix_context_state *state = SLOPSIX_CONTEXT(ctx);
+
+        check(state->key_mode == (uint8_t)SLOPSIX_KEY_POLY &&
+              state->unison_detune == 0u &&
+              state->patch.peg_range == SLOPSIX_PEG_RANGE_DEFAULT &&
+              state->patch.peg_velocity == 0u &&
+              state->patch.peg_rate_scaling == 0u,
+              "the DX7S-only parameters default to the Mk1-equivalent "
+              "behaviour");
+
+        check(slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO) ==
+              SLOPSIX_OK &&
+              state->key_mode == (uint8_t)SLOPSIX_KEY_UNISON_MONO,
+              "the DX7S takes a key mode");
+        check(slopsix_set_unison_detune(ctx, 5u) == SLOPSIX_OK &&
+              state->unison_detune == 5u,
+              "the DX7S takes a unison detune");
+        check(slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_HALF_OCTAVE) ==
+              SLOPSIX_OK &&
+              state->patch.peg_range ==
+                  (uint8_t)SLOPSIX_PEG_RANGE_HALF_OCTAVE,
+              "the DX7S takes a pitch-EG range");
+        check(slopsix_set_peg_velocity(ctx, true) == SLOPSIX_OK &&
+              state->patch.peg_velocity == 1u,
+              "the DX7S takes the pitch-EG velocity switch");
+        check(slopsix_set_peg_rate_scaling(ctx, 6u) == SLOPSIX_OK &&
+              state->patch.peg_rate_scaling == 6u,
+              "the DX7S takes a pitch-EG rate scaling");
+
+        check(slopsix_set_unison_detune(ctx, 9u) == SLOPSIX_ERR_RANGE &&
+              state->unison_detune == 7u,
+              "an oversized unison detune clamps to 7");
+        check(slopsix_set_peg_rate_scaling(ctx, 9u) == SLOPSIX_ERR_RANGE &&
+              state->patch.peg_rate_scaling == 7u,
+              "an oversized pitch-EG rate scaling clamps to 7");
+        check(slopsix_set_key_mode(ctx, (slopsix_key_mode)9) ==
+              SLOPSIX_ERR_INVALID &&
+              state->key_mode == (uint8_t)SLOPSIX_KEY_UNISON_MONO,
+              "a rejected key mode leaves the mode unchanged");
+        check(slopsix_set_peg_range(ctx, (slopsix_peg_range)9) ==
+              SLOPSIX_ERR_INVALID &&
+              state->patch.peg_range ==
+                  (uint8_t)SLOPSIX_PEG_RANGE_HALF_OCTAVE,
+              "a rejected pitch-EG range leaves the range unchanged");
+
+        slopsix_reset(ctx);
+        check(state->key_mode == (uint8_t)SLOPSIX_KEY_POLY &&
+              state->unison_detune == 0u &&
+              state->patch.peg_range == SLOPSIX_PEG_RANGE_DEFAULT &&
+              state->patch.peg_velocity == 0u &&
+              state->patch.peg_rate_scaling == 0u,
+              "reset restores the DX7S-only parameters' defaults");
+        slopsix_destroy_context(ctx);
+    }
+#endif
+}
+
 static void stage_plfo(void)
 {
     slopsix_context ctx;
@@ -5027,6 +5131,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--plfo") == 0) {
             stage_plfo();
             ran = 1;
+        } else if (strcmp(argv[i], "--params") == 0) {
+            stage_personality_params();
+            ran = 1;
         } else if (strcmp(argv[i], "--ctrl") == 0) {
             stage_ctrl();
             ran = 1;
@@ -5075,6 +5182,7 @@ int main(int argc, char **argv)
         stage_porta();
         stage_lfo();
         stage_plfo();
+        stage_personality_params();
         stage_ctrl();
         stage_filter();
         stage_output();

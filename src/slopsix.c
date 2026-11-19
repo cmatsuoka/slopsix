@@ -1204,6 +1204,154 @@ slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
     return SLOPSIX_OK;
 }
 
+/* ------------------------------------------------- DX7S-only parameters
+ *
+ * The personality's own parameters are gated by the engine: a DX7 context
+ * reports them unsupported and keeps its Mk1 state, so a host that loads a
+ * DX7S patch and applies its extension parameters through the shared API
+ * cannot make a DX7 context sound like a DX7S (or sound wrong).  The fields
+ * themselves are compiled out of a DX7 build, so there is nothing to
+ * accidentally overwrite there either. */
+
+slopsix_error slopsix_set_key_mode(slopsix_context ctx, slopsix_key_mode mode)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (mode != SLOPSIX_KEY_POLY && mode != SLOPSIX_KEY_MONO &&
+        mode != SLOPSIX_KEY_UNISON_POLY && mode != SLOPSIX_KEY_UNISON_MONO) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.key_mode = (uint8_t)mode;
+        return SLOPSIX_OK;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
+slopsix_error slopsix_set_unison_detune(slopsix_context ctx,
+    uint8_t depth_0_7)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (depth_0_7 > 7u) {
+        depth_0_7 = 7u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+#if !SLOPSIX_HAS_DX7S
+    /* The DX7S branch below is compiled out: the clamp only matters when
+     * the parameter exists, and the engine reports the call unsupported. */
+    (void)err;
+#endif
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.unison_detune = depth_0_7;
+        return err;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
+slopsix_error slopsix_set_peg_range(slopsix_context ctx,
+    slopsix_peg_range range)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (range != SLOPSIX_PEG_RANGE_HALF_OCTAVE &&
+        range != SLOPSIX_PEG_RANGE_1_OCTAVE &&
+        range != SLOPSIX_PEG_RANGE_2_OCTAVES &&
+        range != SLOPSIX_PEG_RANGE_8_OCTAVES) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.patch.peg_range = (uint8_t)range;
+        return SLOPSIX_OK;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
+slopsix_error slopsix_set_peg_velocity(slopsix_context ctx, bool on)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+#if !SLOPSIX_HAS_DX7S
+    (void)on;
+#endif
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.patch.peg_velocity = on ? 1u : 0u;
+        return SLOPSIX_OK;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
+slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
+    uint8_t depth_0_7)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (depth_0_7 > 7u) {
+        depth_0_7 = 7u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+#if !SLOPSIX_HAS_DX7S
+    (void)err;
+#endif
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.patch.peg_rate_scaling = depth_0_7;
+        return err;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
 slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
     uint8_t time_0_99)
 {

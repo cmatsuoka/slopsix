@@ -116,7 +116,7 @@ def main():
     print(" * the EGS field is that word >> 2 (1024 units per octave).")
     print(" */")
     print("#include <stdint.h>")
-    print("const uint8_t slopsix_note_t[128] = {")
+    print("const uint8_t slopsix_note_code[128] = {")
     for i in range(0, N, 16):
         row = ", ".join(str(v) for v in values[i:i + 16])
         print(f"    {row},")

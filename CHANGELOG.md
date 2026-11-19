@@ -8,6 +8,8 @@
 - Add a Q16 host output gain (`slopsix_set_output_gain`), composed
   with the hardware master-volume ladder in the final conversion's cached
   gain so the sample path gains no multiply.
+- Add experimental, unverified DX7S personality.
+- Add DX7S-only voice parameter setters, gated by personality.
 - Implement portamento and glissando.
 - Evaluate the render path in operator-major blocks.
 - Performance improvements: use `-O3` in the per-sample path, trim output

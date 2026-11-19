@@ -214,6 +214,61 @@ typedef enum {
 slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
     slopsix_lfo_mode mode);
 
+/* -------------------------------------------------- DX7S-only parameters
+ *
+ * The DX7S adds a per-voice key mode, unison detune and three pitch-EG
+ * parameters.  They are not part of the 156-byte DX7 voice dump, so they
+ * are set through the API and keep their Mk1-equivalent defaults.  A
+ * context whose engine does not have them reports SLOPSIX_ERR_UNSUPPORTED
+ * and leaves the value unchanged: this is what keeps a DX7 context from
+ * acquiring DX7S-only behaviour (and sounding wrong) when the host shares
+ * one patch/parameter path across the personalities.
+ *
+ * The values mirror the DX7S's own encodings, exactly as the function
+ * panel and the additional-voice SysEx do. */
+
+/* The four key modes (owner's manual: Poly 16 notes, Mono 1 note with one
+ * voice, Unison Poly 4 notes with four voices each, Unison Mono 1 note
+ * with all sixteen voices). */
+typedef enum {
+    SLOPSIX_KEY_POLY = 0,          /* 16 independent notes */
+    SLOPSIX_KEY_MONO,              /* one note, one voice */
+    SLOPSIX_KEY_UNISON_POLY,       /* four notes, four voices each */
+    SLOPSIX_KEY_UNISON_MONO        /* one note, sixteen voices */
+} slopsix_key_mode;
+
+/* An out-of-range enumerator reports SLOPSIX_ERR_INVALID and leaves the
+ * mode unchanged.  Poly is the default, so a neutral DX7S context matches
+ * the DX7's voice allocation. */
+slopsix_error slopsix_set_key_mode(slopsix_context ctx, slopsix_key_mode mode);
+
+/* Unison detune, 0..7, active only in the two unison modes.  A larger
+ * value is clamped to 7 and reported as SLOPSIX_ERR_RANGE. */
+slopsix_error slopsix_set_unison_detune(slopsix_context ctx,
+    uint8_t depth_0_7);
+
+/* The pitch EG's four range settings; 8 octaves is the Mk1-equivalent
+ * default (the DX7's fixed span). */
+typedef enum {
+    SLOPSIX_PEG_RANGE_HALF_OCTAVE = 0,  /* 6 semitones */
+    SLOPSIX_PEG_RANGE_1_OCTAVE,
+    SLOPSIX_PEG_RANGE_2_OCTAVES,
+    SLOPSIX_PEG_RANGE_8_OCTAVES
+} slopsix_peg_range;
+
+/* An out-of-range enumerator reports SLOPSIX_ERR_INVALID and leaves the
+ * range unchanged. */
+slopsix_error slopsix_set_peg_range(slopsix_context ctx,
+    slopsix_peg_range range);
+
+/* Pitch-EG velocity sensitivity: a switch, not a continuous depth. */
+slopsix_error slopsix_set_peg_velocity(slopsix_context ctx, bool on);
+
+/* Pitch-EG rate scaling, 0..7.  A larger value is clamped to 7 and
+ * reported as SLOPSIX_ERR_RANGE. */
+slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
+    uint8_t depth_0_7);
+
 /* ------------------------------------------------------------- portamento */
 
 /* The hardware's two portamento modes.  In fingered mode a legato press

@@ -151,7 +151,7 @@ uint8_t slopsix_note_group(uint8_t note)
  */
 uint8_t slopsix_kls_breakpoint_index(uint8_t breakpoint)
 {
-    return (uint8_t)((slopsix_note_t[(uint8_t)(breakpoint + 20u) & 127u] >> 2)
+    return (uint8_t)((slopsix_note_code[(uint8_t)(breakpoint + 20u) & 127u] >> 2)
                       + 1u);
 }
 
