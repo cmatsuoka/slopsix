@@ -949,19 +949,19 @@ static void slopsix_dx7_set_master_volume(slopsix_context_state *state,
     slopsix_dx7_refresh_output_gain(state);
 }
 
-static void slopsix_dx7_set_output_volume(slopsix_context_state *state,
-    int32_t volume_q16)
+static void slopsix_dx7_set_output_gain(slopsix_context_state *state,
+    int32_t gain_q16)
 {
     /* Clamp here as well as in the public wrapper: the internal setter is
      * the one that feeds the gain composition, and a negative or
      * oversized value would invert or overload the final conversion. */
-    if (volume_q16 < 0) {
-        volume_q16 = 0;
+    if (gain_q16 < 0) {
+        gain_q16 = 0;
     }
-    if (volume_q16 > SLOPSIX_Q16_ONE) {
-        volume_q16 = SLOPSIX_Q16_ONE;
+    if (gain_q16 > SLOPSIX_Q16_ONE) {
+        gain_q16 = SLOPSIX_Q16_ONE;
     }
-    state->output_volume_q16 = volume_q16;
+    state->output_volume_q16 = gain_q16;
     slopsix_dx7_refresh_output_gain(state);
 }
 
@@ -1365,7 +1365,7 @@ slopsix_error slopsix_set_pan(slopsix_context ctx, int32_t pan_q16)
 #endif
 }
 
-slopsix_error slopsix_set_master_volume(slopsix_context ctx,
+slopsix_error slopsix_set_midi_volume(slopsix_context ctx,
     unsigned level_0_7)
 {
     slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
@@ -1389,8 +1389,8 @@ slopsix_error slopsix_set_master_volume(slopsix_context ctx,
     return err;
 }
 
-slopsix_error slopsix_set_output_volume(slopsix_context ctx,
-    int32_t volume_q16)
+slopsix_error slopsix_set_output_gain(slopsix_context ctx,
+    int32_t gain_q16)
 {
     slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
     slopsix_error err = SLOPSIX_OK;
@@ -1398,18 +1398,18 @@ slopsix_error slopsix_set_output_volume(slopsix_context ctx,
     if (impl == NULL) {
         return SLOPSIX_ERR_INVALID;
     }
-    if (volume_q16 < 0) {
-        volume_q16 = 0;
+    if (gain_q16 < 0) {
+        gain_q16 = 0;
         err = SLOPSIX_ERR_RANGE;
     }
-    if (volume_q16 > SLOPSIX_Q16_ONE) {
-        volume_q16 = SLOPSIX_Q16_ONE;
+    if (gain_q16 > SLOPSIX_Q16_ONE) {
+        gain_q16 = SLOPSIX_Q16_ONE;
         err = SLOPSIX_ERR_RANGE;
     }
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
-        slopsix_dx7_set_output_volume(&impl->dx7, volume_q16);
+        slopsix_dx7_set_output_gain(&impl->dx7, gain_q16);
         break;
     default:
         return SLOPSIX_ERR_UNSUPPORTED;

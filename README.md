@@ -131,10 +131,10 @@ Output:
 
 ```c
 slopsix_error slopsix_set_pan(slopsix_context ctx, int32_t pan_q16);
-slopsix_error slopsix_set_master_volume(slopsix_context ctx,
-                                        unsigned level_0_7);
-slopsix_error slopsix_set_output_volume(slopsix_context ctx,
-                                        int32_t volume_q16);
+slopsix_error slopsix_set_midi_volume(slopsix_context ctx,
+                                      unsigned level_0_7);
+slopsix_error slopsix_set_output_gain(slopsix_context ctx,
+                                      int32_t gain_q16);
 ```
 
 Capability queries: `slopsix_context_engine`, `slopsix_voice_count`,
@@ -160,7 +160,7 @@ Capability queries: `slopsix_context_engine`, `slopsix_voice_count`,
   both channels.  `slopsix_set_pan` is available behind `SLOPSIX_EXTRAS`;
   without it the call is a no-op, the output stays at centre and the call
   reports `SLOPSIX_ERR_UNSUPPORTED`;
-- the **output volume** is a plain Q16 host gain (0 silence, 65536 unity;
+- the **output gain** is a plain Q16 host gain (0 silence, 65536 unity;
   values above unity are clamped and reported as `SLOPSIX_ERR_RANGE`)
   folded at setter time into the same cached gain as the hardware's 8-step
   master volume, so it adds no work to the sample path;

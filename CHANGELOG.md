@@ -2,9 +2,10 @@
 
 ## 0.2.0 (2026-11-19)
 
-- Add output volume control.
+- Add output volume control (`slopsix_set_output_gain`) and rename
+  `slopsix_set_master_volume` to `slopsix_set_midi_volume`.
 - Silence sounding voices when a patch is loaded.
-- Add a Q16 host output volume (`slopsix_set_output_volume`), composed
+- Add a Q16 host output gain (`slopsix_set_output_gain`), composed
   with the hardware master-volume ladder in the final conversion's cached
   gain so the sample path gains no multiply.
 - Implement portamento and glissando.

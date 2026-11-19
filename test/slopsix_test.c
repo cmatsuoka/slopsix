@@ -2495,44 +2495,44 @@ static void stage_output(void)
         }
 
         /* The volume ladder through the composite. */
-        slopsix_set_master_volume(ctx, 0u);
+        slopsix_set_midi_volume(ctx, 0u);
         output_settle(state, 16376, &l1, &r1);
         check(output_near(l1, 670, 2) && output_near(r1, 670, 2),
               "volume 0 is the ladder's bottom tap, not silence");
-        slopsix_set_master_volume(ctx, 3u);
+        slopsix_set_midi_volume(ctx, 3u);
         output_settle(state, 16376, &l1, &r1);
         check(output_near(l1, 3215, 2) && output_near(r1, 3215, 2),
               "volume 3's tap scales the mixed code");
-        slopsix_set_master_volume(ctx, 7u);
+        slopsix_set_midi_volume(ctx, 7u);
 
         /* The host output volume: a plain Q16 gain folded into the
          * conversion's cached gain at setter time.  At the default ladder
          * (unity) half volume halves the converted code. */
         check(state->output_volume_q16 == SLOPSIX_Q16_ONE,
               "the default output volume is unity");
-        slopsix_set_output_volume(ctx, SLOPSIX_Q16_ONE / 2);
+        slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE / 2);
         output_settle(state, 16376, &l1, &r1);
         check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
               "half output volume halves the converted code");
-        slopsix_set_output_volume(ctx, 0);
+        slopsix_set_output_gain(ctx, 0);
         output_settle(state, 16376, &l1, &r1);
         check(l1 == 0 && r1 == 0, "zero output volume is silence");
-        slopsix_set_output_volume(ctx, SLOPSIX_Q16_ONE);
+        slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE);
 
         /* The composition of the two gains: the ladder tap times the host's
          * output volume, in whichever order the two are set. */
-        slopsix_set_master_volume(ctx, 3u);
-        slopsix_set_output_volume(ctx, SLOPSIX_Q16_ONE / 2);
+        slopsix_set_midi_volume(ctx, 3u);
+        slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE / 2);
         check(state->master_gain_q16 == (6433 * (SLOPSIX_Q16_ONE / 2)) >> 16,
               "the gain composes the ladder tap with the output volume");
         output_settle(state, 16376, &l1, &r1);
         check(output_near(l1, 1607, 2) && output_near(r1, 1607, 2),
               "the composed gain scales the converted code");
-        slopsix_set_master_volume(ctx, 7u);
+        slopsix_set_midi_volume(ctx, 7u);
         check(state->master_gain_q16 == (SLOPSIX_Q16_ONE / 2),
               "changing the master volume keeps the host's output volume");
-        slopsix_set_output_volume(ctx, SLOPSIX_Q16_ONE);
-        slopsix_set_master_volume(ctx, 7u);
+        slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE);
+        slopsix_set_midi_volume(ctx, 7u);
 
 #if SLOPSIX_HAS_EXTRAS
         /* The pan law through the composite: centre is bit-identical
@@ -4158,7 +4158,7 @@ static void stage_api(void)
     check(slopsix_set_ctrl_assign(ctx, SLOPSIX_CTRL_FOOT, 0x8u) ==
           SLOPSIX_ERR_RANGE,
           "unknown routing bits are reported");
-    check(slopsix_set_master_volume(ctx, 9u) == SLOPSIX_ERR_RANGE,
+    check(slopsix_set_midi_volume(ctx, 9u) == SLOPSIX_ERR_RANGE,
           "a master volume above seven is reported");
     check(SLOPSIX_CONTEXT(ctx)->master_volume == 7u,
           "the master volume is clamped to seven");
@@ -4168,18 +4168,18 @@ static void stage_api(void)
           "a note off above 127 is reported");
     check(slopsix_note_on(ctx, 60u, 100u) == SLOPSIX_OK,
           "a note event inside the range is accepted");
-    check(slopsix_set_master_volume(NULL, 3u) == SLOPSIX_ERR_INVALID,
+    check(slopsix_set_midi_volume(NULL, 3u) == SLOPSIX_ERR_INVALID,
           "a null context is rejected by the setters");
-    check(slopsix_set_output_volume(ctx, SLOPSIX_Q16_ONE + 1) ==
+    check(slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE + 1) ==
           SLOPSIX_ERR_RANGE,
           "an output volume above unity is reported");
     check(SLOPSIX_CONTEXT(ctx)->output_volume_q16 == SLOPSIX_Q16_ONE,
           "the output volume is clamped to unity");
-    check(slopsix_set_output_volume(ctx, -1) == SLOPSIX_ERR_RANGE,
+    check(slopsix_set_output_gain(ctx, -1) == SLOPSIX_ERR_RANGE,
           "a negative output volume is reported");
     check(SLOPSIX_CONTEXT(ctx)->output_volume_q16 == 0,
           "a negative output volume clamps to silence");
-    check(slopsix_set_output_volume(NULL, 0) == SLOPSIX_ERR_INVALID,
+    check(slopsix_set_output_gain(NULL, 0) == SLOPSIX_ERR_INVALID,
           "a null context is rejected by the output volume setter");
 
     /* The pan is an extra: without the extras build the call says so. */
@@ -4206,8 +4206,8 @@ static void stage_api(void)
           "the render call writes the buffer");
 
     /* The reset returns the context to its defaults. */
-    slopsix_set_master_volume(ctx, 3u);
-    slopsix_set_output_volume(ctx, 0);
+    slopsix_set_midi_volume(ctx, 3u);
+    slopsix_set_output_gain(ctx, 0);
     slopsix_set_pitch_bend(ctx, 0x3000u);
     slopsix_reset(ctx);
     check(SLOPSIX_CONTEXT(ctx)->master_volume == 7u,

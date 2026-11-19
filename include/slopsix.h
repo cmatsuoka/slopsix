@@ -300,17 +300,17 @@ slopsix_error slopsix_set_pan(slopsix_context ctx, int32_t pan_q16);
 
 /* The hardware's 8 discrete master volume steps (0..7).  A larger value
  * is clamped to 7 and reported as SLOPSIX_ERR_RANGE. */
-slopsix_error slopsix_set_master_volume(slopsix_context ctx,
+slopsix_error slopsix_set_midi_volume(slopsix_context ctx,
     unsigned level_0_7);
 
-/* The host's output volume, Q16: 0 is silence and 65536 is unity (the
+/* The host's output gain, Q16: 0 is silence and 65536 is unity (the
  * default).  It is a plain output gain, applied with the
  * hardware's 8-step master volume in the final conversion's single
  * multiply; it neither alters the modeled DAC reference ladder nor the
  * analog tail.  A value outside 0..65536 is clamped and reported as
  * SLOPSIX_ERR_RANGE. */
-slopsix_error slopsix_set_output_volume(slopsix_context ctx,
-    int32_t volume_q16);
+slopsix_error slopsix_set_output_gain(slopsix_context ctx,
+    int32_t gain_q16);
 
 /* ----------------------------------------------------------- capabilities */
 
