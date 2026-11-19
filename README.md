@@ -25,7 +25,11 @@ generators. The library itself is integer-only — the build enables
 so a floating-point operation anywhere in the library is a build error.
 
 Everything is compiled size-first (`-Os`) except the translation units on
-the per-sample render path, which are compiled speed-first (`-O3`).
+the per-sample render path, which are compiled speed-first (`-O3`). The
+algorithm schedule and block renderer are the exception inside that path:
+they are compiled at `-O2`, because `-O3` there duplicates the operator
+core across the specialized block runs and inflates the archive without a
+measurable speed gain.
 
 ## Public API
 

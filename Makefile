@@ -15,7 +15,10 @@
 #
 # The optimisation split is explicit: everything is compiled size-first
 # (-Os) except the translation units on the per-sample render path, which
-# are compiled speed-first (-O3).
+# are compiled speed-first (-O3).  The algorithm schedule and block
+# renderer are the exception inside that path: compiling them at -O3
+# duplicates the operator core across the specialized runs for almost no
+# speed gain, so they stay at -O2.
 
 CC     ?= cc
 AR     ?= ar
@@ -81,6 +84,7 @@ endif
 
 OPT_SIZE := -Os
 OPT_FAST := -O3
+OPT_ALGORITHM := -O2
 
 INCLUDES := -Iinclude -Isrc
 
@@ -92,14 +96,20 @@ CORE_SRCS := src/slopsix.c src/slopsix_tables.c src/slopsix_bend.c \
 # src/slopsix_internal.h so it compiles into these translation units.
 PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_pitch.c \
-             src/slopsix_algorithm.c \
              src/slopsix_output.c \
              src/slopsix_filter.c \
              src/slopsix_voice.c
 
+# The algorithm schedule and block renderer.  This is on the render path but
+# is compiled at -O2: -O3 expands the schedule decode and the specialized
+# block runs (the operator core is inlined once per run) without a
+# measurable speed gain over -O2.
+ALG_SRCS := src/slopsix_algorithm.c
+
 CORE_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRCS))
 PERF_OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(PERF_SRCS))
-OBJS      := $(CORE_OBJS) $(PERF_OBJS)
+ALG_OBJS  := $(patsubst src/%.c,$(BUILD)/%.o,$(ALG_SRCS))
+OBJS      := $(CORE_OBJS) $(PERF_OBJS) $(ALG_OBJS)
 
 HEADERS := include/slopsix.h src/slopsix_internal.h
 
@@ -125,6 +135,11 @@ $(BUILD)/%.o: src/%.c $(HEADERS)
 $(PERF_OBJS): $(BUILD)/%.o: src/%.c $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(WARNINGS) $(OPT_FAST) $(INCLUDES) $(FEATURE_DEFS) -c $< -o $@
+
+# The algorithm schedule and block renderer stay at -O2 (see above).
+$(ALG_OBJS): $(BUILD)/%.o: src/%.c $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(WARNINGS) $(OPT_ALGORITHM) $(INCLUDES) $(FEATURE_DEFS) -c $< -o $@
 
 $(ARCHIVE): $(OBJS)
 	@mkdir -p $(dir $@)

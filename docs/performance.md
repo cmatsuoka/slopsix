@@ -128,6 +128,13 @@ the same speed-first translation unit as the rest of the per-sample
 path (`src/slopsix_algorithm.c`). The table generators, the control-rate
 sources and the public API glue stay size-first.
 
+**Build-flag follow-up.** The growth was traced to compiling that
+translation unit at `-O3`. With the schedule and block renderer at `-O2`
+and the rest of the per-sample path still at `-O3`, the archive is about
+56 KB instead of 70 KB, and the render is within 2-4% of the all-`-O3`
+build (10-24% faster than an all-`-O2` build). `-Os` for the algorithm
+translation unit is slower than `-O2`, so `-O2` is the floor there.
+
 With this change the optimization candidates' big structural item is
 done; the remaining candidates are the oscillator core (number 8) and
 profile-guided optimization (number 9).

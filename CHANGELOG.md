@@ -7,6 +7,9 @@
 - Evaluate the render path in operator-major blocks.
 - Performance improvements: use `-O3` in the per-sample path, trim output
   stage fixed cost, and removal of dead operator output storage.
+- Compile the algorithm schedule and block renderer at `-O2`: this keeps
+  the archive at about 56 KB instead of 70 KB, with the render within a
+  few percent of the all-`-O3` build.
 - Fix the sample-rate rescale: the phase increment is now scaled by the
   anchor rate divided by the host rate, so the pitch no longer follows the
   rate squared on hosts other than 49,096 Hz.  Very low host rates saturate
