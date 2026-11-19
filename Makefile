@@ -5,6 +5,7 @@
 #   check          regenerate-and-compare the tables, then run the harness
 #   check-dx7      the default configuration (feature macros off)
 #   check-dx7s     the DX7S personality build
+#   check-dx7s-extras the DX7S personality with the extras conveniences
 #   check-dx100    the DX100 personality build
 #   check-extras   the extras build (conveniences beyond the original hardware)
 #   example        build the OpenAL terminal keyboard player
@@ -45,8 +46,15 @@ endif
 # under src/dx7s/ are part of the build; the two travel together here.
 ifeq ($(CONFIG),dx7s)
   FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY
-  DX7S_CORE_SRCS := src/dx7s/slopsix_lfo.c
-  DX7S_PERF_SRCS := src/dx7s/slopsix_voice.c
+  ARCHIVE := build/$(CONFIG)/libslopsix.a
+  TESTBIN := build/$(CONFIG)/slopsix_test
+  TESTRUN := $(TESTBIN)
+endif
+# The DX7S configuration with the extras conveniences: both feature macros
+# on, so the paths that only exist when they are combined (the DX7S's pan
+# split) are built and tested.
+ifeq ($(CONFIG),dx7s-extras)
+  FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY -DSLOPSIX_EXTRAS
   ARCHIVE := build/$(CONFIG)/libslopsix.a
   TESTBIN := build/$(CONFIG)/slopsix_test
   TESTRUN := $(TESTBIN)
@@ -112,9 +120,15 @@ PERF_SRCS := src/slopsix_eg.c \
              src/slopsix_filter.c \
              src/slopsix_voice.c
 
-# The optional personality's translation units (only CONFIG=dx7s sets
-# these).  The per-voice LFO is control-rate (size-first); the DX7S
-# process loop is on the render path (speed-first).
+# The optional personality's translation units (only the DX7S
+# configurations set these).  The per-voice LFO is control-rate
+# (size-first); the DX7S process loop is on the render path (speed-first).
+ifneq ($(filter dx7s dx7s-extras,$(CONFIG)),)
+  DX7S_CORE_SRCS := src/dx7s/slopsix_lfo.c \
+                    src/dx7s/slopsix_filter.c
+  DX7S_PERF_SRCS := src/dx7s/slopsix_voice.c \
+                    src/dx7s/slopsix_output.c
+endif
 CORE_SRCS += $(DX7S_CORE_SRCS)
 PERF_SRCS += $(DX7S_PERF_SRCS)
 
@@ -140,8 +154,9 @@ TABLES := build/tables/logsin_table.c \
           build/tables/freq_table.c \
           build/tables/filter_table.c
 
-.PHONY: all check check-dx7 check-dx7s check-dx100 check-extras example tables \
-        tables-install check-tables validate-render validate clean
+.PHONY: all check check-dx7 check-dx7s check-dx7s-extras check-dx100 \
+        check-extras example tables tables-install check-tables \
+        validate-render validate clean
 
 all: $(ARCHIVE) $(TESTBIN)
 
@@ -231,6 +246,9 @@ check-dx7:
 
 check-dx7s:
 	$(MAKE) CONFIG=dx7s check
+
+check-dx7s-extras:
+	$(MAKE) CONFIG=dx7s-extras check
 
 check-dx100:
 	$(MAKE) CONFIG=dx100 check

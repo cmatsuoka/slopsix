@@ -72,6 +72,11 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * neutral total - the routine still runs once, as the firmware's
      * reset path does. */
     slopsix_mod_process_input_sources(state);
+    /* The output stages the memset above cleared: the DX7 defaults.  A
+     * personality whose path differs overwrites them after the reset (the
+     * DX7S does, in slopsix_dx7s_reset). */
+    state->output_mix = slopsix_output_mix;
+    state->voice_bus = slopsix_voice_bus_companded;
 }
 
 void slopsix_dx7_init(slopsix_context_state *state, uint32_t sample_rate)

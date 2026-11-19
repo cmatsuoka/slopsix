@@ -132,6 +132,12 @@ typedef struct {
  * through the filter, the DAC's code in and the analog stage's output out
  * (Q12 of a code). */
 void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate);
+/* The same design, from a personality-supplied analog prototype.  Each
+ * personality brings its own tail (the DX7's prototype differs from the
+ * DX7S's); the core math and the rate scaling are shared. */
+void slopsix_filter_init_with(slopsix_filter *filter,
+    const int32_t prototype[SLOPSIX_FILTER_SECTIONS][5],
+    uint32_t sample_rate);
 int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 
 /* ------------------------------------------------- operator core (Phase 2) */
@@ -253,6 +259,21 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 #define SLOPSIX_DAC_GRID_SHIFT 3u
 #define SLOPSIX_DAC_CODE_MAX 2047
 #define SLOPSIX_DAC_CODE_MIN (-2048)
+
+/* The DX7S's DAC step (src/dx7s/slopsix_output.c): the 16-bit PCM54HP's
+ * code grid.  The grid sits at half a bus unit, because the 16-bit DAC
+ * spans the same analog window as the Mk1's 12-bit one with sixteen
+ * times the codes (32768 against 2048), and the Mk1's grid sits at eight
+ * bus units per code.  A single full-scale voice (8 * 2047 = 16376 bus
+ * units) therefore lands on the rails in both personalities, so the two
+ * share one reference level and the DX7S spends the extra codes on
+ * resolution rather than on headroom.
+ *
+ * Evidence grade: proportional estimate (hypothesis-grade, D7S-13). */
+#define SLOPSIX_DX7S_DAC_CODE_MAX 32767
+#define SLOPSIX_DX7S_DAC_CODE_MIN (-32768)
+#define SLOPSIX_DX7S_DAC_BUS_MAX 16384
+#define SLOPSIX_DX7S_DAC_BUS_MIN (-16384)
 
 /* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
  * every second OCF tick (about 187.6 Hz), as the firmware does (research
@@ -884,6 +905,21 @@ typedef struct {
     int32_t bus[SLOPSIX_RENDER_BLOCK];
 } slopsix_block_scratch;
 
+/* The output mix function pointer type.  We use void * for the state
+ * argument because the state struct is not yet complete when this
+ * declaration is reached; the implementations cast back to the
+ * concrete type. */
+typedef void (*slopsix_output_mix_fn)(void *state, int32_t bus,
+    int16_t *left, int16_t *right);
+
+/* The per-voice bus accumulation.  The DX7 quantizes each voice through
+ * the 12-bit compander before summing (the hardware's companded output
+ * word); the DX7S's 16-bit output path sums the voice words unchanged, so
+ * the DAC sees the operator core's full resolution.  Chosen per
+ * personality at init, so the render loop carries no branch. */
+typedef void (*slopsix_voice_bus_fn)(const int32_t *voice_out, int32_t *bus,
+    unsigned count);
+
 typedef struct {
     uint32_t sample_rate;
 
@@ -980,6 +1016,17 @@ typedef struct {
 
     /* The block renderer's scratch (one voice's worth, above). */
     slopsix_block_scratch block_scratch;
+
+    /* The output mix function: the personality's own output stage, chosen
+     * at context creation.  The DX7 uses slopsix_output_mix; the DX7S uses
+     * slopsix_dx7s_output_mix.  The pointer is set once, so
+     * slopsix_render_span calls through it without a branch in the sample
+     * loop. */
+    slopsix_output_mix_fn output_mix;
+
+    /* The per-voice bus stage: the DX7 compander or the DX7S raw sum.
+     * Set once at personality init for the same reason. */
+    slopsix_voice_bus_fn voice_bus;
 } slopsix_context_state;
 
 /* ------------------------------------------------------- the personality */
@@ -1041,6 +1088,26 @@ void slopsix_dx7s_lfo_patch_activate(slopsix_context_state *state,
 void slopsix_dx7s_lfo_tick(slopsix_context_state *state);
 void slopsix_dx7s_lfo_note_on(slopsix_context_state *state,
     slopsix_voice_engine *engine);
+
+/* The DX7S 16-bit output stage (src/dx7s/slopsix_output.c): the PCM54HP
+ * DAC step, the analog tail filter, and the int16 conversion.  Unlike the
+ * Mk1, the DX7S has no compander in the master path - the bus goes through
+ * a 16-bit quantizer directly.  The master volume is the shared hardware
+ * ladder (slopsix_master_gain_q16): the DX7S has the same resistor
+ * string as the Mk1. */
+int32_t slopsix_dx7s_dac_step(int32_t bus);
+int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16);
+/* The DX7S per-voice bus stage: add the voice words unchanged, so the
+ * operator core's resolution reaches the 16-bit DAC.  No compander. */
+void slopsix_dx7s_voice_bus(const int32_t *voice_out, int32_t *bus,
+    unsigned count);
+/* The DX7S analog tail (src/dx7s/slopsix_filter.c): the personality's own
+ * reconstruction prototype, designed through the shared filter core.  The
+ * 16-bit DAC's codes enter the core directly (no downshift: the core takes
+ * the code in Q12, so a full-scale 16-bit code is a full-scale signal). */
+void slopsix_dx7s_filter_init(slopsix_filter *filter, uint32_t sample_rate);
+void slopsix_dx7s_output_mix(void *state, int32_t bus,
+    int16_t *left, int16_t *right);
 #endif
 
 /* The shared render-span helpers (src/slopsix_voice.c): the DX7S process
@@ -1382,6 +1449,11 @@ static inline int32_t slopsix_compander_value(const slopsix_compander_word *word
  * saturated at the rails (the constants above carry the model's grade). */
 int32_t slopsix_dac_step(int32_t bus);
 
+/* The DX7 per-voice bus stage: quantize every voice through the compander
+ * and add its value to the bus.  One call per voice per render block. */
+void slopsix_voice_bus_companded(const int32_t *voice_out, int32_t *bus,
+    unsigned count);
+
 /* The master volume's gain: the hardware's 8-level DAC reference ladder,
  * level 0 the quietest tap, level 7 the top tap, as a Q16 fraction of
  * the top tap. */
@@ -1423,11 +1495,14 @@ void slopsix_pan_split(int32_t pan_q16, int32_t mono, int32_t *left,
 
 /* The once-per-sample composite the render call uses: the DAC step, the
  * analog tail's filter, the compile-time-selected pan and the master
- * conversion, from the mixed bus into the two int16 channels.  No runtime
- * mode flag, no branch per personality (plan decision D-18's rule on the
- * output path).  The filter is stateful, so the state is not const. */
-void slopsix_output_mix(slopsix_context_state *state, int32_t bus,
-                        int16_t *left, int16_t *right);
+ * conversion, from the mixed bus into the two int16 channels.  The
+ * personality's stage is chosen at context creation (the function pointer
+ * above), so the sample loop carries no branch per personality (plan
+ * decision D-18's rule on the output path).  The filter is stateful, so
+ * the state is not const.  The state parameter is void * to match the
+ * function pointer typedef. */
+void slopsix_output_mix(void *state, int32_t bus,
+                         int16_t *left, int16_t *right);
 
 /* The pitch bend (Phase 4). */
 

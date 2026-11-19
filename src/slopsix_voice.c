@@ -4,15 +4,14 @@
  *
  * The loop follows the hardware's per-sample register flow with the
  * evaluation per block: every sounding voice's operators render
- * operator-major over blocks of samples (src/slopsix_algorithm.c), each
- * voice's carrier sum goes through the compander, the quantized voices
- * sum on the bus, and the once-per-sample output stages turn the bus
- * into the two channels:
+ * operator-major over blocks of samples (src/slopsix_algorithm.c), the
+ * personality's per-voice bus stage adds the carrier sums to the bus
+ * (the DX7 compands each voice; the DX7S adds it raw), and the
+ * once-per-sample output stages turn the bus into the two channels:
  *
  *   per sub-block (cut at the cadence ticks):
  *     for each voice:  block render -> carrier sums for the block
- *                      (int32) -> compander quantize per sample
- *                      (12-bit mantissa + shift)
+ *                      (int32) -> personality bus stage
  *     bus per sample (wide accumulator, plan decision D-15)
  *     output stages -> int16 L/R, per sample
  *
@@ -85,8 +84,6 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
 #if defined(SLOPSIX_DX7S)
     if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
         int16_t word = slopsix_mod_pitch_word_one(state, &engine->lfo);
-
-        engine->lfo.pitch_mod_word = word;
         pitch_offset = slopsix_floor_div((int32_t)word,
             SLOPSIX_PITCH_MOD_TO_LOG_SHIFT) +
             slopsix_pitch_eg_offset(&engine->pitch_eg);
@@ -396,8 +393,25 @@ int slopsix_cadence_step(slopsix_cadence *cad, uint32_t threshold)
     return 0;
 }
 
-/* One span of the call: the voices render blocks, the per-voice
- * compander words sum on the bus, and the output stages run per sample.
+/* The DX7's per-voice bus stage: the compander quantizes each voice's
+ * carrier sum to its 12-bit mantissa and the quantized value joins the
+ * bus.  This is the Mk1's companded output word; the DX7S personality
+ * replaces it with a raw sum (its 16-bit DAC needs no compander). */
+void slopsix_voice_bus_companded(const int32_t *voice_out, int32_t *bus,
+    unsigned count)
+{
+    unsigned s;
+
+    for (s = 0; s < count; s++) {
+        slopsix_compander_word word;
+
+        slopsix_compander_quantize(voice_out[s], &word);
+        bus[s] += slopsix_compander_value(&word);
+    }
+}
+
+/* One span of the call: the voices render blocks, the personality's
+ * per-voice bus stage adds them, and the output stages run per sample.
  * The span is cut into the scratch's block size, and the voices are
  * processed one at a time - the scratch is one voice's worth. */
 void slopsix_render_span(slopsix_context_state *state,
@@ -426,19 +440,13 @@ void slopsix_render_span(slopsix_context_state *state,
 
             slopsix_voice_render_block(&state->engines[v], alg, scratch,
                                        voice_out, chunk);
-
-            for (s = 0; s < chunk; s++) {
-                slopsix_compander_word word;
-
-                slopsix_compander_quantize(voice_out[s], &word);
-                bus[s] += slopsix_compander_value(&word);
-            }
+            state->voice_bus(voice_out, bus, chunk);
         }
 
         for (s = 0; s < chunk; s++) {
-            slopsix_output_mix(state, bus[s],
-                               &stereo_out[(start + s) * 2u],
-                               &stereo_out[(start + s) * 2u + 1u]);
+            state->output_mix((void *)state, bus[s],
+                              &stereo_out[(start + s) * 2u],
+                              &stereo_out[(start + s) * 2u + 1u]);
         }
 
         start += chunk;

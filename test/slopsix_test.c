@@ -2402,6 +2402,71 @@ static void stage_output(void)
         check(monotone == 1, "the DAC step is monotone and stays in the window");
     }
 
+#if SLOPSIX_HAS_DX7S
+    /* The DX7S's PCM54HP output is 16-bit linear: its DAC step is a plain
+     * 16-bit grid with rail saturation, not the Mk1's 12-bit grid, and
+     * the per-voice bus adds the raw operator words without the
+     * compander's low-bit truncation.  The grid sits at half a bus unit,
+     * so the 16-bit DAC spans the same analog window as the Mk1's
+     * 12-bit one and the two personalities share one reference level. */
+    check(slopsix_dx7s_dac_step(0) == 0,
+          "the DX7S DAC step maps zero to zero");
+    check(slopsix_dx7s_dac_step(1) == 2 &&
+          slopsix_dx7s_dac_step(0x1234) == 0x2468,
+          "the DX7S DAC step keeps all 16 bits, at half a bus unit");
+    check(slopsix_dx7s_dac_step(-1) == -2 &&
+          slopsix_dx7s_dac_step(-0x1234) == -0x2468,
+          "the DX7S DAC step keeps negative low bits too");
+    check(slopsix_dx7s_dac_step(16383) == 32766 &&
+          slopsix_dx7s_dac_step(-16384) == -32768,
+          "the DX7S DAC step passes the 16-bit rails");
+    check(slopsix_dx7s_dac_step(16384) == 32767 &&
+          slopsix_dx7s_dac_step(-16385) == -32768,
+          "the DX7S DAC step saturates past the rails");
+    check(slopsix_dx7s_dac_step(16376) == 32752,
+          "one full-scale voice lands on the DX7S DAC's top code");
+    {
+        int monotone = 1;
+
+        for (i = 0; i < 40000u; i++) {
+            int32_t bus = (int32_t)i - 20000;
+            int32_t code = slopsix_dx7s_dac_step(bus);
+            int32_t lower = slopsix_dx7s_dac_step(bus - 1);
+
+            if (code < lower) {
+                monotone = 0;
+            }
+            if (code > 32767 || code < -32768) {
+                monotone = 0;
+            }
+        }
+        check(monotone == 1,
+              "the DX7S DAC step is monotone and stays in the window");
+    }
+    {
+        const int32_t raw[4] = { 0x1234, -0x4321, 1, -1 };
+        int32_t bus[4] = { 1, 2, 3, 4 };
+        int i2;
+
+        slopsix_dx7s_voice_bus(raw, bus, 4u);
+        for (i2 = 0; i2 < 4; i2++) {
+            int32_t expect = (int32_t)(i2 + 1) + raw[i2];
+
+            if (bus[i2] != expect) {
+                break;
+            }
+        }
+        check(i2 == 4,
+              "the DX7S voice bus adds raw voice words, low bits intact");
+    }
+    check(slopsix_dx7s_output_scale(1 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 1,
+          "the DX7S conversion keeps a one-LSB 16-bit code");
+    check(slopsix_dx7s_output_scale(32767 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 32767,
+          "the DX7S conversion maps a full 16-bit code to full int16");
+#endif
+
     /* The master ladder: the resistor string's taps as exact Q16 gains. */
     for (i = 0; i < 8u; i++) {
         if (slopsix_master_gain_q16((unsigned)i) != ladder[i]) {
@@ -3069,6 +3134,30 @@ static void block_check_algorithm(unsigned algorithm, int eg_block_mode)
 
 /* ------------------------------------------- Phase D7S-2: per-voice LFO */
 
+#if SLOPSIX_HAS_DX7S
+/* Pre-output parity capture: the DX7 and DX7S deliberately end in
+ * different output stages (the DX7S's 16-bit DAC tail), so a neutral
+ * DX7S must equal the DX7 at the mixed bus, before the output stage.
+ * Swapping each context's output_mix for this recorder compares exactly
+ * that. */
+#define PARITY_BUS_MAX 512
+static int32_t parity_bus_a[PARITY_BUS_MAX];
+static int32_t parity_bus_b[PARITY_BUS_MAX];
+static int32_t *parity_dst;
+static size_t parity_len;
+
+static void parity_capture_mix(void *vstate, int32_t bus, int16_t *left,
+    int16_t *right)
+{
+    (void)vstate;
+    (void)left;
+    (void)right;
+    if (parity_len < PARITY_BUS_MAX) {
+        parity_dst[parity_len++] = bus;
+    }
+}
+#endif
+
 static void stage_plfo(void)
 {
     slopsix_context ctx;
@@ -3284,14 +3373,78 @@ static void stage_plfo(void)
             check(slopsix_set_voice(dx7, dump, sizeof(dump)) == SLOPSIX_OK &&
                   slopsix_set_voice(dx7s, dump, sizeof(dump)) == SLOPSIX_OK,
                   "both contexts take the reference patch");
+            /* Compare the pre-output mixed bus: the personalities' output
+             * stages differ by design (the DX7S has its own 16-bit DAC
+             * tail), so the shared render is the invariant. */
+            SLOPSIX_CONTEXT(dx7)->output_mix = parity_capture_mix;
+            SLOPSIX_CONTEXT(dx7s)->output_mix = parity_capture_mix;
             slopsix_note_on(dx7, 69u, 100u);
             slopsix_note_on(dx7s, 69u, 100u);
+            parity_dst = parity_bus_a;
+            parity_len = 0;
             slopsix_process(dx7, render_buf_a, 512u);
+            parity_dst = parity_bus_b;
+            parity_len = 0;
             slopsix_process(dx7s, render_buf_b, 512u);
-            check(memcmp(render_buf_a, render_buf_b,
-                        512u * 2u * sizeof(int16_t)) == 0,
-                  "a neutral DX7S Single-mode render equals the DX7 render "
-                  "bit for bit");
+            {
+                /* One voice is sounding, so the DX7's bus is exactly the
+                 * compander applied to the DX7S's raw voice.  This checks
+                 * the shared voice render and states the intended output
+                 * delta: the DX7S omits the compander quantization. */
+                size_t k;
+                int equal = (parity_len == PARITY_BUS_MAX);
+
+                for (k = 0; equal && k < PARITY_BUS_MAX; k++) {
+                    slopsix_compander_word word;
+
+                    slopsix_compander_quantize(parity_bus_b[k], &word);
+                    if (slopsix_compander_value(&word) != parity_bus_a[k]) {
+                        equal = 0;
+                    }
+                }
+                check(equal,
+                      "a neutral DX7S Single-mode render matches the DX7 "
+                      "render before the compander bit for bit");
+            }
+        }
+        slopsix_destroy_context(dx7);
+        slopsix_destroy_context(dx7s);
+    }
+
+    /* The output level: the two personalities end in different DAC stages
+     * (the Mk1's 12-bit companded grid, the DX7S's 16-bit PCM54HP), but
+     * they must land on the same reference level, so a host that swaps one
+     * engine for the other keeps its gain staging.  The voices differ
+     * only by the compander's quantization, which is well under a
+     * percent, so the peaks must agree to within a couple of percent. */
+    {
+        slopsix_context dx7 = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_context dx7s = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+
+        check(dx7 != NULL && dx7s != NULL,
+              "both contexts are created for the level check");
+        if (dx7 != NULL && dx7s != NULL) {
+            int32_t peak_dx7;
+            int32_t peak_dx7s;
+
+            make_init_patch(dump);
+            check(slopsix_set_voice(dx7, dump, sizeof(dump)) == SLOPSIX_OK &&
+                  slopsix_set_voice(dx7s, dump, sizeof(dump)) == SLOPSIX_OK,
+                  "both contexts take the reference patch");
+            slopsix_note_on(dx7, 69u, 100u);
+            slopsix_note_on(dx7s, 69u, 100u);
+            slopsix_process(dx7, render_buf_a, 8000u);
+            slopsix_process(dx7s, render_buf_b, 8000u);
+            peak_dx7 = render_peak(render_buf_a, 8000u);
+            peak_dx7s = render_peak(render_buf_b, 8000u);
+            check(peak_dx7 > 1000 && peak_dx7s > 1000,
+                  "both personalities render an audible level");
+            check((peak_dx7 - peak_dx7s) * 50 <= peak_dx7 &&
+                  (peak_dx7s - peak_dx7) * 50 <= peak_dx7,
+                  "the DX7S output stage lands on the DX7's reference level");
         }
         slopsix_destroy_context(dx7);
         slopsix_destroy_context(dx7s);

@@ -15,9 +15,11 @@
  * are still open (research OQ-22).  The engine implements it as it
  * stands.
  *
- * The filter is a *hardware* stage of the DX7 personality, so it lives
- * here, in the DX7's own translation unit, and not in the shared output
- * stages: a later personality brings its own tail.
+ * This file is the shared filter core and the DX7's own tail: the
+ * transform, the cascade and the rate scaling are signal-domain agnostic,
+ * while each personality supplies its own analog prototype
+ * (slopsix_filter_init_with).  The DX7 prototype lives here; the DX7S's
+ * lives in src/dx7s/slopsix_filter.c.
  *
  * The rate.
  *
@@ -101,8 +103,9 @@ typedef char slopsix_filter_cascade_check
 
 /* The section's output limit: the accumulator's saturation, in Q12 of a
  * DAC code.  The largest legitimate value is a few times the code's full
- * scale (8.4e6), so the limit is far above anything the filter can
- * reach; it only keeps a runaway state from becoming an overflow. */
+ * scale - 8.4e6 for the Mk1's 12-bit codes, 134e6 for the DX7S's 16-bit
+ * ones - so the limit is above anything the filter can reach; it only
+ * keeps a runaway state from becoming an overflow. */
 #define SLOPSIX_FILTER_LIMIT 536870912
 
 /* pi in Q24. */
@@ -395,8 +398,14 @@ static int32_t slopsix_filter_step_first(slopsix_filter_section *section,
  * at or above the host's Nyquist.  A rate above the cadences' cap is
  * clamped like the cadence gate clamps its rate: the bilinear transform's
  * Q24 products stay inside 64 bits only up to there, and above it the
- * design overflows instead of degenerating. */
-void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate)
+ * design overflows instead of degenerating.
+ *
+ * The prototype is the personality's own: the DX7 and the DX7S bring
+ * different analog tails, but the transform, the rate scaling and the
+ * cascade's math are the same. */
+void slopsix_filter_init_with(slopsix_filter *filter,
+    const int32_t prototype[SLOPSIX_FILTER_SECTIONS][5],
+    uint32_t sample_rate)
 {
     unsigned i;
 
@@ -420,10 +429,17 @@ void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate)
 
         for (i = 0; i < SLOPSIX_FILTER_SECTIONS; i++) {
             slopsix_filter_design(slopsix_filter_order[i],
-                slopsix_filter_prototype[i], kappa_q24, r_q24,
+                prototype[i], kappa_q24, r_q24,
                 &filter->section[i]);
         }
     }
+}
+
+/* The DX7 personality's tail: its own prototype through the shared
+ * design. */
+void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate)
+{
+    slopsix_filter_init_with(filter, slopsix_filter_prototype, sample_rate);
 }
 
 /* One sample through the filter: the DAC's code in, the analog stage's

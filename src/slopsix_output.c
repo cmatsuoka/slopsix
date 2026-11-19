@@ -163,9 +163,10 @@ void slopsix_pan_split(int32_t pan_q16, int32_t mono, int32_t *left,
  * filter, the compile-time-selected pan and the master conversion.
  * Without SLOPSIX_EXTRAS the mono code lands in both channels unchanged -
  * the faithful centre output. */
-void slopsix_output_mix(slopsix_context_state *state, int32_t bus,
+void slopsix_output_mix(void *vstate, int32_t bus,
                         int16_t *left, int16_t *right)
 {
+    slopsix_context_state *state = (slopsix_context_state *)vstate;
     int32_t code = slopsix_dac_step(bus);
     int32_t value = slopsix_filter_process(&state->filter, code);
     int32_t left_code;

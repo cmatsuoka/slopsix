@@ -17,17 +17,28 @@
 void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
 {
     slopsix_dx7_init(state, sample_rate);
+    /* The DX7S brings its own tail: re-design the filter from the
+     * personality's prototype after the shared DX7 initialization. */
+    slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
+    /* No compander in the DX7S path: the voices sum at the operator
+     * core's resolution, and the 16-bit DAC step saturates the bus. */
+    state->voice_bus = slopsix_dx7s_voice_bus;
+    state->output_mix = slopsix_dx7s_output_mix;
 }
 
 void slopsix_dx7s_reset(slopsix_context_state *state)
 {
     slopsix_dx7_reset(state);
+    slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
+    state->voice_bus = slopsix_dx7s_voice_bus;
+    state->output_mix = slopsix_dx7s_output_mix;
 }
 
 void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
     uint32_t sample_rate)
 {
     slopsix_dx7_set_sample_rate(state, sample_rate);
+    slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
 }
 
 void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
@@ -124,8 +135,6 @@ void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
                     if (multi) {
                         int16_t word = slopsix_mod_pitch_word_one(state,
                             &engine->lfo);
-
-                        engine->lfo.pitch_mod_word = word;
                         offset = slopsix_floor_div((int32_t)word,
                             SLOPSIX_PITCH_MOD_TO_LOG_SHIFT) +
                             slopsix_pitch_eg_offset(&engine->pitch_eg);
