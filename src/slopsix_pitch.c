@@ -105,13 +105,14 @@ static int32_t slopsix_detune_offset(uint8_t detune)
  * noted above).  The master tune is added after the clamp, as on the
  * hardware.
  */
-int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
-                           int32_t pitch_offset)
+int32_t slopsix_voice_word_from_base(int32_t base_word,
+                                     int32_t master_tune_q16,
+                                     int32_t pitch_offset)
 {
     /* The master tune, in Q16 cents, becomes the word's units: 4096
      * units per octave is 1200 cents, so one cent is 4096/1200 units. */
     int32_t tune = master_tune_q16 / 19200;
-    int32_t voice = (int32_t)slopsix_note_word[note & 127u];
+    int32_t voice = base_word;
 
     voice += pitch_offset;
     if (voice < SLOPSIX_FREQ_VOICE_FLOOR) {
@@ -119,6 +120,14 @@ int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
     }
 
     return voice + tune;
+}
+
+int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
+                           int32_t pitch_offset)
+{
+    return slopsix_voice_word_from_base(
+        (int32_t)slopsix_note_word[note & 127u],
+        master_tune_q16, pitch_offset);
 }
 
 /*
@@ -278,4 +287,79 @@ uint32_t slopsix_increment_from_word(int32_t word, uint32_t sample_rate)
     }
 
     return increment;
+}
+
+/*
+ * Portamento (research P-06).
+ *
+ * The firmware keeps three per-voice frequency buffers in its own
+ * 4096-per-octave word: the note target, the portamento word and the
+ * glissando word.  PORTA_PROCESS walks each voice once every second OCF
+ * tick and moves the portamento word toward the target by
+ *
+ *   step = rate * ((high byte of |current - target| >> 2) + 1)
+ *
+ * i.e. a step proportional to the distance's top bits, not a constant
+ * rate.  The high byte is the word's bits 15..8, so the bracket is the
+ * distance's bits 10..15 plus one.  A step past the target clamps at
+ * the target.  The rate is the pitch-EG rate table's entry indexed by
+ * `99 - time`; time 0 gives 0xFF, the instantaneous setting.
+ *
+ * Glissando replaces the audible word with a semitone stair.  The step
+ * is 0x154 (340) in the same word, the note table's three-semitone
+ * cycle being 0x154, 0x154, 0x158; after adding or subtracting it the
+ * firmware snaps the low byte back onto the note table's curve,
+ * `84 * (high & 3)`, with the carry adjustment that keeps the cycle
+ * (when the new high byte is 3 modulo 4, the high byte is advanced and
+ * the low byte becomes zero).  The stair steps only when it is at
+ * least one step away from the portamento word; if it has stepped, the
+ * new stair word is what the voice hears, otherwise it keeps the
+ * current one.
+ */
+
+static int32_t slopsix_gliss_quantize(int32_t word)
+{
+    uint32_t high = (uint32_t)word >> 8;
+
+    /* The ROM's carry fix-up: a reconstruction landing on the cycle's
+     * last entry (high & 3 == 3) advances to the next high byte with a
+     * zero low byte, so the stair stays on note-table words. */
+    if (((high + 1u) & 3u) == 0u) {
+        high++;
+    }
+
+    return (int32_t)((high << 8) | (uint32_t)(84u * (high & 3u)));
+}
+
+int32_t slopsix_porta_step_word(int32_t *current, int32_t target,
+                                int32_t *gliss, uint8_t rate,
+                                bool glissando)
+{
+    int32_t diff = *current - target;
+
+    if (diff > 0) {
+        int32_t step = (int32_t)rate * ((diff >> 10) + 1);
+        int32_t next = *current - step;
+
+        *current = (next < target) ? target : next;
+    } else if (diff < 0) {
+        int32_t distance = target - *current;
+        int32_t step = (int32_t)rate * ((distance >> 10) + 1);
+        int32_t next = *current + step;
+
+        *current = (next > target) ? target : next;
+    }
+
+    if (!glissando) {
+        return *current;
+    }
+
+    diff = *gliss - *current;
+    if (diff >= 0x154) {
+        *gliss = slopsix_gliss_quantize(*gliss - 0x154);
+    } else if (diff <= -0x154) {
+        *gliss = slopsix_gliss_quantize(*gliss + 0x154);
+    }
+
+    return *gliss;
 }

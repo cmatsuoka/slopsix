@@ -138,6 +138,14 @@ void slopsix_pitch_eg_update(slopsix_pitch_eg *eg)
  * engine's 4096-per-octave units.  The neutral level is zero and the
  * extremes are -16384 and +16256, i.e. about -4 and +3.97 octaves.
  */
+uint8_t slopsix_pitch_eg_rate_value(uint8_t rate)
+{
+    if (rate > 99u) {
+        rate = 99u;
+    }
+    return slopsix_pitch_eg_rate[rate];
+}
+
 int32_t slopsix_pitch_eg_offset(const slopsix_pitch_eg *eg)
 {
     return eg->level - SLOPSIX_PITCH_EG_NEUTRAL_WORD;

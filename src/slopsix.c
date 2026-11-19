@@ -26,6 +26,25 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * research, the volume section). */
     state->master_volume = 7u;
     state->master_gain_q16 = slopsix_master_gain_q16(state->master_volume);
+    /* Portamento: time 0 is instantaneous (rate 0xFF), fingered mode,
+     * no pedal and no glissando - the hardware's reset state.  The
+     * three pitch buffers start at the firmware's C2 reset word. */
+    state->porta_time = 0u;
+    state->porta_rate = slopsix_pitch_eg_rate_value(99u);
+    state->porta_full_time = false;
+    state->porta_pedal = false;
+    state->glissando = false;
+    state->porta_bank = 0u;
+    state->porta_last_target = SLOPSIX_PORTA_RESET_WORD;
+    {
+        unsigned v;
+
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            state->voices[v].porta_current = SLOPSIX_PORTA_RESET_WORD;
+            state->voices[v].porta_target = SLOPSIX_PORTA_RESET_WORD;
+            state->voices[v].gliss_current = SLOPSIX_PORTA_RESET_WORD;
+        }
+    }
     slopsix_pitch_eg_cadence_init(&state->pitch_cadence,
         state->sample_rate);
     slopsix_lfo_cadence_init(&state->lfo_cadence, state->sample_rate);
@@ -390,6 +409,26 @@ static void slopsix_release_voice(slopsix_voice *slot,
     slopsix_voice_engine_release(engine);
 }
 
+/* The note's portamento target word: the effective note (key plus the
+ * keyed transpose) in the engine's 4096-per-octave word, with the
+ * hardware buffers' two zero LSBs. */
+static int32_t slopsix_porta_target_word(uint8_t note, int8_t transpose)
+{
+    int32_t effective = slopsix_effective_note(note, transpose);
+
+    return (int32_t)(slopsix_note_word[(uint8_t)effective & 127u] & ~3u);
+}
+
+/* The mono legato glide rule: a non-instant rate, and either fingered
+ * mode (which glides on every legato press) or full-time mode with the
+ * pedal held.  Polyphonic mode has its own rule and always needs the
+ * pedal (VOICE_ADD_POLY). */
+static bool slopsix_porta_mono_glides(const slopsix_context_state *state)
+{
+    return state->porta_rate != 0xFFu &&
+           (!state->porta_full_time || state->porta_pedal);
+}
+
 /* Polyphonic key release: every still-held voice of that note. */
 static void slopsix_poly_release_note(slopsix_context_state *state,
     uint8_t note)
@@ -502,11 +541,30 @@ static void slopsix_mono_note_on(slopsix_context_state *state,
     state->mono_keys[state->mono_count++] = note;
 
     if (state->mono_count == 1) {
+        int32_t target;
+
         /* The first key after silence: a full trigger, with the pitch
          * EG reset and the velocity applied (VOICE_ADD_MONO's count-1
-         * path: key off, pitch EG reset, operator data, key on). */
+         * path: key off, pitch EG reset, operator data, key on).  A
+         * full-time portamento with the pedal held still glides from
+         * the buffers' previous content, as the firmware does; every
+         * other setting snaps the buffers to the new target. */
         slot->note = note;
         slot->velocity = velocity;
+        slot->transpose = state->patch.transpose;
+        target = slopsix_porta_target_word(note, slot->transpose);
+        /* The first-key path's rule is narrower than the legato one:
+         * only full-time mode with the pedal held keeps the old buffers
+         * (VOICE_ADD_MONO's count-1 test clears them for fingered mode
+         * too). */
+        if (state->porta_rate != 0xFFu && state->porta_full_time &&
+            state->porta_pedal) {
+            slot->porta_target = target;
+        } else {
+            slot->porta_current = target;
+            slot->gliss_current = target;
+            slot->porta_target = target;
+        }
         slopsix_voice_engine_note_on(state, slot, &state->engines[0]);
         state->mono_last_key = note;
         return;
@@ -529,9 +587,26 @@ static void slopsix_mono_note_on(slopsix_context_state *state,
         }
     }
 
-    /* The re-pitch: no envelope is touched and the old velocity stays. */
+    /* The re-pitch: no envelope is touched and the old velocity stays.
+     * With portamento it becomes a new target and the current buffer
+     * keeps gliding; otherwise the buffers snap and the pitch loads
+     * immediately.  A press that did not extend the direction leaves
+     * the key and target unchanged, so neither branch moves it. */
     slot->note = state->mono_last_key;
-    slopsix_voice_engine_update_frequency(state, slot, &state->engines[0]);
+    {
+        int32_t target = slopsix_porta_target_word(slot->note,
+            slot->transpose);
+
+        if (slopsix_porta_mono_glides(state)) {
+            slot->porta_target = target;
+        } else {
+            slot->porta_current = target;
+            slot->gliss_current = target;
+            slot->porta_target = target;
+            slopsix_voice_engine_update_frequency(state, slot,
+                &state->engines[0]);
+        }
+    }
 }
 
 /* Mono key-off: the release, or the legato fallback re-pitch. */
@@ -573,8 +648,23 @@ static void slopsix_mono_note_off(slopsix_context_state *state, uint8_t note)
         }
         state->mono_last_key = pick;
         slot->note = pick;
-        slopsix_voice_engine_update_frequency(state, slot,
-            &state->engines[0]);
+        {
+            int32_t target = slopsix_porta_target_word(pick,
+                slot->transpose);
+
+            /* The fallback is a legato move like a key press: fingered
+             * mode (or full-time with the pedal) glides back through
+             * the buffer; otherwise the pitch jumps to the new key. */
+            if (slopsix_porta_mono_glides(state)) {
+                slot->porta_target = target;
+            } else {
+                slot->porta_current = target;
+                slot->gliss_current = target;
+                slot->porta_target = target;
+                slopsix_voice_engine_update_frequency(state, slot,
+                    &state->engines[0]);
+            }
+        }
     }
 }
 
@@ -596,9 +686,48 @@ static void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
     {
         unsigned index = slopsix_poly_pick(state);
         slopsix_voice *slot = &state->voices[index];
+        int32_t target;
+        bool glide;
 
         slot->note = note;
         slot->velocity = velocity;
+        slot->transpose = state->patch.transpose;
+        target = slopsix_porta_target_word(note, slot->transpose);
+
+        /* Polyphonic portamento always needs the pedal; the mode then
+         * decides whether the new note glides alone (fingered/retain)
+         * or drags the pedal-sustained and released voices with it
+         * (full-time/follow, VOICE_ADD_POLY). */
+        glide = state->porta_pedal && state->porta_rate != 0xFFu;
+        if (glide) {
+            if (state->porta_full_time) {
+                unsigned v;
+
+                for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+                    slopsix_voice *held = &state->voices[v];
+
+                    /* The firmware's follow loop tests the voice status
+                     * buffer's ACTIVE bit; every voice whose key is no
+                     * longer down - pedal-held or a release tail - has
+                     * that bit clear and takes the new target. */
+                    if (held->state != SLOPSIX_VOICE_FREE &&
+                        !held->held) {
+                        held->porta_target = target;
+                    }
+                }
+            }
+            slot->porta_current = state->porta_last_target;
+            slot->gliss_current = state->porta_last_target;
+            slot->porta_target = target;
+        } else {
+            slot->porta_current = target;
+            slot->gliss_current = target;
+            slot->porta_target = target;
+        }
+
+        /* Every new note becomes the starting point of the next one,
+         * whether or not this one glides (the firmware's $A4). */
+        state->porta_last_target = target;
         slopsix_voice_engine_note_on(state, slot, &state->engines[index]);
     }
 }
@@ -659,6 +788,38 @@ static void slopsix_dx7_set_mono_mode(slopsix_context_state *state, bool mono)
         state->mono_dir = 0u;
         state->mono_last_key = 0u;
     }
+}
+
+static void slopsix_dx7_set_portamento_time(slopsix_context_state *state,
+    uint8_t time)
+{
+    state->porta_time = time;
+    /* PORTA_COMPUTE_RATE_VALUE: time 0 reads the table's last entry,
+     * 0xFF, the instantaneous setting; time 99 reads its first, 1. */
+    state->porta_rate =
+        slopsix_pitch_eg_rate_value((uint8_t)(99u - time));
+}
+
+static void slopsix_dx7_set_portamento_mode(slopsix_context_state *state,
+    slopsix_portamento_mode mode)
+{
+    state->porta_full_time = (mode == SLOPSIX_PORTA_FULL_TIME);
+}
+
+static void slopsix_dx7_set_portamento_pedal(slopsix_context_state *state,
+    bool on)
+{
+    state->porta_pedal = on;
+}
+
+static void slopsix_dx7_set_glissando(slopsix_context_state *state, bool on)
+{
+    state->glissando = on;
+    /* The audible word switches between the glissando stair and the
+     * continuous portamento buffer.  A parked portamento buffer would
+     * otherwise leave a sounding voice on the stale stair pitch, because
+     * the next PORTA_PROCESS reports no change for it. */
+    slopsix_refresh_pitch(state);
 }
 
 /* ------------------------------------------------ the parameter setters */
@@ -878,6 +1039,92 @@ slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono)
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
         slopsix_dx7_set_mono_mode(&impl->dx7, mono);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
+    uint8_t time_0_99)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (time_0_99 > 99u) {
+        time_0_99 = 99u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_portamento_time(&impl->dx7, time_0_99);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return err;
+}
+
+slopsix_error slopsix_set_portamento_mode(slopsix_context ctx,
+    slopsix_portamento_mode mode)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (mode != SLOPSIX_PORTA_FINGERED && mode != SLOPSIX_PORTA_FULL_TIME) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_portamento_mode(&impl->dx7, mode);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_portamento_pedal(slopsix_context ctx, bool on)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_portamento_pedal(&impl->dx7, on);
+        break;
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+
+    return SLOPSIX_OK;
+}
+
+slopsix_error slopsix_set_glissando(slopsix_context ctx, bool on)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7:
+        slopsix_dx7_set_glissando(&impl->dx7, on);
         break;
     default:
         return SLOPSIX_ERR_UNSUPPORTED;

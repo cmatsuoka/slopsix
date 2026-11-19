@@ -55,8 +55,14 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
      * pitch EG's level is folded into the voice-frequency word itself. */
     int32_t pitch_offset = slopsix_mod_pitch_offset(state) +
         slopsix_pitch_eg_offset(&engine->pitch_eg);
-    int32_t note = slopsix_effective_note(slot->note, slot->transpose);
-    int32_t voice = slopsix_voice_word((uint8_t)note,
+    /* The firmware's PORTA_PROCESS feeds the EGS a frequency word of its
+     * own: the note target glides through the portamento buffer, and
+     * glissando, while it is on, quantizes that to semitones.  Both
+     * buffers carry the hardware's two zero low bits, so the word is
+     * masked here just before the ratio and detune are added. */
+    int32_t base = state->glissando ? slot->gliss_current
+                                    : slot->porta_current;
+    int32_t voice = slopsix_voice_word_from_base(base & ~3,
         state->master_tune_q16, pitch_offset);
     unsigned op;
 
@@ -69,6 +75,53 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     }
 
     engine->pitch_offset = pitch_offset;
+}
+
+/*
+ * PORTA_PROCESS over one half of the voice bank.
+ *
+ * The firmware does not update all sixteen voices on the same OCF tick:
+ * M_PORTA_UPDATE_VOICE_SWITCH alternates the bank, so voices 0..7 move
+ * on one tick and 8..15 on the next.  Every voice therefore steps at the
+ * same ~187.6 Hz period, but the two banks are one tick (~2.66 ms) out
+ * of phase with each other.  That is audible as a staggered staircase
+ * in a polyphonic glide, so the engine reproduces it rather than
+ * stepping the whole bank together: `state->porta_bank` is the same
+ * toggle, flipped by the caller on every OCF tick, and only the selected
+ * half is advanced here.
+ *
+ * The return value is a bit mask of the voices whose audible word moved;
+ * the render loop rewrites just those phase increments.  A voice whose
+ * glissando stair is holding still while its portamento word moves does
+ * not need a rewrite, because the stair is what the EGS hears.
+ */
+uint16_t slopsix_porta_process(slopsix_context_state *state, unsigned bank)
+{
+    unsigned first = bank * (SLOPSIX_VOICE_COUNT / 2u);
+    unsigned last = first + (SLOPSIX_VOICE_COUNT / 2u);
+    uint16_t changed = 0;
+    unsigned v;
+
+    for (v = first; v < last; v++) {
+        slopsix_voice *slot = &state->voices[v];
+        int32_t before;
+
+        if (slot->state == SLOPSIX_VOICE_FREE) {
+            continue;
+        }
+
+        before = state->glissando ? slot->gliss_current
+                                  : slot->porta_current;
+        (void)slopsix_porta_step_word(&slot->porta_current,
+            slot->porta_target, &slot->gliss_current, state->porta_rate,
+            state->glissando);
+        if ((state->glissando ? slot->gliss_current
+                              : slot->porta_current) != before) {
+            changed |= (uint16_t)(1u << v);
+        }
+    }
+
+    return changed;
 }
 
 /*
@@ -413,9 +466,17 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
             int lfo_tick = cadence_step(&state->lfo_cadence, lfo_threshold);
             int peg_tick = cadence_step(&state->pitch_cadence,
                                         peg_threshold);
+            uint16_t porta_changed = 0;
 
             if (lfo_tick) {
                 slopsix_lfo_tick(state);
+                /* PORTA_PROCESS runs on every OCF tick, but only over
+                 * one half of the voice bank; the toggle is advanced
+                 * here so the two banks keep the hardware's one-tick
+                 * stagger. */
+                porta_changed = slopsix_porta_process(state,
+                    state->porta_bank);
+                state->porta_bank ^= 1u;
             }
             if (lfo_tick || peg_tick) {
                 /* The LFO's and the bend's share of the pitch offset is
@@ -423,7 +484,9 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
                  * pitch EG's level is per voice.  A voice whose
                  * composed offset has not moved keeps the increments it
                  * already has, so a static pitch costs no rewrite at
-                 * all. */
+                 * all.  A portamento step forces the rewrite for the
+                 * voices whose audible word moved even when the bend
+                 * and pitch EG did not. */
                 int32_t lfo_offset = slopsix_mod_pitch_offset(state);
                 unsigned v;
 
@@ -446,7 +509,8 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
                     }
                     offset = lfo_offset +
                         slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
-                    if (offset != state->engines[v].pitch_offset) {
+                    if (((porta_changed >> v) & 1u) != 0u ||
+                        offset != state->engines[v].pitch_offset) {
                         slopsix_voice_engine_update_frequency(state,
                             &state->voices[v], &state->engines[v]);
                     }

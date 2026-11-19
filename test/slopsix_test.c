@@ -17,6 +17,8 @@
  *   graph       the operator-graph walk
  *   bend        the pitch bend: the curve, its quantisation and its scale
  *   pitcheg     the pitch envelope: its tables, stage walk and cadence
+ *   porta       portamento and glissando: the rate/step law, the half-bank
+ *               cadence and the poly/mono mode matrix
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   ctrl        the controllers: scaling, routes and both registers
  *   filter      the analog tail: the reconstruction filter's design,
@@ -3031,6 +3033,7 @@ static void process_reference(slopsix_context ctx, int16_t *stereo_out,
         int32_t bus = 0;
         int lfo_tick;
         int peg_tick;
+        uint16_t porta_changed = 0;
         unsigned v;
 
         lfo_tick = slopsix_lfo_cadence_tick(&state->lfo_cadence);
@@ -3038,6 +3041,8 @@ static void process_reference(slopsix_context ctx, int16_t *stereo_out,
 
         if (lfo_tick) {
             slopsix_lfo_tick(state);
+            porta_changed = slopsix_porta_process(state, state->porta_bank);
+            state->porta_bank ^= 1u;
         }
         if (lfo_tick || peg_tick) {
             int32_t lfo_offset = slopsix_mod_pitch_offset(state);
@@ -3057,7 +3062,8 @@ static void process_reference(slopsix_context ctx, int16_t *stereo_out,
                 }
                 offset = lfo_offset +
                     slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
-                if (offset != state->engines[v].pitch_offset) {
+                if (((porta_changed >> v) & 1u) != 0u ||
+                    offset != state->engines[v].pitch_offset) {
                     slopsix_voice_engine_update_frequency(state,
                         &state->voices[v], &state->engines[v]);
                 }
@@ -4161,6 +4167,296 @@ static void stage_extras(void)
     slopsix_destroy_context(ctx);
 }
 
+
+static int32_t porta_note_word(uint8_t note)
+{
+    return (int32_t)(slopsix_note_word[note] & ~3u);
+}
+
+static void stage_porta(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    int32_t current;
+    int32_t target;
+    int32_t gliss;
+    int32_t out;
+    int32_t w60;
+    int32_t w64;
+    int32_t w72;
+    uint16_t changed;
+
+    printf("stage porta\n");
+
+    /* The rate law: time 0 is the table's last entry (0xFF, instant),
+     * time 99 its first (1).  The table is the pitch EG's own. */
+    check(slopsix_pitch_eg_rate_value(99u) == 0xFFu,
+          "portamento time 0 reads the instantaneous rate");
+    check(slopsix_pitch_eg_rate_value(0u) == 1u,
+          "portamento time 99 reads the slowest rate");
+
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    if (ctx == NULL) {
+        check(0, "create_context returns a context");
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+
+    check(state->porta_time == 0u && state->porta_rate == 0xFFu &&
+          !state->porta_full_time && !state->porta_pedal &&
+          !state->glissando,
+          "portamento resets to the hardware's instant, fingered state");
+    check(state->voices[0].porta_current == SLOPSIX_PORTA_RESET_WORD &&
+          state->porta_last_target == SLOPSIX_PORTA_RESET_WORD,
+          "the pitch buffers reset to the firmware's C2 word");
+
+    check(slopsix_set_portamento_time(ctx, 99u) == SLOPSIX_OK &&
+          state->porta_rate == 1u,
+          "the time setter caches the rate table entry");
+    check(slopsix_set_portamento_time(ctx, 120u) == SLOPSIX_ERR_RANGE &&
+          state->porta_time == 99u,
+          "a time past 99 clamps and reports a range error");
+    check(slopsix_set_portamento_mode(ctx,
+              (slopsix_portamento_mode)2) == SLOPSIX_ERR_INVALID &&
+          !state->porta_full_time,
+          "an unknown portamento mode is rejected");
+    check(slopsix_set_portamento_mode(ctx, SLOPSIX_PORTA_FULL_TIME) ==
+              SLOPSIX_OK && state->porta_full_time,
+          "the mode setter stores full-time mode");
+    slopsix_destroy_context(ctx);
+
+    /* The proportional step: the distance's high byte is 0x40 at four
+     * octaves, so ((0x40 >> 2) + 1) * rate = 17 * 4. */
+    current = 0;
+    target = 0x4000;
+    gliss = 0;
+    out = slopsix_porta_step_word(&current, target, &gliss, 4u, false);
+    check(current == 68 && out == 68,
+          "the portamento step follows the distance's high byte");
+    current = target - 1;
+    out = slopsix_porta_step_word(&current, target, &gliss, 0xFFu, false);
+    check(current == target && out == target,
+          "an overshooting step clamps at the target");
+    current = 0x4000;
+    target = 0;
+    out = slopsix_porta_step_word(&current, target, &gliss, 4u, false);
+    check(current == 0x4000 - 68 && out == current,
+          "the downward step uses the same proportional law");
+
+    /* Glissando walks the note table's semitone stair: 0x154, 0x2A8,
+     * 0x400 (the three-step cycle's 344-unit entry), then 0x554. */
+    current = 0;
+    gliss = 0;
+    target = 0x400;
+    out = slopsix_porta_step_word(&current, target, &gliss, 0xFFu, true);
+    check(out == 0x154 && gliss == 0x154,
+          "glissando's first step is one semitone");
+    out = slopsix_porta_step_word(&current, target, &gliss, 0xFFu, true);
+    check(out == 0x2A8, "glissando's second step is one semitone");
+    out = slopsix_porta_step_word(&current, target, &gliss, 0xFFu, true);
+    check(out == 0x400, "glissando crosses the cycle's 344-unit boundary");
+    out = slopsix_porta_step_word(&current, target, &gliss, 0xFFu, true);
+    check(out == 0x400, "glissando holds once it reaches the target");
+    check(slopsix_porta_step_word(&current, target, &gliss, 0xFFu, false) ==
+              target,
+          "glissando off leaves the continuous word audible");
+
+    /* The half-bank toggle: bank 0 advances voices 0..7 only, bank 1
+     * advances 8..15 only, and the mask names the voices that moved. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    state->porta_rate = 4u;
+    state->voices[0].state = SLOPSIX_VOICE_ON;
+    state->voices[0].porta_current = 0;
+    state->voices[0].porta_target = 0x4000;
+    state->voices[8].state = SLOPSIX_VOICE_ON;
+    state->voices[8].porta_current = 0;
+    state->voices[8].porta_target = 0x4000;
+    changed = slopsix_porta_process(state, 0u);
+    check(changed == 0x0001u && state->voices[0].porta_current == 68 &&
+          state->voices[8].porta_current == 0,
+          "PORTA_PROCESS bank 0 moves voices 0..7 only");
+    changed = slopsix_porta_process(state, 1u);
+    check(changed == 0x0100u && state->voices[8].porta_current == 68 &&
+          state->voices[0].porta_current == 68,
+          "PORTA_PROCESS bank 1 moves voices 8..15 only");
+    slopsix_destroy_context(ctx);
+
+    w60 = porta_note_word(60u);
+    w64 = porta_note_word(64u);
+    w72 = porta_note_word(72u);
+
+    /* Polyphonic retain mode: the new voice starts from the last note's
+     * target, and the older voice keeps its own target. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    check(slopsix_set_portamento_time(ctx, 50u) == SLOPSIX_OK,
+          "poly: set a slow portamento time");
+    check(slopsix_set_portamento_pedal(ctx, true) == SLOPSIX_OK,
+          "poly: press the portamento pedal");
+    slopsix_note_on(ctx, 60u, 100u);
+    slopsix_note_on(ctx, 72u, 100u);
+    check(state->voices[1].porta_current == w60 &&
+          state->voices[1].porta_target == w72 &&
+          state->voices[0].porta_target == w60,
+          "poly retain starts the new voice at the last note's target");
+    changed = slopsix_porta_process(state, 0u);
+    check((changed & 0x0002u) != 0u &&
+          state->voices[1].porta_current > w60 &&
+          state->voices[1].porta_current < w72,
+          "poly retain glides the new voice");
+
+    /* The render loop drives the same step on the OCF ticks and rewrites
+     * the affected voice's phase increment. */
+    {
+        int16_t buffer[2 * 1024];
+        int32_t offset;
+        int32_t voice;
+        int32_t op_word;
+        uint32_t expected;
+
+        slopsix_process(ctx, buffer, 1024u);
+        check(state->voices[1].porta_current > w60,
+              "the render call advances the polyphonic glide");
+        offset = slopsix_mod_pitch_offset(state) +
+                 slopsix_pitch_eg_offset(&state->engines[1].pitch_eg);
+        voice = slopsix_voice_word_from_base(
+            state->voices[1].porta_current & ~3,
+            state->master_tune_q16, offset);
+        op_word = slopsix_op_freq_from_voice(
+            &state->engines[1].params[0], voice);
+        expected = slopsix_increment_from_word(op_word,
+            state->sample_rate);
+        check(state->engines[1].ops[0].increment == expected,
+              "the glide's word reaches the phase increment");
+    }
+    slopsix_destroy_context(ctx);
+
+    /* Turning glissando off switches the audible word from the stair to
+     * the continuous portamento buffer.  A parked buffer must re-pitch a
+     * sounding voice immediately, not leave it on the stale stair. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_portamento_time(ctx, 50u);
+    slopsix_set_portamento_pedal(ctx, true);
+    slopsix_set_glissando(ctx, true);
+    slopsix_note_on(ctx, 60u, 100u);
+    slopsix_note_on(ctx, 72u, 100u);
+    state->voices[1].porta_current = w72;
+    state->voices[1].gliss_current = w64;
+    slopsix_voice_engine_update_frequency(state, &state->voices[1],
+        &state->engines[1]);
+    slopsix_set_glissando(ctx, false);
+    {
+        int32_t offset = slopsix_mod_pitch_offset(state) +
+            slopsix_pitch_eg_offset(&state->engines[1].pitch_eg);
+        int32_t voice = slopsix_voice_word_from_base(
+            state->voices[1].porta_current & ~3,
+            state->master_tune_q16, offset);
+        int32_t op_word = slopsix_op_freq_from_voice(
+            &state->engines[1].params[0], voice);
+
+        check(state->engines[1].ops[0].increment ==
+                  slopsix_increment_from_word(op_word,
+                      state->sample_rate),
+              "turning glissando off re-pitches the sounding voice");
+    }
+    slopsix_destroy_context(ctx);
+
+    /* Polyphonic follow mode retargets the pedal-held voice. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_portamento_time(ctx, 50u);
+    slopsix_set_portamento_mode(ctx, SLOPSIX_PORTA_FULL_TIME);
+    slopsix_set_portamento_pedal(ctx, true);
+    slopsix_note_on(ctx, 60u, 100u);
+    slopsix_set_sustain(ctx, true);
+    slopsix_note_off(ctx, 60u);
+    slopsix_note_on(ctx, 72u, 100u);
+    check(state->voices[0].state == SLOPSIX_VOICE_ON &&
+          !state->voices[0].held &&
+          state->voices[0].porta_target == w72,
+          "poly follow retargets the pedal-held voice");
+    check(state->voices[1].porta_current == w60 &&
+          state->voices[1].porta_target == w72,
+          "poly follow also starts the new voice at the last target");
+    slopsix_destroy_context(ctx);
+
+    /* Mono fingered mode glides on legato without the pedal. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_mono_mode(ctx, true);
+    slopsix_set_portamento_time(ctx, 50u);
+    slopsix_note_on(ctx, 60u, 100u);
+    check(state->voices[0].porta_current == w60 &&
+          state->voices[0].porta_target == w60,
+          "mono's first key snaps to its target");
+    slopsix_note_on(ctx, 64u, 100u);
+    check(state->voices[0].porta_current == w60 &&
+          state->voices[0].porta_target == w64,
+          "mono fingered legato keeps the buffer and moves the target");
+    (void)slopsix_porta_process(state, 0u);
+    check(state->voices[0].porta_current > w60,
+          "the mono glide steps toward the new key");
+    slopsix_note_off(ctx, 64u);
+    check(state->voices[0].porta_target == w60 &&
+          state->voices[0].porta_current > w60,
+          "mono fingered fallback glides back to the remaining key");
+    slopsix_destroy_context(ctx);
+
+    /* Mono full-time needs the pedal. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_mono_mode(ctx, true);
+    slopsix_set_portamento_time(ctx, 50u);
+    slopsix_set_portamento_mode(ctx, SLOPSIX_PORTA_FULL_TIME);
+    slopsix_note_on(ctx, 60u, 100u);
+    slopsix_note_on(ctx, 64u, 100u);
+    check(state->voices[0].porta_current == w64 &&
+          state->voices[0].porta_target == w64,
+          "mono full-time without the pedal jumps to the new key");
+    slopsix_destroy_context(ctx);
+
+    /* Mono full-time with the pedal keeps the glide, including the
+     * first key's start from the reset buffers. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_mono_mode(ctx, true);
+    slopsix_set_portamento_time(ctx, 50u);
+    slopsix_set_portamento_mode(ctx, SLOPSIX_PORTA_FULL_TIME);
+    slopsix_set_portamento_pedal(ctx, true);
+    slopsix_note_on(ctx, 60u, 100u);
+    check(state->voices[0].porta_current == SLOPSIX_PORTA_RESET_WORD &&
+          state->voices[0].porta_target == w60,
+          "mono full-time with the pedal keeps the first key's glide");
+    slopsix_note_on(ctx, 64u, 100u);
+    check(state->voices[0].porta_current == SLOPSIX_PORTA_RESET_WORD &&
+          state->voices[0].porta_target == w64,
+          "mono full-time with the pedal glides on legato");
+    slopsix_destroy_context(ctx);
+
+    /* Without the pedal, a polyphonic note-on is instantaneous no matter
+     * how slow the time is. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    state = SLOPSIX_CONTEXT(ctx);
+    slopsix_set_portamento_time(ctx, 99u);
+    slopsix_note_on(ctx, 60u, 100u);
+    slopsix_note_on(ctx, 72u, 100u);
+    check(state->voices[1].porta_current == w72 &&
+          state->voices[1].porta_target == w72,
+          "poly portamento is gated by the pedal");
+    slopsix_destroy_context(ctx);
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -4220,6 +4516,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--pitcheg") == 0) {
             stage_pitcheg();
             ran = 1;
+        } else if (strcmp(argv[i], "--porta") == 0) {
+            stage_porta();
+            ran = 1;
         } else if (strcmp(argv[i], "--lfo") == 0) {
             stage_lfo();
             ran = 1;
@@ -4268,6 +4567,7 @@ int main(int argc, char **argv)
         stage_com();
         stage_bend();
         stage_pitcheg();
+        stage_porta();
         stage_lfo();
         stage_ctrl();
         stage_filter();

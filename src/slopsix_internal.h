@@ -438,6 +438,12 @@ typedef enum {
     SLOPSIX_VOICE_RELEASED
 } slopsix_voice_state;
 
+/* The firmware's reset value for the three voice pitch buffers: the note
+ * word for note 36 (C2), 0x2EA8 in the 4096-per-octave domain.  The
+ * buffers are valid before the first note, so a glide always has a
+ * well-defined starting point. */
+#define SLOPSIX_PORTA_RESET_WORD 0x2EA8
+
 typedef struct {
     slopsix_voice_state state;
     bool held;          /* key still down; false while pedal-sustained */
@@ -446,6 +452,16 @@ typedef struct {
     int8_t transpose;   /* the patch transpose keyed with the note */
     uint32_t seq;       /* the voice allocation's sequence counter; the
                          * stealing picks the lowest (the oldest note-on) */
+
+    /* The firmware's portamento buffers (research P-06): this voice's
+     * current and target log-frequency words and, when glissando is on,
+     * the semitone-quantized word the EGS actually hears.  They are in
+     * the engine's 4096-per-octave word and carry the hardware's two
+     * zero LSBs; the note word replaces the plain note in the frequency
+     * path while a glide runs. */
+    int32_t porta_current;
+    int32_t porta_target;
+    int32_t gliss_current;
 } slopsix_voice;
 
 /* --------------------------------------------------------- the live patch */
@@ -850,6 +866,21 @@ typedef struct {
     /* Voice management. */
     bool sustain;
     bool mono;
+
+    /* Portamento and glissando (the firmware's function parameters and
+     * the portamento pedal).  `porta_rate` is the cached rate increment
+     * `TABLE_PITCH_EG_RATE[99 - time]`: 0xFF means instantaneous, so the
+     * common default is no glide at all.  `porta_last_target` is the
+     * firmware's last-note word (its $A4 scratch), which a new
+     * polyphonic voice starts from; `porta_bank` is the half-bank
+     * toggle PORTA_PROCESS uses. */
+    uint8_t porta_time;        /* 0..99 */
+    uint8_t porta_rate;        /* 1..255, 0xFF = instantaneous */
+    bool porta_full_time;      /* false = fingered, true = full time */
+    bool porta_pedal;          /* the portamento pedal's own state */
+    bool glissando;
+    uint8_t porta_bank;        /* 0 = voices 0..7, 1 = voices 8..15 */
+    int32_t porta_last_target;
 
     /* Mono mode's bookkeeping, following the firmware's own: the active
      * keys are a list of up to sixteen key events (duplicates included,
@@ -1443,6 +1474,12 @@ void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg);
  * convenience entry for direct callers. */
 int32_t slopsix_voice_word(uint8_t note, int32_t master_tune_q16,
                            int32_t pitch_offset);
+/* The same composition from an already-composed base word instead of a
+ * note.  Portamento supplies its current (or glissando) word here, since
+ * the glide runs in the same log-frequency domain as the note. */
+int32_t slopsix_voice_word_from_base(int32_t base_word,
+                                     int32_t master_tune_q16,
+                                     int32_t pitch_offset);
 int32_t slopsix_op_freq_from_voice(const slopsix_op_params *params,
                                    int32_t voice_word);
 int32_t slopsix_op_freq_word(uint8_t note, const slopsix_op_params *params,
@@ -1476,10 +1513,9 @@ void slopsix_voice_render_block(slopsix_voice_engine *voice,
  * the live patch, keying it as the firmware's VOICE_ADD does (envelopes
  * out of silence, the pitch EG reset to its initial level, the phases
  * reset when the patch's OSC KEY SYNC bit is set); the release does the
- * VOICE_REMOVE side; the frequency rewrite composes the effective note,
- * the master tune and the voice's current pitch offset into every
- * operator's phase increment, as the firmware's PORTA_PROCESS does at
- * its every-second-tick cadence. */
+ * VOICE_REMOVE side; the frequency rewrite composes the portamento (or
+ * glissando) word, the master tune and the voice's current pitch offset
+ * into every operator's phase increment. */
 void slopsix_voice_engine_note_on(slopsix_context_state *state,
     slopsix_voice *slot, slopsix_voice_engine *engine);
 void slopsix_voice_engine_release(slopsix_voice_engine *engine);
@@ -1491,6 +1527,29 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
 void slopsix_voice_engine_update_ams(slopsix_context_state *state,
     slopsix_voice_engine *engine);
 void slopsix_refresh_pitch(slopsix_context_state *state);
+
+/* ------------------------------------------------------- portamento (P-06) */
+
+/* The pitch-EG rate table's entry, shared with the portamento rate law:
+ * portamento time 0..99 indexes it as `99 - time`. */
+uint8_t slopsix_pitch_eg_rate_value(uint8_t rate);
+
+/* One voice's portamento step, in the firmware's own words.  The step is
+ * proportional to the distance's high byte (its `>> 2` quarters plus
+ * one) times the cached rate; it clamps at the target.  When glissando
+ * is on, the glissando word walks toward the new portamento word in
+ * semitone-quantized steps and is the returned output word; otherwise
+ * the portamento word itself is returned.  `current` and `gliss` are
+ * updated in place. */
+int32_t slopsix_porta_step_word(int32_t *current, int32_t target,
+                                int32_t *gliss, uint8_t rate,
+                                bool glissando);
+
+/* The per-tick PORTA_PROCESS over one half of the voice bank.  It steps
+ * the given bank (0 = voices 0..7, 1 = voices 8..15) and returns a bit
+ * mask of the voices whose audible word changed, so the caller rewrites
+ * exactly those phase increments. */
+uint16_t slopsix_porta_process(slopsix_context_state *state, unsigned bank);
 
 /* ------------------------------------------------- the envelope (Phase 3) */
 

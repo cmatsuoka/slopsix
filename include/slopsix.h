@@ -192,6 +192,37 @@ slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on);
  * behaviour follow the hardware's function panel. */
 slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono);
 
+/* ------------------------------------------------------------- portamento */
+
+/* The hardware's two portamento modes.  In fingered mode a legato press
+ * glides without the pedal; in full-time mode the pedal must be held, and
+ * a new note also drags pedal-sustained and released voices along. */
+typedef enum {
+    SLOPSIX_PORTA_FINGERED = 0,
+    SLOPSIX_PORTA_FULL_TIME
+} slopsix_portamento_mode;
+
+/* Portamento time, 0..99 as on the function panel.  0 is the
+ * instantaneous setting; a larger value lengthens the glide (the hardware
+ * derives a rate increment from its pitch-EG rate table).  A larger value
+ * is clamped and reported as SLOPSIX_ERR_RANGE. */
+slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
+    uint8_t time_0_99);
+
+/* Portamento mode.  An out-of-range enumerator reports
+ * SLOPSIX_ERR_INVALID and leaves the mode unchanged. */
+slopsix_error slopsix_set_portamento_mode(slopsix_context ctx,
+    slopsix_portamento_mode mode);
+
+/* Portamento pedal.  In polyphonic mode the pedal gates portamento
+ * entirely; in full-time mono mode it does too, while fingered mono mode
+ * glides on legato presses regardless. */
+slopsix_error slopsix_set_portamento_pedal(slopsix_context ctx, bool on);
+
+/* Glissando: quantise the glide into semitone steps, as the hardware's
+ * GLISSANDO function parameter does. */
+slopsix_error slopsix_set_glissando(slopsix_context ctx, bool on);
+
 /* ------------------------------------------------------------------ pitch */
 
 /* Pitch bend: 14-bit, 0x2000 centred (MIDI convention).  The engine

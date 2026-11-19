@@ -42,7 +42,7 @@ read together.
 | P-03 | Fixed-frequency mode | **Partial (firmware + model):** fixed-mode composition is pinned (`opPitch>>2` + detune; no voice pitch, master tune, bend, pitch EG or LFO); the fine term uses the raw serialised 0..127 byte, not the ratio table or a modulo-100 index. The Hz formula remains model-derived. |
 | P-04 | Detune | **Resolved (firmware + model):** 4-bit register (3-bit magnitude + sign), −7..+7; one step is 1/1024 octave ≈1.17 cents (4 units in the engine's 4096/octave word). |
 | P-05 | Pitch bend quantization | **Resolved (firmware):** 14-bit MIDI bend, hardware range and step, curve and quirks reproduced; the 48-byte step table is 16×3-byte groups with a big-endian word, stride confirmed. |
-| P-06 | Portamento | **Decided:** no engine portamento in v1; host glides. Rate law located for a later optional parameter. |
+| P-06 | Portamento | **Resolved (firmware):** the full PORTA_PROCESS law is implemented — the pitch-EG-table rate, the proportional step, the two modes and pedal, glissando, and the alternating half-bank update phase. |
 | P-07 | Micro-tuning (MK2) | **Open / deferred:** kept in scope; implementation waits on a table format. |
 
 ## Oscillator and phase modulation

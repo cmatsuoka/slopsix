@@ -1,8 +1,8 @@
 # Slopsix
 
-A dependency-free, integer-only, fixed-point FM synthesis library that
-emulates the DX7 sound generator, with optional extras behind
-compile-time feature macros.
+A dependency-free, 32-bit friendly, integer-only, fixed-point FM
+synthesis library that emulates the DX7 sound generator, with optional
+extras behind compile-time feature macros.
 
 The library renders into caller-supplied buffers, performs no I/O, and
 allocates only when a context is created. It aims to be more accurate
@@ -73,6 +73,18 @@ slopsix_error slopsix_note_off(slopsix_context ctx, uint8_t note);
 slopsix_error slopsix_all_notes_off(slopsix_context ctx);
 slopsix_error slopsix_set_sustain(slopsix_context ctx, bool on);
 slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono);
+```
+
+Portamento (`SLOPSIX_PORTA_FINGERED` or `SLOPSIX_PORTA_FULL_TIME`) and
+glissando:
+
+```c
+slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
+                                          uint8_t time_0_99);
+slopsix_error slopsix_set_portamento_mode(slopsix_context ctx,
+                                          slopsix_portamento_mode mode);
+slopsix_error slopsix_set_portamento_pedal(slopsix_context ctx, bool on);
+slopsix_error slopsix_set_glissando(slopsix_context ctx, bool on);
 ```
 
 Pitch and tuning:
