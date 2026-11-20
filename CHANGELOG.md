@@ -47,6 +47,11 @@ Add experimental DX7S personality.
   activation's voice silence now empties the unison group bookkeeping,
   so the following key takes the fresh trigger instead of stealing the
   silenced group and continuing its silence as a silent note.
+- Record the unison stack's key-sync alignment: with the patch's OSC KEY
+  SYNC set, a fresh stack's voices all start on the shared reset phase,
+  so a detune-0 stack is one voice amplified until the accumulators
+  diverge (or key sync is off). Deliberate per-voice application of the
+  key-sync rule, no behaviour change; pinned by the unison stage.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own

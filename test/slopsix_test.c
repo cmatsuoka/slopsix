@@ -3967,6 +3967,17 @@ static void stage_unison(void)
         check(count_voices(state, 60u, SLOPSIX_VOICE_ON) ==
                   SLOPSIX_VOICE_COUNT,
               "Unison Mono stacks all sixteen voices on one note");
+        /* OSC KEY SYNC pins the fresh stack on one phase: the key
+         * event resets every voice's operators together, so at detune 0
+         * a fresh stack is one voice amplified several times and the
+         * stack's independence comes from the free-running accumulators
+         * afterwards (or with key sync off).  The alignment is the
+         * key-sync rule applied per voice, deliberate. */
+        check(state->patch.osc_sync &&
+              state->engines[0].ops[0].phase == 0 &&
+              state->engines[7].ops[0].phase == 0 &&
+              state->engines[15].ops[0].phase == 0,
+              "a key-synced fresh stack aligns its voices on one phase");
         check(state->engines[3].lfo.phase == 0x7FFFu &&
               state->engines[9].lfo.phase == 0x7FFFu,
               "the fresh stack's key events seed their LFOs in Multi");
