@@ -1153,9 +1153,30 @@ slopsix_error slopsix_set_mono_mode(slopsix_context ctx, bool mono)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
-    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_set_mono_mode(&impl->dx7, mono);
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        /* The DX7S has no separate mono switch: mono/poly is its own key
+         * mode, so this setter maps onto it.  Translating through the
+         * key-mode switch also keeps the two controls synchronized - the
+         * Mk1 field the key mode shares would otherwise desync (a Mono
+         * key mode whose flag was cleared by this setter allocated the
+         * polyphonic path, and a Poly key mode under this setter's flag
+         * allocated the mono one), and re-homes the held keys when the
+         * mapped switch leaves a unison mode. */
+        {
+            slopsix_key_mode mapped = mono ? SLOPSIX_KEY_MONO
+                                           : SLOPSIX_KEY_POLY;
+
+            if (impl->dx7.key_mode == (uint8_t)mapped) {
+                return SLOPSIX_OK;
+            }
+            return slopsix_set_key_mode(ctx, mapped);
+        }
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
     default:
         return SLOPSIX_ERR_UNSUPPORTED;
     }

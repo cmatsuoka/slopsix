@@ -22,6 +22,12 @@ Add experimental DX7S personality.
   the held voices mono cannot own (the pedal defers these releases).
   Re-applying the current mode is a no-op, so it cannot clear a live
   stack's groups or flatten its detune.
+- Synchronize the DX7S's `slopsix_set_mono_mode` with its key mode: the
+  DX7S has no separate mono switch, so the setter now maps onto the key
+  mode (mono-on = Mono, mono-off = Poly) and reuses the key-mode switch's
+  re-homing. Previously a Mono key mode under `set_mono_mode(false)`
+  allocated the polyphonic path and a Poly key mode under
+   `set_mono_mode(true)` allocated the mono one.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own

@@ -3348,6 +3348,30 @@ static void stage_personality_params(void)
               state->patch.peg_velocity == 0u &&
               state->patch.peg_rate_scaling == 0u,
               "reset restores the DX7S-only parameters' defaults");
+
+        /* Mono/poly and the key mode are one control on the DX7S: the
+         * setter maps onto the key mode instead of leaving the shared
+         * Mk1 field desynced from it, so a Mono key mode under
+         * set_mono_mode(false) cannot allocate the polyphonic path any
+         * more and vice versa. */
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_set_mono_mode(ctx, false);
+        check(state->key_mode == (uint8_t)SLOPSIX_KEY_POLY &&
+              state->mono == false,
+              "mono-off maps onto the key mode's Poly");
+        slopsix_set_mono_mode(ctx, true);
+        check(state->key_mode == (uint8_t)SLOPSIX_KEY_MONO &&
+              state->mono == true,
+              "mono-on maps onto the key mode's Mono");
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        check(state->mono == false && state->key_mode ==
+                  (uint8_t)SLOPSIX_KEY_UNISON_POLY,
+              "the key mode switch keeps the mapped field in step");
+        slopsix_set_mono_mode(ctx, true);
+        check(state->mono == true &&
+              state->key_mode == (uint8_t)SLOPSIX_KEY_MONO,
+              "the mapped mono switch overrides a unison key mode");
+        slopsix_set_mono_mode(ctx, false);
         slopsix_destroy_context(ctx);
     }
 #endif
