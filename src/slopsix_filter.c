@@ -17,9 +17,9 @@
  *
  * This file is the shared filter core and the DX7's own tail: the
  * transform, the cascade and the rate scaling are signal-domain agnostic,
- * while each personality supplies its own analog prototype
- * (slopsix_filter_init_with).  The DX7 prototype lives here; the DX7S's
- * lives in src/dx7s/slopsix_filter.c.
+ * while each personality supplies its own analog prototype and corner
+ * (slopsix_filter_init_with).  The DX7 prototype is the generated table
+ * here; the DX7S's is reached through src/dx7s/slopsix_filter.c.
  *
  * The rate.
  *
@@ -52,10 +52,11 @@
  *
  *   kappa = (fs0 / fs) * tan (pi fc / fs0) / tan (pi fc / fs)
  *
- * so that the response's -3 dB point stays at the reference's corner
- * (17.02 kHz) whatever the host's rate.  The scale is a constant, so the
- * response's shape is warped with the rate; the corner - the most audible
- * feature of the curve - stays put.
+ * so that the response's -3 dB point stays at the personality's corner
+ * (each tail's own constant; see SLOPSIX_FILTER_CORNER_HZ and
+ * SLOPSIX_DX7S_FILTER_CORNER_HZ) whatever the host's rate.  The scale is
+ * a constant, so the response's shape is warped with the rate; the
+ * corner - the most audible feature of the curve - stays put.
  *
  * The arithmetic is integer-only: the coefficients are Q30, the signal is
  * the DAC's code in Q12 (the analog stage's output is continuous, so the
@@ -81,18 +82,12 @@ static const uint8_t slopsix_filter_order[SLOPSIX_FILTER_SECTIONS] = {
 typedef char slopsix_filter_cascade_check
     [SLOPSIX_FILTER_SECTIONS == 3 ? 1 : -1];
 
-/* The reference's -3 dB frequency, in Hz: the corner the rate scaling
- * keeps in place (the research page's response table: -3.00 dB at
- * 17.02 kHz).  It is the anchor rate's -3 dB point of the candidate fit,
- * so the anchor rate's design is this prototype unchanged (kappa = 1). */
+/* The DX7 tail's -3 dB corner, in Hz: the corner the rate scaling keeps in
+ * place.  It matches the generated prototype's own -3 dB point, so the
+ * anchor rate's design is the prototype unchanged (kappa = 1).  This is the
+ * base research fit's measured 17.02 kHz corner.  Each personality passes
+ * its own corner, so this is only the DX7 default. */
 #define SLOPSIX_FILTER_CORNER_HZ 17020
-
-/* The lowest host rate that can carry the corner: below twice the corner
- * the corner would sit at or above the host's Nyquist, and the reference's
- * response is flat up to the corner, so the filter is then transparent.
- * The reference's response table: -0.24 dB at 16 kHz, so the curve is
- * flat well below the corner. */
-#define SLOPSIX_FILTER_MIN_RATE (2u * SLOPSIX_FILTER_CORNER_HZ)
 
 /* The transform's fixed point: Q24 intermediates, Q30 results.  The
  * prototype's Q30 values are scaled down by six bits and the results are
@@ -190,18 +185,18 @@ static int64_t slopsix_filter_clamp_q30(int64_t value)
 }
 
 /* The rate scaling: the prototype's frequency axis is scaled by kappa so
- * that the response's -3 dB point stays at the reference's corner.
+ * that the response's -3 dB point stays at the personality's corner.
  *
  *   kappa = (fs0 / fs) * tan (pi fc / fs0) / tan (pi fc / fs)
  *
  * The two tangents are computed by the same routine, so at the anchor
  * rate they are equal and kappa is exactly one: the anchor rate's design
  * is the prototype unchanged. */
-static int64_t slopsix_filter_kappa_q30(uint32_t sample_rate)
+static int64_t slopsix_filter_kappa_q30(uint32_t corner_hz,
+    uint32_t sample_rate)
 {
     /* pi * the corner, in Q24. */
-    int64_t corner_q24 = (int64_t)SLOPSIX_FILTER_CORNER_HZ *
-                         SLOPSIX_FILTER_PI_Q24;
+    int64_t corner_q24 = (int64_t)corner_hz * SLOPSIX_FILTER_PI_Q24;
     int64_t anchor_tan;
     int64_t host_tan;
     int64_t ratio_q30;
@@ -394,18 +389,18 @@ static int32_t slopsix_filter_step_first(slopsix_filter_section *section,
 /* The filter's design at a host rate, and its state cleared.
  *
  * A host rate that cannot carry the corner gets a transparent filter: the
- * reference's response is flat below the corner, and the corner itself is
- * at or above the host's Nyquist.  A rate above the cadences' cap is
- * clamped like the cadence gate clamps its rate: the bilinear transform's
- * Q24 products stay inside 64 bits only up to there, and above it the
- * design overflows instead of degenerating.
+ * personality prototype's response is flat below the corner, and the
+ * corner itself is at or above the host's Nyquist.  A rate above the
+ * cadences' cap is clamped like the cadence gate clamps its rate: the
+ * bilinear transform's Q24 products stay inside 64 bits only up to there,
+ * and above it the design overflows instead of degenerating.
  *
- * The prototype is the personality's own: the DX7 and the DX7S bring
- * different analog tails, but the transform, the rate scaling and the
- * cascade's math are the same. */
+ * The prototype and the corner are the personality's own: the DX7 and the
+ * DX7S bring different analog tails, but the transform, the rate scaling
+ * and the cascade's math are the same. */
 void slopsix_filter_init_with(slopsix_filter *filter,
     const int32_t prototype[SLOPSIX_FILTER_SECTIONS][5],
-    uint32_t sample_rate)
+    uint32_t corner_hz, uint32_t sample_rate)
 {
     unsigned i;
 
@@ -415,7 +410,10 @@ void slopsix_filter_init_with(slopsix_filter *filter,
         sample_rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
     }
 
-    if (sample_rate <= SLOPSIX_FILTER_MIN_RATE) {
+    /* Below twice the corner the corner sits at or above the host's
+     * Nyquist: the prototype is flat below its corner, so the filter is
+     * transparent there. */
+    if (sample_rate <= 2u * corner_hz) {
         for (i = 0; i < SLOPSIX_FILTER_SECTIONS; i++) {
             filter->section[i].b0 = (int32_t)((int64_t)1 << 30);
         }
@@ -423,7 +421,8 @@ void slopsix_filter_init_with(slopsix_filter *filter,
     }
 
     {
-        int64_t kappa_q24 = slopsix_filter_kappa_q30(sample_rate) >> 6;
+        int64_t kappa_q24 =
+            slopsix_filter_kappa_q30(corner_hz, sample_rate) >> 6;
         int64_t r_q24 = ((int64_t)sample_rate << SLOPSIX_FILTER_Q24) /
                         (int64_t)SLOPSIX_DEFAULT_SAMPLE_RATE;
 
@@ -439,7 +438,8 @@ void slopsix_filter_init_with(slopsix_filter *filter,
  * design. */
 void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate)
 {
-    slopsix_filter_init_with(filter, slopsix_filter_prototype, sample_rate);
+    slopsix_filter_init_with(filter, slopsix_filter_prototype,
+        SLOPSIX_FILTER_CORNER_HZ, sample_rate);
 }
 
 /* One sample through the filter: the DAC's code in, the analog stage's

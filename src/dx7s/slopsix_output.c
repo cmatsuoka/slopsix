@@ -19,7 +19,8 @@
  *
  * The value that leaves the DAC step is a 16-bit code (range -32768..32767).
  * The filter that sits after the DAC models the board's analog
- * reconstruction filter (the DX7S's own stage, different from the Mk1's);
+ * reconstruction filter (the DX7S's own stage; the service manual shows
+ * Mk1-class component values, but the exact response is unresolved), and
  * its output is continuous, so the integer grid is not preserved.
  *
  * This translation unit is on the per-sample render path and is compiled

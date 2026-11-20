@@ -2095,12 +2095,12 @@ static int output_near(int16_t got, int expect, int tolerance)
  * alone.
  */
 
-/* The prototype, as the research page's candidate fit (the table the
- * generator emits). */
+/* The prototype, as the generator emits it: the base research fit rescaled
+ * to the DX7 tail's measured 17.02 kHz corner. */
 static const int32_t filter_prototype[3][5] = {
-    { 535498195, 535498195, 0, -2745435, 0 },
-    { 610876461, 1221752922, 610876461, 762572659, 607191361 },
-    { 953291420, 1906582839, 953291420, 1794846297, 944577557 }
+    { 535692986, 535692986, 0, -2355853, 0 },
+    { 611162297, 1222324595, 611162297, 763595718, 607311647 },
+    { 953404960, 1906809919, 953404960, 1795222135, 944655879 }
 };
 
 /* A sine wave: the phase runs in 32 bits over a whole period and the
@@ -2144,16 +2144,46 @@ static int32_t harness_sin(uint32_t phase)
     return value;
 }
 
-/* The filter's gain at a frequency, as a Q16 ratio: a sine of that
- * frequency runs through the filter and the steady-state amplitude ratio
- * is read back. */
+/* The integer square root, rounded down, of a 64-bit unsigned value. */
+static uint64_t harness_isqrt(uint64_t value)
+{
+    uint64_t result = 0;
+    uint64_t bit = (uint64_t)1 << 62;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (value >= result + bit) {
+            value -= result + bit;
+            result = (result >> 1) + bit;
+        } else {
+            result >>= 1;
+        }
+        bit >>= 2;
+    }
+
+    return result;
+}
+
+/* The gain of the last full cycles of a run: the sum of the squares of the
+ * input and of the output.  The RMS ratio is used rather than the peak,
+ * because a probe frequency that divides the rate exactly (16 kHz at
+ * 48 kHz is three samples a cycle) has no sample on the peak; the RMS of a
+ * sampled sine is its amplitude over sqrt(2) regardless.  The output is in
+ * Q12 of the input's codes, so the amplitude ratio carries that shift:
+
+ *   gain_q16^2 = 256 * out_sum / in_sum. */
 static int32_t filter_gain_q16(uint32_t sample_rate, uint32_t freq)
 {
     slopsix_filter filter;
     uint32_t step = (uint32_t)(((uint64_t)freq << 32) / sample_rate);
     uint32_t phase = 0;
-    int32_t peak_in = 0;
-    int32_t peak_out = 0;
+    uint64_t in_sum = 0;
+    uint64_t out_sum = 0;
+    uint64_t whole;
+    uint64_t rem;
+    uint64_t square;
     int i;
 
     slopsix_filter_init(&filter, sample_rate);
@@ -2166,27 +2196,64 @@ static int32_t filter_gain_q16(uint32_t sample_rate, uint32_t freq)
         phase += step;
 
         if (i >= 2048) {
-            int32_t mag_in = code < 0 ? -code : code;
-            int32_t mag_out = out < 0 ? -out : out;
-
-            if (mag_in > peak_in) {
-                peak_in = mag_in;
-            }
-            if (mag_out > peak_out) {
-                peak_out = mag_out;
-            }
+            in_sum += (uint64_t)((int64_t)code * code);
+            out_sum += (uint64_t)((int64_t)out * out);
         }
     }
 
-    if (peak_in == 0) {
+    if (in_sum == 0) {
         return 0;
     }
 
-    /* The filter's output is in Q12 of a DAC code, the input's peak is
-     * in codes, so the ratio carries the Q12 shift. */
-    return (int32_t)(((int64_t)peak_out << 16) /
-                     ((int64_t)peak_in << SLOPSIX_FILTER_Q12));
+    /* 256 * out_sum / in_sum without overflowing the product: the quotient
+     * and the fraction are taken separately. */
+    whole = out_sum / in_sum;
+    rem = out_sum % in_sum;
+    square = whole * 256u + (rem * 256u) / in_sum;
+
+    return (int32_t)harness_isqrt(square);
 }
+
+#ifdef SLOPSIX_DX7S
+/* The DX7S tail's gain at a frequency, measured the same way but through
+ * the personality's own prototype and corner. */
+static int32_t filter_gain_dx7s_q16(uint32_t sample_rate, uint32_t freq)
+{
+    slopsix_filter filter;
+    uint32_t step = (uint32_t)(((uint64_t)freq << 32) / sample_rate);
+    uint32_t phase = 0;
+    uint64_t in_sum = 0;
+    uint64_t out_sum = 0;
+    uint64_t whole;
+    uint64_t rem;
+    uint64_t square;
+    int i;
+
+    slopsix_dx7s_filter_init(&filter, sample_rate);
+
+    for (i = 0; i < 8192; i++) {
+        int32_t code = harness_sin(phase) >> 4;
+        int32_t out = slopsix_filter_process(&filter, code);
+
+        phase += step;
+
+        if (i >= 2048) {
+            in_sum += (uint64_t)((int64_t)code * code);
+            out_sum += (uint64_t)((int64_t)out * out);
+        }
+    }
+
+    if (in_sum == 0) {
+        return 0;
+    }
+
+    whole = out_sum / in_sum;
+    rem = out_sum % in_sum;
+    square = whole * 256u + (rem * 256u) / in_sum;
+
+    return (int32_t)harness_isqrt(square);
+}
+#endif
 
 /* The closeness of a measured gain to its expectation, in percent. */
 static int filter_gain_near(int32_t got, int32_t expect, int percent)
@@ -2256,20 +2323,17 @@ static void stage_filter(void)
               "the filter's DC gain is one on the negative side too");
     }
 
-    /* The response at the reference's frequencies: the passband, the
-     * +0.78 dB peak at 14.65 kHz, the -3 dB corner at 17.02 kHz and the
-     * stopband at 20 kHz. */
+    /* The response at the DX7 tail's measured frequencies: the passband,
+     * the -3 dB corner at 17.02 kHz and the stopband above it. */
     check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 1000),
                            65536, 2), "the passband is flat at 1 kHz");
-    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 14650),
-                           71692, 3), "the peak at 14.65 kHz is +0.78 dB");
     check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 17020),
                            46400, 3), "the corner at 17.02 kHz is -3 dB");
     check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 20000),
-                           13184, 5), "the stopband at 20 kHz is -13.9 dB");
+                           13170, 5), "the stopband at 20 kHz is -14 dB");
 
     /* The rate scaling: the corner stays where it is at another host
-     * rate, and the passband stays flat. */
+     * rate, and the low passband stays flat. */
     check(filter_gain_near(filter_gain_q16(48000u, 1000), 65536, 2),
           "the 48 kHz design's passband is flat");
     check(filter_gain_near(filter_gain_q16(48000u, 17020), 46400, 3),
@@ -2278,10 +2342,26 @@ static void stage_filter(void)
           "the 44.1 kHz design keeps the corner at -3 dB");
 
     /* A host rate that cannot carry the corner: the filter is
-     * transparent, because the reference's response is flat below the
-     * corner and the corner is above the host's Nyquist. */
-    check(filter_gain_near(filter_gain_q16(32000u, 10000), 65536, 2),
+     * transparent, because the prototype is flat below the corner and the
+     * corner is at or above the host's Nyquist.  The DX7's corner is
+     * 17.02 kHz, so 34.04 kHz is the boundary; the probe sits below the
+     * 32 kHz design's 16 kHz Nyquist. */
+    check(filter_gain_near(filter_gain_q16(32000u, 5000), 65536, 2),
           "a rate that cannot carry the corner leaves the filter flat");
+
+#ifdef SLOPSIX_DX7S
+    /* The DX7S tail's corner is 20 kHz. */
+    check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
+                                                1000), 65536, 2),
+          "the DX7S passband is flat at 1 kHz");
+    check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
+                                                20000), 46400, 3),
+          "the DX7S corner at 20 kHz is -3 dB");
+    check(filter_gain_near(filter_gain_dx7s_q16(48000u, 20000), 46400, 3),
+          "the 48 kHz DX7S design keeps the corner at -3 dB");
+    check(filter_gain_near(filter_gain_dx7s_q16(44100u, 20000), 46400, 3),
+          "the 44.1 kHz DX7S design keeps the corner at -3 dB");
+#endif
 }
 
 static void stage_output(void)

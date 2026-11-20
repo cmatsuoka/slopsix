@@ -50,11 +50,18 @@
   Scaling 0–7, Unison Detune 0–7, Forced Damp continuation vs retrigger,
   plus the voice/performance/MIDI data tables.
 - **Yamaha DX7S Complete Service Manual** —
-  <https://archive.org/details/DX7S-SM>. Block diagram, IC block diagrams
-  and parts list for the DX7S board: `HD63B03YP` main CPU, `HD6805S1A33P`
-  sub-CPU, `YM2604` OPS2 operators, `YM3609` EGM envelope/LFO, `PCM54HP`
-  16-bit DAC and `M58990P-1` ADC. Establishes that the DX7S is DX7II-class
-  hardware, not the Mk1's YM21280/YM21290 + companded 12-bit output.
+  <https://archive.org/details/DX7S-SM>. Block diagram, IC block diagrams,
+  parts list and overall circuit diagram for the DX7S board: `HD63B03YP`
+  main CPU, `HD6805S1A33P` sub-CPU, `YM2604` OPS2 operators, `YM3609` EGM
+  envelope/LFO, `PCM54HP` 16-bit DAC and `M58990P-1` ADC. Establishes that
+  the DX7S is DX7II-class hardware, not the Mk1's YM21280/YM21290 +
+  companded 12-bit output. The Overall Circuit Diagram (p. 40) also shows
+  the post-DAC output chain: `PCM54HP` → 330 Ω → `74HC4066`
+  sample-and-hold → buffered summing → a discrete multi-section
+  3.3 kΩ/1.2 kΩ, 0.0082/0.015/0.001/0.068 µF low-pass, with `NJM4558DV`
+  op-amps (no `TL072`). Those are the Mk1-class filter values, so the sheet
+  does not support a distinct 20 kHz DX7S reconstruction corner; the exact
+  response and the Mk1-vs-DX7S brightness cause remain open.
 - **Yamaha TX7 Service Manual** — <https://archive.org/details/TX7SM>. The
   compander and `SF0–SF3` shift-data description, plus memory-map and
   interrupt flowcharts.

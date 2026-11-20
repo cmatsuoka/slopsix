@@ -4,6 +4,8 @@
 
 Add experimental DX7S personality.
 
+- Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
+  corner; the DX7S tail stays at 20 kHz.
 - Add experimental, unverified DX7S personality.
 - Add DX7S-only voice parameter setters, gated by personality.
 - Implement the DX7S pitch EG's range, velocity switch and rate scaling.

@@ -132,12 +132,13 @@ typedef struct {
  * through the filter, the DAC's code in and the analog stage's output out
  * (Q12 of a code). */
 void slopsix_filter_init(slopsix_filter *filter, uint32_t sample_rate);
-/* The same design, from a personality-supplied analog prototype.  Each
- * personality brings its own tail (the DX7's prototype differs from the
- * DX7S's); the core math and the rate scaling are shared. */
+/* The same design, from a personality-supplied anchor-rate prototype and
+ * the personality's corner (Hz).  Each personality brings its own tail (its
+ * prototype is rescaled to the personality's corner); the core math and the
+ * rate scaling are shared. */
 void slopsix_filter_init_with(slopsix_filter *filter,
     const int32_t prototype[SLOPSIX_FILTER_SECTIONS][5],
-    uint32_t sample_rate);
+    uint32_t corner_hz, uint32_t sample_rate);
 int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 
 /* ------------------------------------------------- operator core (Phase 2) */
@@ -1149,8 +1150,8 @@ void slopsix_dx7_all_notes_off(slopsix_context_state *state);
 
 #if SLOPSIX_HAS_DX7S
 /* The DX7S personality's own entry points.  They live under src/dx7s/ and
- * are compiled in only when SLOPSIX_DX7S is defined; the state
- * is the shared context state (the DX7S is a superset of the DX7 path). */
+ * are compiled in only when SLOPSIX_DX7S is defined; the state is the
+ * shared context state (the DX7S is a superset of the DX7 path). */
 void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate);
 void slopsix_dx7s_reset(slopsix_context_state *state);
 void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
@@ -1183,7 +1184,14 @@ void slopsix_dx7s_voice_bus(const int32_t *voice_out, int32_t *bus,
 /* The DX7S analog tail (src/dx7s/slopsix_filter.c): the personality's own
  * reconstruction prototype, designed through the shared filter core.  The
  * 16-bit DAC's codes enter the core directly (no downshift: the core takes
- * the code in Q12, so a full-scale 16-bit code is a full-scale signal). */
+ * the code in Q12, so a full-scale 16-bit code is a full-scale signal).
+ *
+ * The DX7S prototype is a generated table (the base fit rescaled to a
+ * 20 kHz corner); it is compiled only into the DX7S personality. */
+#ifdef SLOPSIX_DX7S
+extern const int32_t
+    slopsix_dx7s_filter_prototype[SLOPSIX_FILTER_SECTIONS][5];
+#endif
 void slopsix_dx7s_filter_init(slopsix_filter *filter, uint32_t sample_rate);
 void slopsix_dx7s_output_mix(void *state, int32_t bus,
     int16_t *left, int16_t *right);
