@@ -145,13 +145,6 @@ slopsix_context slopsix_create_context(slopsix_engine engine,
 #else
         break;
 #endif
-    case SLOPSIX_ENGINE_DX100:
-        /* The DX100 personality is planned but is not part of any build
-         * yet: its translation units arrive with the DX100 phase.  The
-         * request is rejected here, predictably, rather than producing a
-         * context that could not render (library page §0.2's rule: an
-         * absent personality is rejected at creation). */
-        return NULL;
     default:
         return NULL;
     }

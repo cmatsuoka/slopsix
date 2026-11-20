@@ -22,10 +22,9 @@
  *     request for an absent engine fails at creation (NULL) instead of
  *     failing later at render time.
  *   - The DX7 is always present and is the default engine.
- *   - The DX7S and DX100 personalities are planned but not implemented
- *     yet; the SLOPSIX_HAS_DX7S and SLOPSIX_HAS_DX100 capability macros
- *     report them as absent until their translation units are part of the
- *     build.
+ *   - The DX7S personality is experimental; the SLOPSIX_HAS_DX7S
+ *     capability macro reports it as absent when the personality is not
+ *     compiled in.
  *
  * This header is the only public header; internals live in
  * src/slopsix_internal.h.
@@ -50,10 +49,9 @@
  * compile time, so a program that uses an optional feature can be built
  * for a build without it.
  *
- * SLOPSIX_HAS_DX7S and SLOPSIX_HAS_DX100 follow the *presence of the
- * personality's own translation units*: SLOPSIX_DX7S resp. SLOPSIX_DX100
- * selects the configuration, and SLOPSIX_DX7S_PERSONALITY resp.
- * SLOPSIX_DX100_PERSONALITY says that the personality itself is compiled
+ * SLOPSIX_HAS_DX7S follows the *presence of the personality's own
+ * translation units*: SLOPSIX_DX7S selects the configuration, and
+ * SLOPSIX_DX7S_PERSONALITY says that the personality itself is compiled
  * in.  Until the personality's phase lands the second macro is not
  * defined and the capability reports 0 - a context for that engine is
  * then rejected at creation. */
@@ -63,11 +61,7 @@
 #else
 #define SLOPSIX_HAS_DX7S 0
 #endif
-#if defined(SLOPSIX_DX100) && defined(SLOPSIX_DX100_PERSONALITY)
-#define SLOPSIX_HAS_DX100 1
-#else
-#define SLOPSIX_HAS_DX100 0
-#endif
+
 
 /* Optional features beyond the original instruments.  The pan control is
  * the first of these; with SLOPSIX_EXTRAS off the synths stay mono at
@@ -117,8 +111,7 @@ typedef void *slopsix_context;
 typedef enum {
     SLOPSIX_ENGINE_DX7 = 0,
     SLOPSIX_ENGINE_DX7S = 1,
-    SLOPSIX_ENGINE_DX100 = 2,
-    SLOPSIX_ENGINE_COUNT = 3
+    SLOPSIX_ENGINE_COUNT = 2
 } slopsix_engine;
 
 /* ---------------------------------------------------------------- context */
@@ -126,7 +119,7 @@ typedef enum {
 /* Allocate and initialize a context for `engine`.  0 selects the engine's
  * default rate (49,096 Hz for the DX7).  Returns NULL on failure,
  * including when the requested engine is not compiled into this build
- * (see SLOPSIX_HAS_DX7S and SLOPSIX_HAS_DX100). */
+ * (see SLOPSIX_HAS_DX7S). */
 slopsix_context slopsix_create_context(slopsix_engine engine,
     uint32_t sample_rate);
 

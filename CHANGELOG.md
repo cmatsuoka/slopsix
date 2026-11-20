@@ -2,15 +2,19 @@
 
 ## 0.3.0 (unreleased)
 
+Add experimental DX7S personality.
+
 - Add experimental, unverified DX7S personality.
 - Add DX7S-only voice parameter setters, gated by personality.
-- Implement the DX7S pitch envelope's range, velocity switch and rate
-  scaling.
+- Implement the DX7S pitch EG's range, velocity switch and rate scaling.
 - Add DX7S unison modes: fixed unison groups, oldest-group-first
   stealing with envelope continuation, per-group pedal and all-notes-off,
   and a provisional unison detune spread (neutral by default).
+- Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)
+
+Performance optimization and output gain control.
 
 - Add output volume control (`slopsix_set_output_gain`) and rename
   `slopsix_set_master_volume` to `slopsix_set_midi_volume`.

@@ -6,7 +6,6 @@
 #   check-dx7      the default configuration (feature macros off)
 #   check-dx7s     the DX7S personality build
 #   check-dx7s-extras the DX7S personality with the extras conveniences
-#   check-dx100    the DX100 personality build
 #   check-extras   the extras build (conveniences beyond the original hardware)
 #   example        build the OpenAL terminal keyboard player
 #   validate-render build the slopsix side of the validation loop
@@ -36,11 +35,6 @@ ifeq ($(CONFIG),dx7)
   TESTBIN := slopsix_test
   TESTRUN := ./slopsix_test
 endif
-# The DX100 configuration.  The macro selects the configuration; the
-# personality's own translation units (and the SLOPSIX_DX100_PERSONALITY
-# macro that says the personality is compiled in) arrive with the DX100
-# implementation phase.  Until then the build carries the DX7 only, and a
-# DX100 context is rejected at context creation.
 # The DX7S configuration.  SLOPSIX_DX7S selects the configuration and
 # SLOPSIX_DX7S_PERSONALITY says the personality's own translation units
 # under src/dx7s/ are part of the build; the two travel together here.
@@ -55,12 +49,6 @@ endif
 # split) are built and tested.
 ifeq ($(CONFIG),dx7s-extras)
   FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY -DSLOPSIX_EXTRAS
-  ARCHIVE := build/$(CONFIG)/libslopsix.a
-  TESTBIN := build/$(CONFIG)/slopsix_test
-  TESTRUN := $(TESTBIN)
-endif
-ifeq ($(CONFIG),dx100)
-  FEATURE_DEFS := -DSLOPSIX_DX100
   ARCHIVE := build/$(CONFIG)/libslopsix.a
   TESTBIN := build/$(CONFIG)/slopsix_test
   TESTRUN := $(TESTBIN)
@@ -155,7 +143,7 @@ TABLES := build/tables/logsin_table.c \
           build/tables/freq_table.c \
           build/tables/filter_table.c
 
-.PHONY: all check check-dx7 check-dx7s check-dx7s-extras check-dx100 \
+.PHONY: all check check-dx7 check-dx7s check-dx7s-extras \
         check-extras example tables tables-install check-tables \
         validate-render validate clean
 
@@ -250,9 +238,6 @@ check-dx7s:
 
 check-dx7s-extras:
 	$(MAKE) CONFIG=dx7s-extras check
-
-check-dx100:
-	$(MAKE) CONFIG=dx100 check
 
 check-extras:
 	$(MAKE) CONFIG=extras check

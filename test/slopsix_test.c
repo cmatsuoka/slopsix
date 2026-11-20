@@ -4996,8 +4996,6 @@ static void stage_api(void)
     {
         slopsix_context dx7s =
             slopsix_create_context(SLOPSIX_ENGINE_DX7S, 0);
-        slopsix_context dx100 =
-            slopsix_create_context(SLOPSIX_ENGINE_DX100, 0);
         slopsix_context unknown =
             slopsix_create_context((slopsix_engine)99, 0);
 
@@ -5018,18 +5016,6 @@ static void stage_api(void)
 #else
         check(dx7s == NULL,
               "a DX7S context is rejected when the personality is absent");
-#endif
-#if SLOPSIX_HAS_DX100
-        check(dx100 != NULL,
-              "a DX100 context is created in a build with the personality");
-        if (dx100 != NULL) {
-            check(slopsix_context_engine(dx100) == SLOPSIX_ENGINE_DX100,
-                  "the DX100 context reports its engine");
-            slopsix_destroy_context(dx100);
-        }
-#else
-        check(dx100 == NULL,
-              "a DX100 context is rejected when the personality is absent");
 #endif
         check(unknown == NULL, "an unknown engine is rejected at creation");
     }
@@ -5481,8 +5467,6 @@ int main(int argc, char **argv)
 #else
     printf("configuration: DX7S configuration (personality units absent)\n");
 #endif
-#elif defined(SLOPSIX_DX100)
-    printf("configuration: DX100 personality enabled\n");
 #else
     printf("configuration: DX7 only\n");
 #endif
