@@ -1207,8 +1207,14 @@ slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
                 if (mode == SLOPSIX_LFO_MULTI) {
                     unsigned v;
 
-                    /* The per-voice LFOs start from the context-wide
-                     * LFO's current state; note-on then seeds a voice's
+                    /* The mode transition model (provisional, OQ-DX7S-01):
+                     * the per-voice LFOs exist only in Multi, and
+                     * entering Multi re-seeds all sixteen from the
+                     * context-wide LFO's current state - so a
+                     * Single/Multi round trip resets the voices'
+                     * independent histories.  The context LFO stays
+                     * parked through Multi and resumes, state untouched,
+                     * on entering Single.  Note-on then seeds a voice's
                      * own phase when the patch asks for LFO sync. */
                     for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
                         state->engines[v].lfo = state->lfo;

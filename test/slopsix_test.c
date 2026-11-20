@@ -3546,6 +3546,35 @@ static void stage_plfo(void)
               state->engines[1].lfo.amplitude,
           "two voices keyed apart show the per-voice modulation stagger");
 
+    /* The mode transitions (provisional model): entering Multi re-seeds
+     * every voice from the Single engine, whose own state stays parked
+     * through Multi and resumes untouched on the return, so the voices'
+     * independent histories do not survive a Single/Multi round trip. */
+    for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+        slopsix_lfo *lfo = &state->engines[v].lfo;
+
+        lfo->phase = (uint16_t)(0x0500u * v + 0x0100u);
+    }
+    {
+        uint16_t parked = state->lfo.phase;
+
+        check(slopsix_set_lfo_mode(ctx, SLOPSIX_LFO_SINGLE) == SLOPSIX_OK,
+              "the transition back to Single is reported");
+        check(state->engines[3].lfo.phase ==
+                  (uint16_t)(0x0500u * 3u + 0x0100u) &&
+              state->engines[12].lfo.phase ==
+                  (uint16_t)(0x0500u * 12u + 0x0100u),
+              "leaving Multi parks the voices untouched");
+        check(state->lfo.phase == parked,
+              "the Single engine resumes from its parked state");
+        check(slopsix_set_lfo_mode(ctx, SLOPSIX_LFO_MULTI) == SLOPSIX_OK,
+              "the transition back to Multi is reported");
+        check(state->engines[3].lfo.phase == state->lfo.phase &&
+              state->engines[12].lfo.phase == state->lfo.phase &&
+              state->engines[12].lfo.phase == parked,
+              "entering Multi re-seeds the voices from the Single engine");
+    }
+
     /* Reset returns the personality state to its defaults. */
     slopsix_reset(ctx);
     {

@@ -32,6 +32,11 @@ Add experimental DX7S personality.
   continues the envelopes (the Forced Damp Off steal) now also runs the
   LFO note-on resets, re-seeding the keyed voice's sync'd phase and
   clearing its patch delay's fade pair, like the fresh trigger does.
+- Record the DX7S LFO mode transition model: entering Multi re-seeds all
+  sixteen voices from the Single engine (a Single/Multi round trip resets
+  the voices' independent histories), and the Single engine stays parked
+  through Multi and resumes untouched on the return. Document-only
+  provisionally pinned by the harness (OQ-DX7S-01); no behaviour change.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own
