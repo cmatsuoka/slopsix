@@ -4195,6 +4195,29 @@ static void stage_unison(void)
               "the sixteen-voice stack is the bit-exact superposition of "
               "its voices");
 
+        /* A patch load silences every EGS voice; the silence empties
+         * the unison bookkeeping with it, so the next key event takes
+         * the fresh trigger instead of stealing the group and
+         * continuing the silenced envelopes as a silent note. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_process(ctx, render_buf_a, 200u);
+        check(state->unison_group_active[0] &&
+              state->engines[0].eg[0].level > 0,
+              "the pre-load key sounds and owns its group");
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        check(!state->unison_group_active[0] &&
+              state->voices[0].state == SLOPSIX_VOICE_ON &&
+              state->engines[0].eg[0].stage == 4u,
+              "the patch load silences the stack and empties the groups");
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_process(ctx, render_buf_a, 100u);
+        check(state->engines[0].eg[0].stage != 4u &&
+              state->engines[0].eg[0].level > 0,
+              "the post-load key takes a fresh trigger, not the silence");
+
         /* The pedal defers per group, all-notes-off acts as the poly
          * path's, and the groups clear at the end. */
         slopsix_reset(ctx);

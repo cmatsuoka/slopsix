@@ -263,7 +263,13 @@ static void slopsix_patch_parse(slopsix_context_state *state);
 /* PATCH_ACTIVATE opens with VOICE_RESET_EGS, which silences every EGS
  * voice before the new registers are loaded (research fw §5).  The
  * firmware leaves its CPU-side key-event buffer alone, so a key that is
- * still down keeps its voice allocated; it simply stops sounding. */
+ * still down keeps its voice allocated; it simply stops sounding.  On
+ * the DX7S that silence also takes the unison bookkeeping with it - a
+ * silenced group owns a note but sounds nothing, so a later key event
+ * would steal the group and continue the silence instead of the
+ * "released and struck again" fresh trigger; the emptied groups turn
+ * the next key into one.  Releasing the silenced keys themselves is the
+ * unison paths' orphan pass's job. */
 static void slopsix_patch_silence_voices(slopsix_context_state *state)
 {
     unsigned i;
@@ -273,6 +279,9 @@ static void slopsix_patch_silence_voices(slopsix_context_state *state)
             slopsix_voice_engine_silence(&state->engines[i]);
         }
     }
+#if SLOPSIX_HAS_DX7S
+    slopsix_dx7s_clear_groups(state);
+#endif
 }
 
 slopsix_error slopsix_set_voice(slopsix_context ctx, const uint8_t *data,

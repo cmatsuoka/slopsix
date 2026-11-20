@@ -43,6 +43,10 @@ Add experimental DX7S personality.
   per-tick register push is the engine's rewrite gate (the bend's own
   setters refresh immediately; both are deliberate). Pinned by the
   controller stage's checks.
+- Let the DX7S's next key event sound after a patch load: the patch
+  activation's voice silence now empties the unison group bookkeeping,
+  so the following key takes the fresh trigger instead of stealing the
+  silenced group and continuing its silence as a silent note.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own
