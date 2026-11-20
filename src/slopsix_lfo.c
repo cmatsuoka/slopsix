@@ -405,8 +405,11 @@ void slopsix_lfo_tick(slopsix_context_state *state)
  * own depth term (the firmware's per-tick MOD_PITCH_LOAD_TO_EGS adds it
  * before the multiply), times one byte of the sensitivity-scaled
  * amplitude, right by one.  The tick runs this with the fresh amplitude;
- * the controller setters run it with the last tick's, so a controller
- * change is audible without waiting for the next tick.
+ * the controller setters run it with the last tick's.  A controller
+ * change recomposes the register at once (the firmware recomputes its
+ * input sources at the event), and the voices hear the recomposed word
+ * at the next LFO tick, where the firmware's MOD_PITCH_LOAD_TO_EGS
+ * pushes the register.
  */
 void slopsix_mod_pitch_term_update_one(slopsix_context_state *state,
     slopsix_lfo *lfo)
@@ -445,7 +448,8 @@ void slopsix_mod_pitch_term_update(slopsix_context_state *state)
  * firmware's single 16-bit register word.  Both setters that change the
  * bend recompute it, so a bend change is audible without waiting for the
  * next tick; the controller setters recompose the term beside the bend
- * the same way.
+ * without a refresh, leaving the voices their next tick (the per-tick
+ * routine pushes the register).
  */
 int16_t slopsix_mod_pitch_word_one(const slopsix_context_state *state,
     const slopsix_lfo *lfo)

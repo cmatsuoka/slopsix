@@ -907,9 +907,14 @@ static void slopsix_dx7_set_master_tune(slopsix_context_state *state,
  * The recompose the three controller setters share (the firmware recomputes
  * MOD_PROCESS_INPUT_SOURCES on every controller event): the scaled inputs
  * and the two factors, then the pitch-modification word with the term
- * recomposed from the last tick's wave amplitude, so a controller change
- * to the pitch register is audible without waiting for the next LFO tick.
- * The amp-mod register itself follows on the next tick, as the firmware's
+ * recomposed from the last tick's wave amplitude.  The register
+ * arithmetic lands at once, but the voices' phase increments follow at
+ * the next LFO tick - the next tick is where the firmware's
+ * MOD_PITCH_LOAD_TO_EGS pushes the recomposed register to the EGS, and
+ * that push is the render loop's rewrite gate.  (The bend's own setters,
+ * whose word change is the bend alone, do refresh_pitch at once; a
+ * controller route is staged here instead, deliberate on both sides.)
+ * The amp-mod register follows at the same tick, as the firmware's
  * per-tick MOD_AMP_LOAD_TO_EGS pushes it.
  */
 static void slopsix_mod_refresh(slopsix_context_state *state)

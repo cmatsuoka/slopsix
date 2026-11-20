@@ -37,6 +37,12 @@ Add experimental DX7S personality.
   the voices' independent histories), and the Single engine stays parked
   through Multi and resumes untouched on the return. Document-only
   provisionally pinned by the harness (OQ-DX7S-01); no behaviour change.
+- Correct the controller-recompose documentation: a routed controller's
+  event recomposes the pitch-modification register at once, but the
+  sounding voices re-pitch at the next LFO tick, where the firmware's
+  per-tick register push is the engine's rewrite gate (the bend's own
+  setters refresh immediately; both are deliberate). Pinned by the
+  controller stage's checks.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own

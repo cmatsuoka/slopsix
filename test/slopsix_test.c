@@ -5305,6 +5305,36 @@ static void stage_ctrl(void)
                                          1u),
           "the centred bend leaves the recomposed word unchanged");
 
+    /* The register recomposes at the controller event; the voices hear
+     * it at the next tick, where the per-tick routine pushes it to the
+     * EGS - that push is the render loop's rewrite gate.  (The bend's
+     * setters refresh at once instead; the two are deliberate on both
+     * sides.)  The staged depth keeps the baseline's word at zero. */
+    {
+        int16_t tickplay[2u * 512u];
+        int32_t settled;
+        int32_t pushed = (int32_t)63u * (int32_t)((255u * 127u) >> 8);
+
+        lfo->pitch_mod_depth = 0u;
+        slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_BREATH, 0u);
+        check(state->lfo.pitch_mod_word == 0,
+              "the staged route leaves the register at its neutral word");
+        slopsix_note_on(ctx, 60u, 100u);
+        settled = state->engines[0].pitch_offset;
+        slopsix_set_ctrl_value(ctx, SLOPSIX_CTRL_BREATH, 64u);
+        check(state->lfo.pitch_mod_word ==
+                  (int16_t)slopsix_floor_div(pushed, 1u),
+              "the routed controller's event recomposes the register");
+        check(state->engines[0].pitch_offset == settled,
+              "the sounding voice keeps its increments until the tick");
+        slopsix_process(ctx, tickplay, 300u);
+        check(state->engines[0].pitch_offset ==
+                  settled + slopsix_floor_div(
+                                slopsix_floor_div(pushed, 1u),
+                                SLOPSIX_PITCH_MOD_TO_LOG_SHIFT),
+              "the voices re-pitch at the tick where the register is pushed");
+    }
+
     /* Reset returns the controller arithmetic to its zeros. */
     slopsix_reset(ctx);
     check(state->mod_amp_factor == 0u && state->mod_eg_bias_inv == 0u,
