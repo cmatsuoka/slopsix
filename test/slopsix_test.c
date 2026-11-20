@@ -21,9 +21,11 @@
  *               cadence and the poly/mono mode matrix
  *   lfo         the LFO: laws, waveforms, the two registers and cadence
  *   plfo        the DX7S per-voice LFO: shared recipes, per-voice delay
- *               and reset, the stagger and neutral Single-mode parity
+ *              and reset, the stagger and neutral Single-mode parity
+ *   pegr        the DX7S's pitch-EG composition: the range, the velocity
+ *              switch and the rate scaling, and the DX7's gate
  *   params      the DX7S-only parameters: gated per personality, their
- *               ranges and the neutral defaults
+ *              ranges and the neutral defaults
  *   ctrl        the controllers: scaling, routes and both registers
  *   filter      the analog tail: the reconstruction filter's design,
  *               its DC gain and its response
@@ -3556,6 +3558,165 @@ static void stage_plfo(void)
 #endif
 }
 
+/*
+ * The pitch-EG composition (D7S-4): the DX7S's range, velocity switch
+ * and rate scaling, and the gate that keeps them out of the DX7.
+ *
+ * The stage checks the DX7S's own law against the shared one, and then
+ * the gate: a DX7 context in a DX7S build must play the firmware's
+ * envelope whatever the shared patch state holds, because the composition
+ * is a personality hook and not a patch parameter the DX7 reads.
+ */
+
+/* The engine the last note-on keyed: the voices are allocated oldest
+ * first, so the newest one is the one with the newest sequence. */
+static slopsix_voice_engine *newest_engine(slopsix_context_state *state)
+{
+    slopsix_voice_engine *engine = &state->engines[0];
+    unsigned i;
+
+    for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
+        if (state->voices[i].seq == state->voice_seq) {
+            engine = &state->engines[i];
+        }
+    }
+    return engine;
+}
+
+static void stage_peg_range(void)
+{
+    slopsix_context ctx;
+    slopsix_context_state *state;
+
+    printf("stage peg range\n");
+
+    /* The DX7 personality: the firmware's plain envelope, whatever the
+     * shared patch state holds. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7 context");
+    if (ctx != NULL) {
+        state = SLOPSIX_CONTEXT(ctx);
+
+        check(state->pitch_eg_offset == slopsix_pitch_eg_offset,
+              "the DX7 plays the firmware's plain pitch envelope");
+#if defined(SLOPSIX_DX7S)
+        /* The shared patch state carries the DX7S's parameters, so a
+         * host that writes them straight into the shared state (rather
+         * than through the personality-gated setters) must still not
+         * change what the DX7 plays. */
+        state->patch.peg_range = SLOPSIX_PEG_RANGE_HALF_OCTAVE;
+        state->patch.peg_velocity = 1u;
+        state->patch.peg_rate_scaling = 7u;
+#endif
+        slopsix_note_on(ctx, 60u, 100u);
+        state = SLOPSIX_CONTEXT(ctx);
+        newest_engine(state)->pitch_eg.level =
+            SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&newest_engine(state)->pitch_eg) == -4096,
+              "the DX7's pitch envelope ignores the DX7S parameters");
+        slopsix_destroy_context(ctx);
+    }
+
+#if SLOPSIX_HAS_DX7S
+    /* The DX7S personality: its own law composes the envelope. */
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7S context");
+    if (ctx != NULL) {
+        slopsix_voice_engine *engine;
+
+        state = SLOPSIX_CONTEXT(ctx);
+
+        check(state->pitch_eg_offset == slopsix_dx7s_pitch_eg_offset,
+              "the DX7S plays its own composed pitch envelope");
+
+        /* The neutral parameters leave the envelope as the firmware
+         * plays it: the eight-octave range divides nothing and the
+         * velocity switch is off. */
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.range_shift == 0u &&
+              engine->pitch_eg.velocity_on == 0u,
+              "the DX7S's neutral parameters compose nothing");
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
+              "the neutral DX7S envelope is the firmware's envelope");
+
+        /* The range: the four settings in the hardware's data encoding,
+         * raw 0 = 8 octaves dividing nothing and raw 3 = 1/2 octave
+         * dividing by sixteen; the middle raw values scale 1/4 and 1/8. */
+        slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_HALF_OCTAVE);
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.range_shift == 4u,
+              "the half-octave range divides the excursion by sixteen");
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -256,
+              "the range divides the composed excursion");
+        slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_2_OCTAVES);
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.range_shift == 2u,
+              "the two-octave range (raw 1) divides the excursion by four");
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -1024,
+              "the range divides the composed excursion");
+        slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_1_OCTAVE);
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.range_shift == 3u,
+              "the one-octave range (raw 2) divides the excursion by eight");
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -512,
+              "the range divides the composed excursion");
+        slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_8_OCTAVES);
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.range_shift == 0u,
+              "the eight-octave range divides nothing");
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
+              "the eight-octave range is the firmware's span");
+
+        /* The velocity switch: with it on, the depth follows the key's
+         * velocity, and with it off the depth is the envelope's own. */
+        slopsix_set_peg_velocity(ctx, true);
+        slopsix_note_on(ctx, 60u, 127u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.velocity_on == 1u &&
+              engine->pitch_eg.velocity_scale_q8 == 256u,
+              "the velocity switch scales the depth with the key");
+        slopsix_note_on(ctx, 60u, 0u);
+        engine = newest_engine(state);
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == 0,
+              "the velocity switch follows the key's velocity down to none");
+        slopsix_set_peg_velocity(ctx, false);
+        slopsix_note_on(ctx, 60u, 0u);
+        engine = newest_engine(state);
+        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
+        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
+              "the velocity switch off leaves the depth alone");
+
+        /* The rate scaling: the stages' increments grow with the key. */
+        slopsix_set_peg_rate_scaling(ctx, 0u);
+        slopsix_note_on(ctx, 96u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.increment[0] ==
+                  slopsix_pitch_eg_rate_value(0u),
+              "without the rate scaling the stages keep the ROM's rates");
+        slopsix_set_peg_rate_scaling(ctx, 7u);
+        slopsix_note_on(ctx, 96u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.increment[0] == 2u,
+              "the rate scaling speeds the stages up with the key");
+
+        slopsix_destroy_context(ctx);
+    }
+#endif
+}
+
 static void stage_blockgraph(void)
 {
     unsigned algorithm;
@@ -5131,6 +5292,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--plfo") == 0) {
             stage_plfo();
             ran = 1;
+        } else if (strcmp(argv[i], "--pegr") == 0) {
+            stage_peg_range();
+            ran = 1;
         } else if (strcmp(argv[i], "--params") == 0) {
             stage_personality_params();
             ran = 1;
@@ -5182,6 +5346,7 @@ int main(int argc, char **argv)
         stage_porta();
         stage_lfo();
         stage_plfo();
+        stage_peg_range();
         stage_personality_params();
         stage_ctrl();
         stage_filter();

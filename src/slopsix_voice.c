@@ -86,12 +86,12 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
         int16_t word = slopsix_mod_pitch_word_one(state, &engine->lfo);
         pitch_offset = slopsix_floor_div((int32_t)word,
             SLOPSIX_PITCH_MOD_TO_LOG_SHIFT) +
-            slopsix_pitch_eg_offset(&engine->pitch_eg);
+            state->pitch_eg_offset(&engine->pitch_eg);
     } else
 #endif
     {
         pitch_offset = slopsix_mod_pitch_offset(state) +
-            slopsix_pitch_eg_offset(&engine->pitch_eg);
+            state->pitch_eg_offset(&engine->pitch_eg);
     }
 
     base = state->glissando ? slot->gliss_current : slot->porta_current;
@@ -219,9 +219,14 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
     engine->feedback_level = state->patch.feedback;
 
     /* The pitch EG: the patch's rate/level pairs, started at the final
-     * (release) level, as the firmware's VOICE_ADD_MONO does. */
+     * (release) level, as the firmware's VOICE_ADD_MONO does.  The
+     * personality's law composes the envelope afterwards: the DX7's
+     * leaves it as the firmware has it, the DX7S's applies its range,
+     * velocity switch and rate scaling (D7S-4). */
     slopsix_pitch_eg_init(&engine->pitch_eg, state->patch.peg_rates,
         state->patch.peg_levels);
+    state->pitch_eg_configure(&state->patch, &engine->pitch_eg,
+        (uint8_t)note, slot->velocity);
     slopsix_pitch_eg_note_on(&engine->pitch_eg);
 
     /* The LFO's note-on side: in Single mode the global delay/fade and
@@ -560,7 +565,7 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
                             &state->engines[v].pitch_eg);
                     }
                     offset = lfo_offset +
-                        slopsix_pitch_eg_offset(&state->engines[v].pitch_eg);
+                        state->pitch_eg_offset(&state->engines[v].pitch_eg);
                     if (((porta_changed >> v) & 1u) != 0u ||
                         offset != state->engines[v].pitch_offset) {
                         slopsix_voice_engine_update_frequency(state,

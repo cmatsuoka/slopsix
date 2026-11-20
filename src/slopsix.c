@@ -23,18 +23,6 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
     state->bend_step = 0u;
     state->master_tune_q16 = 0;
     state->pan_q16 = SLOPSIX_Q16_ONE / 2;
-#if defined(SLOPSIX_DX7S)
-    /* DX7S defaults: Poly key mode, no unison detune, and the Mk1's
-     * pitch-EG span (8 octaves) with velocity and rate scaling off/zero
-     * (plan D7S-8).  These are the neutral values a DX7S context must
-     * reproduce the Mk1's pre-output render with. */
-    state->key_mode = SLOPSIX_KEY_POLY;
-    state->unison_detune = 0u;
-    state->lfo_mode = SLOPSIX_LFO_SINGLE;
-    state->patch.peg_range = SLOPSIX_PEG_RANGE_DEFAULT;
-    state->patch.peg_velocity = 0u;
-    state->patch.peg_rate_scaling = 0u;
-#endif
     /* The hardware's own reset value: P_DAC = 7, the top tap of the DAC
      * reference ladder, until MIDI volume changes it (dx7-output
      * research, the volume section). */
@@ -77,6 +65,10 @@ static void slopsix_dx7_defaults(slopsix_context_state *state)
      * DX7S does, in slopsix_dx7s_reset). */
     state->output_mix = slopsix_output_mix;
     state->voice_bus = slopsix_voice_bus_companded;
+    /* The pitch envelope's law: the DX7's, the firmware's plain envelope.
+     * The DX7S replaces it with its own composition (D7S-4). */
+    state->pitch_eg_configure = slopsix_pitch_eg_configure;
+    state->pitch_eg_offset = slopsix_pitch_eg_offset;
 }
 
 void slopsix_dx7_init(slopsix_context_state *state, uint32_t sample_rate)

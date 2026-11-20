@@ -152,6 +152,24 @@ int32_t slopsix_pitch_eg_offset(const slopsix_pitch_eg *eg)
 }
 
 /*
+ * The DX7's pitch-EG composition: there is none.
+ *
+ * The Mk1's pitch envelope is played as the firmware plays it: its level
+ * word's distance from the neutral value, with the firmware's own span
+ * and no velocity or rate scaling of its own.  The composition is a
+ * personality hook (state->pitch_eg_configure), so the DX7S's law can
+ * replace this one without the shared path knowing.
+ */
+void slopsix_pitch_eg_configure(const slopsix_patch_state *patch,
+    slopsix_pitch_eg *eg, uint8_t note, uint8_t velocity)
+{
+    (void)patch;
+    (void)eg;
+    (void)note;
+    (void)velocity;
+}
+
+/*
  * Load a patch's four rate/level pairs.  The firmware quantizes both at
  * patch activation and the final level is the initial level, so the
  * current level starts at the release level with the envelope at step 0.

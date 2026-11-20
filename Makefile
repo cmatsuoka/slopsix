@@ -125,7 +125,8 @@ PERF_SRCS := src/slopsix_eg.c \
 # (size-first); the DX7S process loop is on the render path (speed-first).
 ifneq ($(filter dx7s dx7s-extras,$(CONFIG)),)
   DX7S_CORE_SRCS := src/dx7s/slopsix_lfo.c \
-                    src/dx7s/slopsix_filter.c
+                    src/dx7s/slopsix_filter.c \
+                    src/dx7s/slopsix_pitch_eg.c
   DX7S_PERF_SRCS := src/dx7s/slopsix_voice.c \
                     src/dx7s/slopsix_output.c
 endif

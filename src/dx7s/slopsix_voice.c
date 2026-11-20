@@ -14,6 +14,33 @@
  */
 #include "slopsix_internal.h"
 
+/*
+ * The personality's own defaults.
+ *
+ * The DX7S adds parameters the Mk1 has not, and they keep the Mk1's
+ * behaviour until the host changes them: Poly key mode, no unison
+ * detune, the context-wide LFO in Single mode, and the Mk1's own
+ * pitch-EG span (eight octaves) with the velocity switch off and the
+ * rate scaling at zero (plan D7S-8).  These are the neutral values a
+ * DX7S context must reproduce the Mk1's pre-output render with.
+ *
+ * The pitch envelope's law is the DX7S's own composition (D7S-4): the
+ * shared path resolves it at personality init, exactly as it resolves
+ * the output stage and the voice bus, so a DX7 context in this build
+ * plays the firmware's envelope.
+ */
+static void slopsix_dx7s_defaults(slopsix_context_state *state)
+{
+    state->key_mode = SLOPSIX_KEY_POLY;
+    state->unison_detune = 0u;
+    state->lfo_mode = SLOPSIX_LFO_SINGLE;
+    state->patch.peg_range = SLOPSIX_PEG_RANGE_DEFAULT;
+    state->patch.peg_velocity = 0u;
+    state->patch.peg_rate_scaling = 0u;
+    state->pitch_eg_configure = slopsix_dx7s_pitch_eg_configure;
+    state->pitch_eg_offset = slopsix_dx7s_pitch_eg_offset;
+}
+
 void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
 {
     slopsix_dx7_init(state, sample_rate);
@@ -24,6 +51,8 @@ void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
      * core's resolution, and the 16-bit DAC step saturates the bus. */
     state->voice_bus = slopsix_dx7s_voice_bus;
     state->output_mix = slopsix_dx7s_output_mix;
+    /* The personality's own parameters and its pitch-EG law. */
+    slopsix_dx7s_defaults(state);
 }
 
 void slopsix_dx7s_reset(slopsix_context_state *state)
@@ -32,6 +61,7 @@ void slopsix_dx7s_reset(slopsix_context_state *state)
     slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
     state->voice_bus = slopsix_dx7s_voice_bus;
     state->output_mix = slopsix_dx7s_output_mix;
+    slopsix_dx7s_defaults(state);
 }
 
 void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
@@ -137,10 +167,10 @@ void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
                             &engine->lfo);
                         offset = slopsix_floor_div((int32_t)word,
                             SLOPSIX_PITCH_MOD_TO_LOG_SHIFT) +
-                            slopsix_pitch_eg_offset(&engine->pitch_eg);
+                            state->pitch_eg_offset(&engine->pitch_eg);
                     } else {
                         offset = single_lfo_offset +
-                            slopsix_pitch_eg_offset(&engine->pitch_eg);
+                            state->pitch_eg_offset(&engine->pitch_eg);
                     }
                     if (((porta_changed >> v) & 1u) != 0u ||
                         offset != engine->pitch_offset) {

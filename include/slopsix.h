@@ -247,13 +247,19 @@ slopsix_error slopsix_set_key_mode(slopsix_context ctx, slopsix_key_mode mode);
 slopsix_error slopsix_set_unison_detune(slopsix_context ctx,
     uint8_t depth_0_7);
 
-/* The pitch EG's four range settings; 8 octaves is the Mk1-equivalent
- * default (the DX7's fixed span). */
+/* The pitch EG's four range settings, in the DX7S's data encoding: the
+ * additional-voice SysEx carries the raw value (the MIDI appendix's value
+ * order: 8 oct, then the middle steps, then 1/2 oct), so a host passes
+ * the hardware's value to the library unchanged.  The middle value's
+ * label (the SysEx appendix's "4 oct" vs the function chart's "2 oct")
+ * is unresolved research (OQ-DX7S-03) and the implementation takes the
+ * chart's reading for now.  8 octaves is the Mk1-equivalent default (the
+ * DX7's fixed span). */
 typedef enum {
-    SLOPSIX_PEG_RANGE_HALF_OCTAVE = 0,  /* 6 semitones */
+    SLOPSIX_PEG_RANGE_8_OCTAVES = 0,    /* the Mk1's fixed span */
+    SLOPSIX_PEG_RANGE_2_OCTAVES,        /* the middle step (OQ-DX7S-03) */
     SLOPSIX_PEG_RANGE_1_OCTAVE,
-    SLOPSIX_PEG_RANGE_2_OCTAVES,
-    SLOPSIX_PEG_RANGE_8_OCTAVES
+    SLOPSIX_PEG_RANGE_HALF_OCTAVE       /* 6 semitones */
 } slopsix_peg_range;
 
 /* An out-of-range enumerator reports SLOPSIX_ERR_INVALID and leaves the

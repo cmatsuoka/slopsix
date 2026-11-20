@@ -290,6 +290,23 @@ typedef struct {
     int32_t level;          /* the current level, 0..0x7F80 */
     uint8_t step;           /* 0..2 held stages, 3 sustain, 4 release,
                              * 5 finished */
+#if defined(SLOPSIX_DX7S)
+    /* The DX7S's composition of this envelope (D7S-4): the range's span
+     * divisor and the velocity switch's depth factor.  Only the DX7S's
+     * own law (src/dx7s/slopsix_pitch_eg.c) reads and writes them, and
+     * the DX7's law ignores them entirely, so a DX7 context plays the
+     * firmware's envelope whatever they hold.
+     *
+     * The neutral values are the zeroed ones, so the memset in
+     * slopsix_pitch_eg_init leaves an envelope the DX7S has not
+     * composed at the Mk1's excursion: a range shift of zero divides
+     * nothing (the eight-octave range is the Mk1's own span), and the
+     * velocity switch off leaves the depth alone (the depth factor is
+     * read only while the switch is on). */
+    uint8_t range_shift;        /* 0 = full span, else the divisor's log2 */
+    uint8_t velocity_on;        /* the velocity switch */
+    uint16_t velocity_scale_q8; /* 0..256: the depth factor, 256 = full */
+#endif
 } slopsix_pitch_eg;
 
 /* The global control-rate cadence.
@@ -577,7 +594,9 @@ typedef struct {
  * slopsix_key_mode and slopsix_peg_range (include/slopsix.h): the
  * personality's own state uses those values, and the DX7's `mono`
  * bookkeeping stays untouched.  8 octaves is the Mk1-equivalent range
- * default, so a neutral DX7S context reproduces the Mk1 pitch-EG span. */
+ * default, so a neutral DX7S context reproduces the Mk1 pitch-EG span;
+ * it is the encoding's raw 0 as well, so the default, the zeroed
+ * envelope and the encoded value coincide. */
 #define SLOPSIX_PEG_RANGE_DEFAULT     SLOPSIX_PEG_RANGE_8_OCTAVES
 #endif
 
@@ -909,6 +928,23 @@ typedef void (*slopsix_output_mix_fn)(void *state, int32_t bus,
 typedef void (*slopsix_voice_bus_fn)(const int32_t *voice_out, int32_t *bus,
     unsigned count);
 
+/* The pitch envelope's personality law.  The DX7 plays the firmware's
+ * plain envelope: the level word's distance from the neutral value.  The
+ * DX7S composes its range, its velocity switch and its rate scaling into
+ * that distance (D7S-4), and its law lives under src/dx7s/.  Both entry
+ * points are resolved at personality init, like output_mix and
+ * voice_bus, so the shared path carries no personality branch and a DX7
+ * context in a DX7S build plays the firmware's envelope whatever the
+ * shared patch state holds.
+ *
+ * The configure hook runs at note-on, before the envelope starts; the
+ * offset hook reads the envelope's contribution.  Both take the patch
+ * and the envelope, so the personality's law sees the parameters it
+ * composes and the state it composes them into. */
+typedef void (*slopsix_pitch_eg_configure_fn)(const slopsix_patch_state *patch,
+    slopsix_pitch_eg *eg, uint8_t note, uint8_t velocity);
+typedef int32_t (*slopsix_pitch_eg_offset_fn)(const slopsix_pitch_eg *eg);
+
 typedef struct {
     uint32_t sample_rate;
 
@@ -1016,6 +1052,14 @@ typedef struct {
     /* The per-voice bus stage: the DX7 compander or the DX7S raw sum.
      * Set once at personality init for the same reason. */
     slopsix_voice_bus_fn voice_bus;
+
+    /* The pitch envelope's personality law: the note-on composition and
+     * the level's contribution to the log-frequency word.  The DX7 plays
+     * the firmware's plain envelope; the DX7S composes its range, its
+     * velocity switch and its rate scaling into it (D7S-4).  Set once at
+     * personality init, for the same reason. */
+    slopsix_pitch_eg_configure_fn pitch_eg_configure;
+    slopsix_pitch_eg_offset_fn pitch_eg_offset;
 } slopsix_context_state;
 
 /* ------------------------------------------------------- the personality */
@@ -1097,6 +1141,14 @@ void slopsix_dx7s_voice_bus(const int32_t *voice_out, int32_t *bus,
 void slopsix_dx7s_filter_init(slopsix_filter *filter, uint32_t sample_rate);
 void slopsix_dx7s_output_mix(void *state, int32_t bus,
     int16_t *left, int16_t *right);
+
+/* The DX7S's pitch-envelope law (src/dx7s/slopsix_pitch_eg.c): the
+ * note-on composition of the range, the velocity switch and the rate
+ * scaling (plan D7S-4), and the composed contribution of the envelope
+ * to the voice's log-frequency word. */
+void slopsix_dx7s_pitch_eg_configure(const slopsix_patch_state *patch,
+    slopsix_pitch_eg *eg, uint8_t note, uint8_t velocity);
+int32_t slopsix_dx7s_pitch_eg_offset(const slopsix_pitch_eg *eg);
 #endif
 
 /* The shared render-span helpers (src/slopsix_voice.c): the DX7S process
@@ -1616,7 +1668,10 @@ int32_t slopsix_mod_pitch_offset(const slopsix_context_state *state);
 void slopsix_pitch_eg_update(slopsix_pitch_eg *eg);
 
 /* The current level as a contribution to the log-frequency word, in the
- * engine's 4096-per-octave units (neutral 0, about -4..+3.97 octaves). */
+ * engine's 4096-per-octave units (neutral 0, about -4..+3.97 octaves).
+ *
+ * This is the Mk1's law: the level's distance from the neutral value.
+ * The personality's own law is the context's pitch_eg_offset hook. */
 int32_t slopsix_pitch_eg_offset(const slopsix_pitch_eg *eg);
 
 /* The pitch envelope's life cycle. */
@@ -1624,6 +1679,12 @@ void slopsix_pitch_eg_init(slopsix_pitch_eg *eg, const uint8_t rates[4],
     const uint8_t levels[4]);
 void slopsix_pitch_eg_note_on(slopsix_pitch_eg *eg);
 void slopsix_pitch_eg_note_off(slopsix_pitch_eg *eg);
+
+/* The DX7's pitch-EG composition: none.  The Mk1 plays its envelope as
+ * the firmware plays it, so this is the no-op the context's
+ * pitch_eg_configure hook points at. */
+void slopsix_pitch_eg_configure(const slopsix_patch_state *patch,
+    slopsix_pitch_eg *eg, uint8_t note, uint8_t velocity);
 
 /* The frequency path.  `pitch_offset` is the voice's total log-frequency
  * offset (the pitch bend and the pitch EG), which the EGS applies to a
