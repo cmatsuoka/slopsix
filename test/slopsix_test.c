@@ -24,6 +24,8 @@
  *              and reset, the stagger and neutral Single-mode parity
  *   pegr        the DX7S's pitch-EG composition: the range, the velocity
  *              switch and the rate scaling, and the DX7's gate
+ *   unison      the DX7S key modes: fixed groups, the steal, the pedal,
+ *              detune and the stack's superposition
  *   params      the DX7S-only parameters: gated per personality, their
  *              ranges and the neutral defaults
  *   ctrl        the controllers: scaling, routes and both registers
@@ -3717,6 +3719,256 @@ static void stage_peg_range(void)
 #endif
 }
 
+/* ------------------------------------------- Phase D7S-3: unison modes */
+
+#if SLOPSIX_HAS_DX7S
+static int32_t unison_full_bus[PARITY_BUS_MAX];
+static int32_t unison_sum_bus[PARITY_BUS_MAX];
+static int32_t unison_one_bus[PARITY_BUS_MAX];
+#endif
+
+static void stage_unison(void)
+{
+    printf("stage unison\n");
+
+#if SLOPSIX_HAS_DX7S
+    {
+        slopsix_context ctx;
+        slopsix_context_state *state;
+        uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+        unsigned v;
+        unsigned mode;
+
+        ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+            SLOPSIX_DEFAULT_SAMPLE_RATE);
+        check(ctx != NULL, "create_context returns a DX7S context for the "
+                           "unison checks");
+        if (ctx == NULL) {
+            return;
+        }
+        state = SLOPSIX_CONTEXT(ctx);
+        make_init_patch(dump);
+        check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
+              "the unison checks load the reference patch");
+
+        /* Unison Poly: four notes, four voices each, at the fixed groups. */
+        check(slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY) ==
+              SLOPSIX_OK,
+              "the key mode switches to Unison Poly");
+        slopsix_note_on(ctx, 60u, 100u);
+        check(state->voices[0].state == SLOPSIX_VOICE_ON &&
+              state->voices[1].state == SLOPSIX_VOICE_ON &&
+              state->voices[2].state == SLOPSIX_VOICE_ON &&
+              state->voices[3].state == SLOPSIX_VOICE_ON &&
+              state->voices[4].state == SLOPSIX_VOICE_FREE,
+              "a Unison Poly key fills its four-voice group");
+        check(state->unison_group_active[0] &&
+              state->unison_group_note[0] == 60u,
+              "the first group owns the key event");
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_note_on(ctx, 64u, 100u);
+        slopsix_note_on(ctx, 65u, 100u);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 64u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 65u, SLOPSIX_VOICE_ON) == 4,
+              "Unison Poly caps at four notes of four voices");
+
+        /* The fifth note steals the oldest group, all four voices, and
+         * leaves the other groups alone. */
+        slopsix_note_on(ctx, 67u, 100u);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_ON) == 0 &&
+              state->voices[0].note == 67u &&
+              state->voices[1].note == 67u &&
+              state->voices[2].note == 67u &&
+              state->voices[3].note == 67u &&
+              state->voices[3].state == SLOPSIX_VOICE_ON,
+              "the fifth Unison Poly note steals the oldest group");
+        check(count_voices(state, 62u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 64u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 65u, SLOPSIX_VOICE_ON) == 4,
+              "the steal leaves the other groups sounding");
+
+        /* The steal is deterministic across a reset. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_note_on(ctx, 64u, 100u);
+        slopsix_note_on(ctx, 65u, 100u);
+        slopsix_note_on(ctx, 67u, 100u);
+        check(state->voices[0].note == 67u &&
+              state->voices[4].note == 62u &&
+              state->voices[8].note == 64u &&
+              state->voices[12].note == 65u,
+              "the Unison Poly steal repeats identically after a reset");
+
+        /* Note-off releases the group that owns the key; the key-off of
+         * a stolen note no longer finds a group. */
+        slopsix_note_off(ctx, 62u);
+        check(count_voices(state, 62u, SLOPSIX_VOICE_RELEASED) == 4 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_ON) == 0,
+              "a key-off releases every voice of its group");
+        slopsix_note_off(ctx, 60u);
+        check(count_voices(state, 67u, SLOPSIX_VOICE_ON) == 4,
+              "the stolen note's old key-off releases nothing");
+
+        /* Unison Mono: one sixteen-voice group, and a re-press steals
+         * the group by continuing its envelopes. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_note_on(ctx, 60u, 100u);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_ON) ==
+                  SLOPSIX_VOICE_COUNT,
+              "Unison Mono stacks all sixteen voices on one note");
+        slopsix_process(ctx, render_buf_a, 200u);
+        {
+            uint8_t stage_before = state->engines[0].eg[0].stage;
+            int32_t level_before = state->engines[0].eg[0].level;
+
+            slopsix_note_on(ctx, 64u, 100u);
+            check(count_voices(state, 64u, SLOPSIX_VOICE_ON) ==
+                      SLOPSIX_VOICE_COUNT &&
+                  count_voices(state, 60u, SLOPSIX_VOICE_ON) == 0,
+                  "a Unison Mono re-press steals the whole stack");
+            check(state->engines[0].eg[0].stage == stage_before &&
+                  state->engines[0].eg[0].level == level_before,
+                  "the stolen stack continues its envelopes (Forced Damp "
+                  "off)");
+        }
+
+        /* Detune: the provisional spread is symmetric, zero by default
+         * and inactive outside the unison modes. */
+        check(state->voices[0].unison_offset == 0 &&
+              state->voices[SLOPSIX_VOICE_COUNT - 1].unison_offset == 0,
+              "the neutral detune leaves the stack in tune");
+        slopsix_set_unison_detune(ctx, 7u);
+        check(state->voices[0].unison_offset < 0 &&
+              state->voices[15].unison_offset > 0 &&
+              state->voices[0].unison_offset ==
+                  -state->voices[15].unison_offset,
+              "the detune spreads the stack symmetrically");
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_POLY);
+        check(state->voices[0].unison_offset == 0 &&
+              state->voices[15].unison_offset == 0,
+              "Poly mode carries no unison detune");
+
+        /* The stack's mix is the bit-exact superposition of its voices. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_set_unison_detune(ctx, 0u);
+        state->output_mix = parity_capture_mix;
+        slopsix_note_on(ctx, 60u, 100u);
+        parity_dst = unison_full_bus;
+        parity_len = 0;
+        slopsix_process(ctx, render_buf_a, PARITY_BUS_MAX);
+        check(parity_len == PARITY_BUS_MAX,
+              "the stack renders the captured bus samples");
+
+        memset(unison_sum_bus, 0, sizeof(unison_sum_bus));
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            unsigned w;
+
+            slopsix_reset(ctx);
+            state = SLOPSIX_CONTEXT(ctx);
+            state->output_mix = parity_capture_mix;
+            slopsix_set_voice(ctx, dump, sizeof(dump));
+            slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+            slopsix_set_unison_detune(ctx, 0u);
+            slopsix_note_on(ctx, 60u, 100u);
+            for (w = 0; w < SLOPSIX_VOICE_COUNT; w++) {
+                if (w != v) {
+                    state->voices[w].state = SLOPSIX_VOICE_FREE;
+                }
+            }
+            parity_dst = unison_one_bus;
+            parity_len = 0;
+            slopsix_process(ctx, render_buf_b, PARITY_BUS_MAX);
+            check(parity_len == PARITY_BUS_MAX,
+                  "one stack voice renders the captured bus samples");
+            for (w = 0; w < PARITY_BUS_MAX; w++) {
+                unison_sum_bus[w] += unison_one_bus[w];
+            }
+        }
+        check(memcmp(unison_full_bus, unison_sum_bus,
+                     sizeof(unison_full_bus)) == 0,
+              "the sixteen-voice stack is the bit-exact superposition of "
+              "its voices");
+
+        /* The pedal defers per group, all-notes-off acts as the poly
+         * path's, and the groups clear at the end. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_set_sustain(ctx, true);
+        slopsix_note_off(ctx, 60u);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_ON) == 4 &&
+              !state->voices[0].held,
+              "the pedal holds the released group");
+        slopsix_all_notes_off(ctx);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_ON) == 4 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_ON) == 4,
+              "all-notes-off under the pedal releases nothing");
+        check(!state->unison_group_active[0] &&
+              !state->unison_group_active[1],
+              "all-notes-off clears the groups");
+        slopsix_set_sustain(ctx, false);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_RELEASED) == 4 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_RELEASED) == 4,
+              "pedal-up releases every voice the pedal held");
+
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_all_notes_off(ctx);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_RELEASED) == 4 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_RELEASED) == 4,
+              "all-notes-off without the pedal releases every group");
+
+        /* Reset determinism at all four key modes. */
+        {
+            static const slopsix_key_mode modes[4] = {
+                SLOPSIX_KEY_POLY, SLOPSIX_KEY_MONO,
+                SLOPSIX_KEY_UNISON_POLY, SLOPSIX_KEY_UNISON_MONO
+            };
+
+            for (mode = 0; mode < 4u; mode++) {
+                slopsix_reset(ctx);
+                slopsix_set_voice(ctx, dump, sizeof(dump));
+                slopsix_set_key_mode(ctx, modes[mode]);
+                slopsix_note_on(ctx, 60u, 100u);
+                slopsix_note_on(ctx, 62u, 100u);
+                slopsix_process(ctx, render_buf_a, 512u);
+
+                slopsix_reset(ctx);
+                slopsix_set_voice(ctx, dump, sizeof(dump));
+                slopsix_set_key_mode(ctx, modes[mode]);
+                slopsix_note_on(ctx, 60u, 100u);
+                slopsix_note_on(ctx, 62u, 100u);
+                slopsix_process(ctx, render_buf_b, 512u);
+                check(memcmp(render_buf_a, render_buf_b,
+                             512u * 2u * sizeof(int16_t)) == 0,
+                      "every key mode renders identically after a reset");
+            }
+        }
+
+        check(state->key_mode == (uint8_t)SLOPSIX_KEY_POLY ||
+              state->key_mode == (uint8_t)SLOPSIX_KEY_UNISON_MONO,
+              "the key mode survives the last reset's explicit set");
+        slopsix_destroy_context(ctx);
+    }
+#else
+    printf("  (the DX7S personality is absent from this build)\n");
+#endif
+}
+
 static void stage_blockgraph(void)
 {
     unsigned algorithm;
@@ -5295,6 +5547,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--pegr") == 0) {
             stage_peg_range();
             ran = 1;
+        } else if (strcmp(argv[i], "--unison") == 0) {
+            stage_unison();
+            ran = 1;
         } else if (strcmp(argv[i], "--params") == 0) {
             stage_personality_params();
             ran = 1;
@@ -5347,6 +5602,7 @@ int main(int argc, char **argv)
         stage_lfo();
         stage_plfo();
         stage_peg_range();
+        stage_unison();
         stage_personality_params();
         stage_ctrl();
         stage_filter();

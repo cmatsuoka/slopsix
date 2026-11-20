@@ -5,8 +5,10 @@
 - Add experimental, unverified DX7S personality.
 - Add DX7S-only voice parameter setters, gated by personality.
 - Implement the DX7S pitch envelope's range, velocity switch and rate
-  scaling, composed in the DX7S's own law so a DX7 context plays the
-  firmware's envelope.
+  scaling.
+- Add DX7S unison modes: fixed unison groups, oldest-group-first
+  stealing with envelope continuation, per-group pedal and all-notes-off,
+  and a provisional unison detune spread (neutral by default).
 
 ## 0.2.0 (2026-11-19)
 

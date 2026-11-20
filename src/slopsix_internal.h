@@ -500,6 +500,15 @@ typedef struct {
     int32_t porta_current;
     int32_t porta_target;
     int32_t gliss_current;
+
+#if defined(SLOPSIX_DX7S)
+    /* The DX7S unison detune's contribution to this voice's pitch, in
+     * the engine's 4096-per-octave word.  It is provisional evidence
+     * (D7S-10, OQ-DX7S-05): the unison spread constant below names the
+     * law, and the field is zero outside the unison modes and in the
+     * DX7 build. */
+    int32_t unison_offset;
+#endif
 } slopsix_voice;
 
 /* --------------------------------------------------------- the live patch */
@@ -598,6 +607,26 @@ typedef struct {
  * it is the encoding's raw 0 as well, so the default, the zeroed
  * envelope and the encoded value coincide. */
 #define SLOPSIX_PEG_RANGE_DEFAULT     SLOPSIX_PEG_RANGE_8_OCTAVES
+
+/* The DX7S unison groups (D7S-3/D7S-4): Unison Poly is four fixed
+ * four-voice groups at voice indices 0..3, 4..7, 8..11, 12..15; Unison
+ * Mono is one sixteen-voice group.  Fixed groups keep the allocation
+ * deterministic and leave the render loop walking all sixteen voices. */
+#define SLOPSIX_DX7S_UNISON_GROUPS       4u
+#define SLOPSIX_DX7S_UNISON_POLY_VOICES  4u
+
+/* The provisional unison detune spread (D7S-10, OQ-DX7S-05).
+ *
+ * Evidence grade: working model.  The owner's manual confirms the 0..7
+ * parameter in the two unison modes but gives no law.  Each voice's
+ * distance from the stack's centre is `2*rank - (size-1)` ranks, each
+ * rank is `detune` steps, and a step is one engine word (1/4096 octave,
+ * about 0.29 cent).  At detune 7 a four-voice stack spans about ±6 cents
+ * and a sixteen-voice stack about ±31 cents.  Value
+ * 0 is the neutral default, so Poly and a zeroed detune leave the Mk1
+ * parity intact.  A later capture replaces this constant, not the code
+ * path. */
+#define SLOPSIX_DX7S_UNISON_DETUNE_STEP_WORD 1
 #endif
 
 /* The note the firmware hands to its note-table conversion: the dump's
@@ -972,6 +1001,15 @@ typedef struct {
     uint8_t key_mode;        /* SLOPSIX_KEY_*, poly by default */
     uint8_t unison_detune;   /* 0..7, neutral by default */
     uint8_t lfo_mode;        /* SLOPSIX_LFO_SINGLE/MULTI, single by default */
+
+    /* The fixed unison groups' bookkeeping (D7S-3).  A group is active
+     * from its first key event; `seq` orders the groups for the
+     * oldest-first steal and 0 means the group was never used.  The note
+     * is the key event the group owns, so a key-off can release every
+     * voice of every group that owns it. */
+    uint32_t unison_group_seq[SLOPSIX_DX7S_UNISON_GROUPS];
+    uint8_t unison_group_note[SLOPSIX_DX7S_UNISON_GROUPS];
+    uint8_t unison_group_active[SLOPSIX_DX7S_UNISON_GROUPS];
 #endif
 
     /* Portamento and glissando (the firmware's function parameters and
@@ -1101,6 +1139,14 @@ void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
 void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     size_t frames);
 
+/* The Mk1's note events (src/slopsix.c).  The DX7S Poly and Mono modes
+ * delegate here, so the personality's own file owns only the unison
+ * deltas. */
+void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
+    uint8_t velocity);
+void slopsix_dx7_note_off(slopsix_context_state *state, uint8_t note);
+void slopsix_dx7_all_notes_off(slopsix_context_state *state);
+
 #if SLOPSIX_HAS_DX7S
 /* The DX7S personality's own entry points.  They live under src/dx7s/ and
  * are compiled in only when SLOPSIX_DX7S_PERSONALITY is defined; the state
@@ -1149,6 +1195,19 @@ void slopsix_dx7s_output_mix(void *state, int32_t bus,
 void slopsix_dx7s_pitch_eg_configure(const slopsix_patch_state *patch,
     slopsix_pitch_eg *eg, uint8_t note, uint8_t velocity);
 int32_t slopsix_dx7s_pitch_eg_offset(const slopsix_pitch_eg *eg);
+
+/* The DX7S's voice management (src/dx7s/slopsix_voice.c, D7S-3).  Poly
+ * and Mono delegate to the Mk1's paths; the two unison modes use the
+ * fixed groups.  The detune refresh recomposes every grouped voice's
+ * pitch offset when the detune parameter changes, and a key-mode change
+ * clears the group bookkeeping (the sounding voices are left alone, as
+ * the Mk1's mode switch leaves its EGS voices alone). */
+void slopsix_dx7s_note_on(slopsix_context_state *state, uint8_t note,
+    uint8_t velocity);
+void slopsix_dx7s_note_off(slopsix_context_state *state, uint8_t note);
+void slopsix_dx7s_all_notes_off(slopsix_context_state *state);
+void slopsix_dx7s_apply_detune(slopsix_context_state *state);
+void slopsix_dx7s_clear_groups(slopsix_context_state *state);
 #endif
 
 /* The shared render-span helpers (src/slopsix_voice.c): the DX7S process

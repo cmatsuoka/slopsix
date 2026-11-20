@@ -727,7 +727,7 @@ static void slopsix_mono_note_off(slopsix_context_state *state, uint8_t note)
  * bookkeeping (see the section above); the public entry points dispatch
  * to them per personality.
  */
-static void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
+void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
     uint8_t velocity)
 {
     if (state->mono) {
@@ -784,7 +784,7 @@ static void slopsix_dx7_note_on(slopsix_context_state *state, uint8_t note,
     }
 }
 
-static void slopsix_dx7_note_off(slopsix_context_state *state, uint8_t note)
+void slopsix_dx7_note_off(slopsix_context_state *state, uint8_t note)
 {
     if (state->mono) {
         slopsix_mono_note_off(state, note);
@@ -793,7 +793,7 @@ static void slopsix_dx7_note_off(slopsix_context_state *state, uint8_t note)
     slopsix_poly_release_note(state, note);
 }
 
-static void slopsix_dx7_all_notes_off(slopsix_context_state *state)
+void slopsix_dx7_all_notes_off(slopsix_context_state *state)
 {
     /* CC 123 "All Notes Off" semantics: act as if every key were released.
      * Voices held by the sustain pedal keep ringing until pedal-up; this is
@@ -1057,9 +1057,15 @@ slopsix_error slopsix_note_on(slopsix_context ctx, uint8_t note,
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
-    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_note_on(&impl->dx7, note, velocity);
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_note_on(&impl->dx7, note, velocity);
+        break;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
     default:
         return SLOPSIX_ERR_UNSUPPORTED;
     }
@@ -1082,9 +1088,15 @@ slopsix_error slopsix_note_off(slopsix_context ctx, uint8_t note)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
-    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_note_off(&impl->dx7, note);
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_note_off(&impl->dx7, note);
+        break;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
     default:
         return SLOPSIX_ERR_UNSUPPORTED;
     }
@@ -1102,9 +1114,15 @@ slopsix_error slopsix_all_notes_off(slopsix_context ctx)
 
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7:
-    case SLOPSIX_ENGINE_DX7S:
         slopsix_dx7_all_notes_off(&impl->dx7);
         break;
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        slopsix_dx7s_all_notes_off(&impl->dx7);
+        break;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
     default:
         return SLOPSIX_ERR_UNSUPPORTED;
     }
@@ -1221,6 +1239,19 @@ slopsix_error slopsix_set_key_mode(slopsix_context ctx, slopsix_key_mode mode)
     case SLOPSIX_ENGINE_DX7S:
 #if SLOPSIX_HAS_DX7S
         impl->dx7.key_mode = (uint8_t)mode;
+        /* The DX7S's Mono mode is the Mk1's single-voice path; Poly and
+         * the two unison modes keep the shared mono bookkeeping idle.
+         * Switching modes clears the bookkeeping, not the sounding
+         * voices (the Mk1's mode switch leaves its EGS voices alone). */
+        impl->dx7.mono = (mode == SLOPSIX_KEY_MONO);
+        if (impl->dx7.mono) {
+            memset(impl->dx7.mono_keys, 0,
+                   sizeof(impl->dx7.mono_keys));
+            impl->dx7.mono_count = 0;
+            impl->dx7.mono_dir = 0u;
+        }
+        slopsix_dx7s_clear_groups(&impl->dx7);
+        slopsix_dx7s_apply_detune(&impl->dx7);
         return SLOPSIX_OK;
 #else
         return SLOPSIX_ERR_UNSUPPORTED;
@@ -1253,6 +1284,11 @@ slopsix_error slopsix_set_unison_detune(slopsix_context ctx,
     case SLOPSIX_ENGINE_DX7S:
 #if SLOPSIX_HAS_DX7S
         impl->dx7.unison_detune = depth_0_7;
+        /* The detune is only a unison-mode spread: the refresh writes
+         * zero offsets in Poly and Mono, and the grouped voices' own
+         * shares otherwise, then re-pitches the sounding ones. */
+        slopsix_dx7s_apply_detune(&impl->dx7);
+        slopsix_refresh_pitch(&impl->dx7);
         return err;
 #else
         return SLOPSIX_ERR_UNSUPPORTED;

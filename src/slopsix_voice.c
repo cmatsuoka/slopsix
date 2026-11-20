@@ -98,6 +98,14 @@ void slopsix_voice_engine_update_frequency(slopsix_context_state *state,
     voice = slopsix_voice_word_from_base(base & ~3,
         state->master_tune_q16, pitch_offset);
 
+#if defined(SLOPSIX_DX7S)
+    /* The unison detune is this voice's own share of the fixed group's
+     * spread (D7S-10).  It is zero in Poly, Mono and in the DX7 build,
+     * and it enters after the voice-floor clamp like the master tune:
+     * the detune widens the stack, it does not move the clamp. */
+    voice += slot->unison_offset;
+#endif
+
     for (op = 0; op < SLOPSIX_OP_COUNT; op++) {
         int32_t word =
             slopsix_op_freq_from_voice(&engine->params[op], voice);
