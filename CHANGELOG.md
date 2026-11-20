@@ -22,6 +22,12 @@ Add experimental DX7S personality.
   the held voices mono cannot own (the pedal defers these releases).
   Re-applying the current mode is a no-op, so it cannot clear a live
   stack's groups or flatten its detune.
+- Implement portamento in the DX7S unison modes: the key events take the
+  polyphonic composition, so with the pedal a fresh group glides from the
+  instrument's last target and a stolen stack glides out of its own
+  buffer (full time mode drags pedal-held and released voices along);
+  without the pedal the buffers snap. The unison paths previously snapped
+  every buffer, making portamento and glissando inert there.
 - Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
   corner, the DX7S tail is set to 20 kHz.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7

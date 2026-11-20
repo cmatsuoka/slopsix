@@ -4136,6 +4136,78 @@ static void stage_unison(void)
               count_voices(state, 62u, SLOPSIX_VOICE_RELEASED) == 4,
               "pedal-up releases every voice the pedal held");
 
+        /* Unison portamento follows the polyphonic composition: the
+         * pedal gates the glide, a fresh group glides from the
+         * instrument's last target, a stolen stack glides out of its
+         * own buffer, and full time mode drags the pedal-held and
+         * released voices with the new note. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_set_portamento_time(ctx, 50u);
+        slopsix_set_portamento_pedal(ctx, true);
+        slopsix_note_on(ctx, 60u, 100u);
+        {
+            int32_t glided_from = state->voices[1].porta_current;
+            int32_t glided_to = state->voices[1].porta_target;
+
+            check(state->voices[0].porta_current == SLOPSIX_PORTA_RESET_WORD &&
+                  state->voices[2].porta_current == glided_from &&
+                  state->voices[3].porta_current == glided_from &&
+                  state->voices[4].porta_current == SLOPSIX_PORTA_RESET_WORD,
+                  "the keyed group glides from the instrument's buffer");
+            check(state->voices[0].porta_target == glided_to &&
+                  state->voices[3].porta_target == glided_to,
+                  "the group's voices carry the same glide target");
+            slopsix_process(ctx, render_buf_a, 400u);
+            check(state->voices[0].porta_current !=
+                      state->voices[0].porta_target &&
+                  state->voices[3].porta_current ==
+                      state->voices[0].porta_current,
+                  "the glide walks under PORTA_PROCESS and stays one note");
+            slopsix_set_portamento_pedal(ctx, false);
+            slopsix_note_on(ctx, 36u, 100u);
+            check(state->voices[6].porta_current ==
+                  state->voices[6].porta_target,
+                  "the buffers snap without the pedal");
+        }
+
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_set_portamento_time(ctx, 50u);
+        slopsix_set_portamento_mode(ctx, SLOPSIX_PORTA_FULL_TIME);
+        slopsix_set_portamento_pedal(ctx, true);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_set_sustain(ctx, true);
+        slopsix_note_off(ctx, 60u);
+        slopsix_note_on(ctx, 72u, 100u);
+        check(state->voices[0].porta_target ==
+                  state->voices[11].porta_target &&
+              state->voices[3].porta_target ==
+                  state->voices[11].porta_target &&
+              state->voices[0].porta_target !=
+                  state->voices[4].porta_target &&
+              state->voices[4].porta_target ==
+                  state->voices[7].porta_target,
+              "the full-time drag re-targets the held-up group only");
+
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_set_portamento_time(ctx, 50u);
+        slopsix_set_portamento_pedal(ctx, true);
+        slopsix_note_on(ctx, 36u, 100u);
+        {
+            int32_t kept_current = state->voices[7].porta_current;
+
+            slopsix_note_on(ctx, 48u, 100u);
+            check(state->voices[7].porta_current == kept_current &&
+                  state->voices[7].porta_target != kept_current,
+                  "a stolen Unison Mono stack glides out of its own buffer");
+        }
+
         slopsix_reset(ctx);
         slopsix_set_voice(ctx, dump, sizeof(dump));
         slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);

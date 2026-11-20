@@ -180,25 +180,48 @@ static void slopsix_dx7s_release_orphans(slopsix_context_state *state,
 
 /* One voice of a group takes the new key event.  A continued sounding
  * voice keeps its envelopes and only re-pitches; a fresh or released
- * voice gets the full trigger. */
+ * voice gets the full trigger.  The portamento buffers take the
+ * polyphonic composition (VOICE_ADD_POLY): with the pedal and a rate
+ * below the instantaneous one, a fresh voice glides from the
+ * instrument's last target and a continued voice glides out of its own
+ * buffer, both onto the new note's word; without the pedal, or at the
+ * instantaneous rate, the buffers snap.  Glissando quantizes the
+ * audible word in PORTA_PROCESS, as everywhere else. */
 static void slopsix_dx7s_key_voice(slopsix_context_state *state,
-    unsigned index, uint8_t note, uint8_t velocity, int continue_envelope)
+    unsigned index, uint8_t note, uint8_t velocity,
+    int continue_envelope, int glide, int32_t target, int32_t glide_from)
 {
     slopsix_voice *slot = &state->voices[index];
     slopsix_voice_engine *engine = &state->engines[index];
-    int32_t target;
+    int continued = continue_envelope &&
+        slot->state != SLOPSIX_VOICE_FREE;
 
     slot->note = note;
     slot->velocity = velocity;
     slot->transpose = state->patch.transpose;
-    target = (int32_t)(slopsix_note_word[
-        (uint8_t)slopsix_effective_note(note, slot->transpose) & 127u] &
-        ~3u);
-    slot->porta_current = target;
-    slot->porta_target = target;
-    slot->gliss_current = target;
 
-    if (continue_envelope && slot->state != SLOPSIX_VOICE_FREE) {
+    if (continued) {
+        /* A stolen sounding voice keeps its own buffers, exactly as the
+         * poly path's follow re-pitches keep theirs, and moves onto the
+         * new note there. */
+        if (glide) {
+            slot->porta_target = target;
+        } else {
+            slot->porta_current = target;
+            slot->gliss_current = target;
+            slot->porta_target = target;
+        }
+    } else if (glide) {
+        slot->porta_current = glide_from;
+        slot->gliss_current = glide_from;
+        slot->porta_target = target;
+    } else {
+        slot->porta_current = target;
+        slot->gliss_current = target;
+        slot->porta_target = target;
+    }
+
+    if (continued) {
         slot->held = true;
         slot->state = SLOPSIX_VOICE_ON;
         slot->seq = ++state->voice_seq;
@@ -245,8 +268,11 @@ void slopsix_dx7s_note_on(slopsix_context_state *state, uint8_t note,
     unsigned group;
     unsigned first;
     unsigned rank;
+    unsigned v;
     int steal;
     int continue_envelope;
+    int glide;
+    int32_t target;
 
     if (state->key_mode != (uint8_t)SLOPSIX_KEY_UNISON_POLY &&
         state->key_mode != (uint8_t)SLOPSIX_KEY_UNISON_MONO) {
@@ -262,6 +288,15 @@ void slopsix_dx7s_note_on(slopsix_context_state *state, uint8_t note,
     /* A stolen group that is still sounding continues its envelopes. */
     continue_envelope = steal && slopsix_dx7s_group_sounding(state, group);
 
+    /* The portamento gates on the pedal and on a non-instantaneous
+     * rate, exactly as the polyphonic VOICE_ADD_POLY does (the shared
+     * poly note-on composes the same decision for its own slot). */
+    glide = state->porta_pedal && state->porta_rate != 0xFFu;
+    target = (int32_t)(slopsix_note_word[
+        (uint8_t)slopsix_effective_note(note,
+                                        state->patch.transpose) & 127u] &
+        ~3u);
+
     state->unison_group_active[group] = 1u;
     state->unison_group_note[group] = note;
     state->unison_group_seq[group] = ++state->voice_seq;
@@ -272,10 +307,28 @@ void slopsix_dx7s_note_on(slopsix_context_state *state, uint8_t note,
         state->voices[index].unison_offset =
             slopsix_dx7s_detune_offset(state->unison_detune, rank, size);
         slopsix_dx7s_key_voice(state, index, note, velocity,
-            continue_envelope);
+            continue_envelope, glide, target, state->porta_last_target);
     }
 
-    state->porta_last_target = state->voices[first].porta_target;
+    if (glide && state->porta_full_time) {
+        /* The full-time glide drags the pedal-sustained and released
+         * voices with the new note (VOICE_ADD_POLY's follow loop); the
+         * firmware's follow loop tests the voice status buffer's
+         * ACTIVE bit, so every voice whose key is no longer down -
+         * pedal-held or a release tail - takes the new target.  The
+         * keyed group's own voices are held, so the loop moves the
+         * residue of the other groups only. */
+        for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+            slopsix_voice *held = &state->voices[v];
+
+            if (held->state != SLOPSIX_VOICE_FREE && !held->held) {
+                held->porta_target = target;
+            }
+        }
+    }
+
+    /* Every new note becomes the starting point of the next one. */
+    state->porta_last_target = target;
 }
 
 void slopsix_dx7s_note_off(slopsix_context_state *state, uint8_t note)
