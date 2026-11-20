@@ -10,6 +10,10 @@ Add experimental DX7S personality.
 - Add DX7S unison modes: fixed unison groups, oldest-group-first
   stealing with envelope continuation, per-group pedal and all-notes-off,
   and a provisional unison detune spread (neutral by default).
+- Fix the DX7S unison detune spread: the rendered offsets now round onto
+  whole EGS frequency-field units, the same grid the per-operator detune
+  steps on, instead of the grid's floor division rendering the stack
+  biased flat-downward with half its spread rounded away.
 - Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
   corner, the DX7S tail is set to 20 kHz.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7

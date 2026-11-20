@@ -3927,16 +3927,60 @@ static void stage_unison(void)
         }
 
         /* Detune: the provisional spread is symmetric, zero by default
-         * and inactive outside the unison modes. */
+         * and inactive outside the unison modes.  The rendered pitch
+         * follows it onto the frequency field's grid: the requested
+         * rank spread rounds onto whole field units instead of the
+         * field's floor division biasing the stack flat-downward. */
         check(state->voices[0].unison_offset == 0 &&
               state->voices[SLOPSIX_VOICE_COUNT - 1].unison_offset == 0,
               "the neutral detune leaves the stack in tune");
-        slopsix_set_unison_detune(ctx, 7u);
-        check(state->voices[0].unison_offset < 0 &&
-              state->voices[15].unison_offset > 0 &&
-              state->voices[0].unison_offset ==
-                  -state->voices[15].unison_offset,
-              "the detune spreads the stack symmetrically");
+        {
+            uint32_t centre_increment =
+                state->engines[7].ops[0].increment;
+            int on_grid;
+            unsigned rank;
+
+            check(state->engines[0].ops[0].increment == centre_increment &&
+                  state->engines[15].ops[0].increment == centre_increment,
+                  "the neutral stack renders one pitch");
+
+            slopsix_set_unison_detune(ctx, 7u);
+            check(state->voices[0].unison_offset < 0 &&
+                  state->voices[15].unison_offset > 0 &&
+                  state->voices[0].unison_offset ==
+                      -state->voices[15].unison_offset,
+                  "the detune spreads the stack symmetrically");
+            on_grid = 1;
+            for (rank = 0; rank < SLOPSIX_VOICE_COUNT; rank++) {
+                if (state->voices[rank].unison_offset %
+                        (int32_t)SLOPSIX_DX7S_UNISON_GRID_WORD != 0) {
+                    on_grid = 0;
+                }
+            }
+            check(on_grid, "the detune offsets sit on whole field units");
+            check(state->engines[7].ops[0].increment < centre_increment &&
+                  state->engines[8].ops[0].increment > centre_increment &&
+                  state->engines[0].ops[0].increment <
+                      state->engines[7].ops[0].increment &&
+                  state->engines[15].ops[0].increment >
+                      state->engines[8].ops[0].increment,
+                  "the detuned stack renders spread, not a downward bias");
+            slopsix_set_unison_detune(ctx, 1u);
+            check(state->voices[7].unison_offset == 0 &&
+                  state->voices[8].unison_offset == 0 &&
+                  state->engines[7].ops[0].increment == centre_increment &&
+                  state->engines[8].ops[0].increment == centre_increment,
+                  "a sub-unit middle rank rounds to the centre pitch");
+            check(state->voices[0].unison_offset ==
+                      -4 * (int32_t)SLOPSIX_DX7S_UNISON_GRID_WORD &&
+                  state->voices[15].unison_offset ==
+                      4 * (int32_t)SLOPSIX_DX7S_UNISON_GRID_WORD,
+                  "the end ranks round onto the nearest field unit");
+            check(state->engines[0].ops[0].increment < centre_increment &&
+                  state->engines[15].ops[0].increment > centre_increment,
+                  "a minimal detune still renders the spread's ends");
+            slopsix_set_unison_detune(ctx, 7u);
+        }
         slopsix_set_key_mode(ctx, SLOPSIX_KEY_POLY);
         check(state->voices[0].unison_offset == 0 &&
               state->voices[15].unison_offset == 0,

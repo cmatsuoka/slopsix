@@ -69,14 +69,29 @@ static int slopsix_dx7s_group_sounding(const slopsix_context_state *state,
 
 /* The voice's own share of the stack's spread (D7S-10).  The ranks are
  * centred on the group, so the two ends move apart symmetrically as the
- * detune rises; detune 0 (the default) makes every voice identical. */
+ * detune rises; detune 0 (the default) makes every voice identical.
+ *
+ * The requested rank spread is finer than the EGS frequency field, so it
+ * is composed in whole field units, each rounded to the nearest one.  At
+ * word resolution the frequency path's floor division renders the
+ * requested half of the spread per voice: a +1 engine word offset floors
+ * to zero of the four units it asks for while a -1 word offset floors to
+ * a full flat unit, so the stack renders biased flat-downward instead of
+ * spread.  On whole units each voice's frequency-field datum carries
+ * exactly its share, independently of the rest of the word; the detune
+ * sits on the same grid the per-operator detune steps on (P-04). */
 static int32_t slopsix_dx7s_detune_offset(uint8_t detune, unsigned rank,
     unsigned size)
 {
     int32_t centred = (int32_t)(2u * rank) - (int32_t)(size - 1u);
+    int32_t spread = centred * (int32_t)detune *
+        (int32_t)SLOPSIX_DX7S_UNISON_DETUNE_STEP_WORD;
+    int32_t grid = (int32_t)SLOPSIX_DX7S_UNISON_GRID_WORD;
+    int32_t datum;
 
-    return centred * (int32_t)detune *
-           (int32_t)SLOPSIX_DX7S_UNISON_DETUNE_STEP_WORD;
+    datum = (spread >= 0) ? (spread + grid / 2) / grid
+                          : -(((-spread) + grid / 2) / grid);
+    return datum * grid;
 }
 
 void slopsix_dx7s_clear_groups(slopsix_context_state *state)

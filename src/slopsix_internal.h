@@ -622,14 +622,23 @@ typedef struct {
  *
  * Evidence grade: working model.  The owner's manual confirms the 0..7
  * parameter in the two unison modes but gives no law.  Each voice's
- * distance from the stack's centre is `2*rank - (size-1)` ranks, each
- * rank is `detune` steps, and a step is one engine word (1/4096 octave,
- * about 0.29 cent).  At detune 7 a four-voice stack spans about ±6 cents
- * and a sixteen-voice stack about ±31 cents.  Value
- * 0 is the neutral default, so Poly and a zeroed detune leave the Mk1
- * parity intact.  A later capture replaces this constant, not the code
- * path. */
+ * requested distance from the stack's centre is `2*rank - (size-1)`
+ * ranks, each rank is `detune` steps, and a step is one engine word
+ * (1/4096 octave, about 0.29 cent).  Value 0 is the neutral default, so
+ * Poly and a zeroed detune leave the Mk1 parity intact.
+ *
+ * The requested step is finer than the EGS frequency field, so the
+ * offset is composed in whole field units, rounded to the nearest one
+ * (src/dx7s/slopsix_voice.c): the field's floor division would otherwise
+ * render the spread biased flat-downward.  One rendered unit is
+ * SLOPSIX_DX7S_UNISON_GRID_WORD engine words, the same grid and step the
+ * per-operator detune uses (P-04).  At detune 7 a four-voice stack
+ * renders about ±6 cents and a sixteen-voice stack about ±31 cents.  A
+ * later capture replaces the law, not the code path. */
 #define SLOPSIX_DX7S_UNISON_DETUNE_STEP_WORD 1
+/* One EGS frequency-field unit in engine words (D-16, P-04): the grid a
+ * voice word's phase increment is quantized onto. */
+#define SLOPSIX_DX7S_UNISON_GRID_WORD       4u
 #endif
 
 /* The note the firmware hands to its note-table conversion: the dump's
