@@ -3985,6 +3985,89 @@ static void stage_unison(void)
         check(state->voices[0].unison_offset == 0 &&
               state->voices[15].unison_offset == 0,
               "Poly mode carries no unison detune");
+        check(state->engines[0].ops[0].increment ==
+              state->engines[15].ops[0].increment,
+              "the mode switch re-pitches the un-detuned voices");
+
+        /* A note the mode switch orphaned still releases: the switch
+         * clears the group bookkeeping, so the key-off reaches it
+         * through the paths' own per-voice pass. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_POLY);
+        slopsix_note_off(ctx, 60u);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_RELEASED) == 1 &&
+              count_voices(state, 60u, SLOPSIX_VOICE_ON) == 0,
+              "a held note the switch orphaned releases on its key-off");
+
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_POLY);
+        slopsix_note_on(ctx, 60u, 100u);
+        slopsix_note_on(ctx, 62u, 100u);
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_all_notes_off(ctx);
+        check(count_voices(state, 60u, SLOPSIX_VOICE_RELEASED) == 1 &&
+              count_voices(state, 62u, SLOPSIX_VOICE_RELEASED) == 1,
+              "all-notes-off reaches the notes the switch orphaned");
+
+        /* The mono destination owns one voice: the switch seeds its
+         * bookkeeping from voices[0] and frees the held voices mono
+         * cannot own, the pedal deferring those releases. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_note_on(ctx, 55u, 100u);
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_MONO);
+        check(count_voices(state, 55u, SLOPSIX_VOICE_RELEASED) == 15 &&
+              count_voices(state, 55u, SLOPSIX_VOICE_ON) == 1 &&
+              state->mono_count == 1u && state->mono_keys[0] == 55u,
+              "the mono switch seeds voices[0] and frees the rest");
+        slopsix_note_off(ctx, 55u);
+        check(count_voices(state, 55u, SLOPSIX_VOICE_RELEASED) == 16 &&
+              state->mono_count == 0u,
+              "the seeded key releases through the mono bookkeeping");
+
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_note_on(ctx, 55u, 100u);
+        slopsix_set_sustain(ctx, true);
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_MONO);
+        check(count_voices(state, 55u, SLOPSIX_VOICE_ON) == 16 &&
+              !state->voices[15].held && state->mono_count == 1u,
+              "the pedal defers the mono switch's releases");
+        slopsix_set_sustain(ctx, false);
+        check(count_voices(state, 55u, SLOPSIX_VOICE_RELEASED) == 15 &&
+              count_voices(state, 55u, SLOPSIX_VOICE_ON) == 1,
+              "pedal-up releases the deferred voices");
+
+        /* Re-applying the current mode is a no-op: a host that restores
+         * its configuration must not clear a live stack's groups or
+         * flatten its detune. */
+        slopsix_reset(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_set_unison_detune(ctx, 7u);
+        slopsix_note_on(ctx, 60u, 100u);
+        {
+            int32_t off0 = state->voices[0].unison_offset;
+            int32_t off15 = state->voices[15].unison_offset;
+            uint32_t inc0 = state->engines[0].ops[0].increment;
+            uint32_t inc15 = state->engines[15].ops[0].increment;
+
+            check(slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO) ==
+                      SLOPSIX_OK,
+                  "re-applying the current key mode is accepted");
+            check(off0 < 0 && off15 > 0 &&
+                  state->voices[0].unison_offset == off0 &&
+                  state->voices[15].unison_offset == off15 &&
+                  state->engines[0].ops[0].increment == inc0 &&
+                  state->engines[15].ops[0].increment == inc15,
+                  "re-applying the current key mode leaves the stack alone");
+        }
 
         /* The stack's mix is the bit-exact superposition of its voices. */
         slopsix_reset(ctx);

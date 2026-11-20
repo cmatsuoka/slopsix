@@ -149,6 +149,35 @@ static void slopsix_dx7s_release_voice(slopsix_voice *slot,
     slopsix_voice_engine_release(engine);
 }
 
+/* A key whose group the bookkeeping no longer owns.  A mode switch
+ * clears the group table and leaves the sounding voices alone, so a key
+ * still down can outlive the group that received it (the switch into
+ * mono re-homes its own residue at the same time).  These keys release
+ * like any other: the key-off reaches the note's held voices, or, for
+ * all-notes-off, every held voice, and the pedal defers the release
+ * exactly as the group loops defer theirs. */
+static void slopsix_dx7s_release_orphans(slopsix_context_state *state,
+    uint8_t note, int all_notes)
+{
+    unsigned v;
+
+    for (v = 0; v < SLOPSIX_VOICE_COUNT; v++) {
+        slopsix_voice *voice = &state->voices[v];
+
+        if (voice->state != SLOPSIX_VOICE_ON || !voice->held) {
+            continue;
+        }
+        if (!all_notes && voice->note != note) {
+            continue;
+        }
+        if (state->sustain) {
+            voice->held = false;
+        } else {
+            slopsix_dx7s_release_voice(voice, &state->engines[v]);
+        }
+    }
+}
+
 /* One voice of a group takes the new key event.  A continued sounding
  * voice keeps its envelopes and only re-pitches; a fresh or released
  * voice gets the full trigger. */
@@ -287,6 +316,11 @@ void slopsix_dx7s_note_off(slopsix_context_state *state, uint8_t note)
             }
         }
     }
+
+    /* The keys the cleared bookkeeping no longer owns release through
+     * the per-voice pass; the groups' own voices were released or
+     * deferred above. */
+    slopsix_dx7s_release_orphans(state, note, 0);
 }
 
 void slopsix_dx7s_all_notes_off(slopsix_context_state *state)
@@ -327,6 +361,11 @@ void slopsix_dx7s_all_notes_off(slopsix_context_state *state)
             }
         }
     }
+
+    /* The held voices no active group owns release under the same CC
+     * 123 semantics; a switched-away mode's residue is the common
+     * case. */
+    slopsix_dx7s_release_orphans(state, 0u, 1);
 
     /* All-notes-off clears the groups; the pedal-held voices, if any,
      * release on pedal-up through the shared path. */

@@ -1231,21 +1231,64 @@ slopsix_error slopsix_set_key_mode(slopsix_context ctx, slopsix_key_mode mode)
     switch (impl->engine) {
     case SLOPSIX_ENGINE_DX7S:
 #if SLOPSIX_HAS_DX7S
-        impl->dx7.key_mode = (uint8_t)mode;
+    {
+        slopsix_context_state *state = &impl->dx7;
+        unsigned v;
+
+        /* Re-applying the current mode changes nothing: a host that
+         * restores its configuration must not clear a live stack's
+         * group bookkeeping or its detune. */
+        if (state->key_mode == (uint8_t)mode) {
+            return SLOPSIX_OK;
+        }
+        state->key_mode = (uint8_t)mode;
         /* The DX7S's Mono mode is the Mk1's single-voice path; Poly and
          * the two unison modes keep the shared mono bookkeeping idle.
-         * Switching modes clears the bookkeeping, not the sounding
-         * voices (the Mk1's mode switch leaves its EGS voices alone). */
-        impl->dx7.mono = (mode == SLOPSIX_KEY_MONO);
-        if (impl->dx7.mono) {
-            memset(impl->dx7.mono_keys, 0,
-                   sizeof(impl->dx7.mono_keys));
-            impl->dx7.mono_count = 0;
-            impl->dx7.mono_dir = 0u;
+         * The switch clears the bookkeeping the mode owns, not the
+         * sounding voices (the Mk1's mode switch leaves its EGS voices
+         * alone), and keeps the notes it held reachable: Poly releases
+         * by voice and the unison modes by group, with the unison
+         * paths' own per-voice pass for the residue the cleared groups
+         * no longer own.  Mono owns exactly one key, voices[0]'s, so
+         * the switch seeds the bookkeeping from there and frees the
+         * held voices mono cannot own - the pedal deferring those
+         * releases exactly as a note-off defers its group's. */
+        state->mono = (mode == SLOPSIX_KEY_MONO);
+        memset(state->mono_keys, 0, sizeof(state->mono_keys));
+        state->mono_count = 0;
+        state->mono_dir = 0u;
+        state->mono_last_key = 0u;
+        if (state->mono) {
+            if (state->voices[0].state == SLOPSIX_VOICE_ON &&
+                state->voices[0].held) {
+                state->mono_keys[0] = state->voices[0].note;
+                state->mono_count = 1u;
+                state->mono_last_key = state->voices[0].note;
+            } else {
+                state->mono_last_key = 0u;
+            }
+            for (v = 1u; v < SLOPSIX_VOICE_COUNT; v++) {
+                slopsix_voice *voice = &state->voices[v];
+
+                if (voice->state != SLOPSIX_VOICE_ON || !voice->held) {
+                    continue;
+                }
+                if (state->sustain) {
+                    voice->held = false;
+                } else {
+                    slopsix_release_voice(voice, &state->engines[v]);
+                }
+            }
         }
-        slopsix_dx7s_clear_groups(&impl->dx7);
-        slopsix_dx7s_apply_detune(&impl->dx7);
+        slopsix_dx7s_clear_groups(state);
+        slopsix_dx7s_apply_detune(state);
+        /* The dropped offsets are part of the phase increments: the
+         * sounding voices re-pitch at once, the way every other offset
+         * change reaches them, instead of carrying the old increments
+         * until an unrelated pitch event rewrites them. */
+        slopsix_refresh_pitch(state);
         return SLOPSIX_OK;
+    }
 #else
         return SLOPSIX_ERR_UNSUPPORTED;
 #endif

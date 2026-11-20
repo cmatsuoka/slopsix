@@ -14,6 +14,14 @@ Add experimental DX7S personality.
   whole EGS frequency-field units, the same grid the per-operator detune
   steps on, instead of the grid's floor division rendering the stack
   biased flat-downward with half its spread rounded away.
+- Fix DX7S key-mode switching: the sounding voices re-pitch at once when
+  the switch drops their unison offsets, and the keys the old mode's
+  bookkeeping owned stay releasable - the unison note-off/all-notes-off
+  paths free orphaned held voices through a per-voice pass, and a switch
+  into mono seeds its single-key bookkeeping from voices[0] and frees
+  the held voices mono cannot own (the pedal defers these releases).
+  Re-applying the current mode is a no-op, so it cannot clear a live
+  stack's groups or flatten its detune.
 - Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
   corner, the DX7S tail is set to 20 kHz.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7
