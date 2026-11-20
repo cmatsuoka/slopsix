@@ -4163,6 +4163,37 @@ static void stage_unison(void)
                   "re-applying the current key mode leaves the stack alone");
         }
 
+        /* The unison detune rides the voice frequency word, and the
+         * fixed-frequency operators ignore that word the way they
+         * ignore the voice pitch's other contributions (bend, pitch EG,
+         * master tune - P-03's rule): an all-fixed patch carries no
+         * unison spread.  Deliberate; the spread is the voice's, not
+         * the operators'. */
+        {
+            uint8_t fixed_dump[SLOPSIX_VOICE_DUMP_SIZE];
+            uint32_t base_increment;
+
+            memcpy(fixed_dump, dump, sizeof(fixed_dump));
+            /* Block 5 is operator 1, the sounding carrier of the
+             * reference patch: fixed mode, ratio fields zeroed. */
+            fixed_dump[5u * SLOPSIX_DUMP_OP_BLOCK + 17u] = 1u;
+            fixed_dump[5u * SLOPSIX_DUMP_OP_BLOCK + 18u] = 0u;
+            fixed_dump[5u * SLOPSIX_DUMP_OP_BLOCK + 19u] = 0u;
+            slopsix_reset(ctx);
+            slopsix_set_voice(ctx, fixed_dump, sizeof(fixed_dump));
+            slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+            slopsix_note_on(ctx, 60u, 100u);
+            base_increment = state->engines[3].ops[0].increment;
+            check(state->engines[0].ops[0].increment == base_increment &&
+                  state->engines[15].ops[0].increment == base_increment,
+                  "the fixed-mode stack renders one increment for all");
+            slopsix_set_unison_detune(ctx, 7u);
+            check(state->voices[0].unison_offset != 0 &&
+                  state->engines[0].ops[0].increment == base_increment &&
+                  state->engines[15].ops[0].increment == base_increment,
+                  "the unison detune leaves the fixed operators on pitch");
+        }
+
         /* The stack's mix is the bit-exact superposition of its voices. */
         slopsix_reset(ctx);
         slopsix_set_voice(ctx, dump, sizeof(dump));

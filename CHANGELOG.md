@@ -52,6 +52,11 @@ Add experimental DX7S personality.
   so a detune-0 stack is one voice amplified until the accumulators
   diverge (or key sync is off). Deliberate per-voice application of the
   key-sync rule, no behaviour change; pinned by the unison stage.
+- Record that the DX7S unison detune rides the voice frequency word and
+  so does not reach fixed-frequency operators, the same rule that keeps
+  them off the voice's bend/pitch-EG/master-tune contributions; a patch
+  with an all-fixed stack carries no unison spread. Pinned by the
+  unison stage.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own
