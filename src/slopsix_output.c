@@ -95,15 +95,17 @@ int32_t slopsix_dac_step(int32_t bus)
  *
  * The reference level is the output stage's own choice, not a hardware
  * fact (the DAC's absolute span and the analog stage are out of the
- * model, research OQ-24/OU-04).  With no headroom (the default,
- * SLOPSIX_OUTPUT_HEADROOM_BITS = 0) the code window's rails land on the
- * int16 rails - int16 full scale is 16 codes, 2048 * 16 = 32768 - which
- * keeps the output in the Dexed/msfa baseline's level region; one bit of
- * headroom halves it (6.02 dB) and matches the VDX7 reference renderer.
+ * model, research OQ-24/OU-04).  The default one bit of headroom
+ * (SLOPSIX_OUTPUT_HEADROOM_BITS = 1) puts the code window's rails
+ * 6.02 dB below the int16 rails - int16 full scale is 32 codes,
+ * 2048 * 32 = 65536 - and matches the VDX7 reference renderer's gain
+ * staging.
  *
  * The analog stage can overshoot the code window (the filter's passband
- * peaks at +0.8 dB and its high-Q section rings), so the conversion
- * saturates at the int16 rails: that saturation is the chain's last one.
+ * peaks at +0.8 dB and its high-Q section rings, and a full-level voice
+ * already sits near the top of the window), so the conversion saturates
+ * at the int16 rails: that saturation is the chain's last one, and the
+ * headroom keeps ordinary single voices and small chords out of it.
  */
 int16_t slopsix_output_scale(int32_t code_q12, int32_t gain_q16)
 {

@@ -4,14 +4,17 @@
 
 Add experimental DX7S personality.
 
-- Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
-  corner; the DX7S tail stays at 20 kHz.
 - Add experimental, unverified DX7S personality.
 - Add DX7S-only voice parameter setters, gated by personality.
 - Implement the DX7S pitch EG's range, velocity switch and rate scaling.
 - Add DX7S unison modes: fixed unison groups, oldest-group-first
   stealing with envelope continuation, per-group pedal and all-notes-off,
   and a provisional unison detune spread (neutral by default).
+- Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
+  corner, the DX7S tail is set to 20 kHz.
+- Give the output stage one bit (6 dB) of headroom, matching the VDX7
+  reference level. Full-level patches no longer saturate at the final
+  conversion when the analog tail overshoots or voices sum.
 - Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)

@@ -2549,8 +2549,8 @@ static void stage_output(void)
             SLOPSIX_Q16_ONE) == 1,
           "the DX7S conversion keeps a one-LSB 16-bit code");
     check(slopsix_dx7s_output_scale(32767 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 32767,
-          "the DX7S conversion maps a full 16-bit code to full int16");
+            SLOPSIX_Q16_ONE) == 16384,
+          "the DX7S conversion keeps the default headroom below int16");
 #endif
 
     /* The master ladder: the resistor string's taps as exact Q16 gains. */
@@ -2567,26 +2567,26 @@ static void stage_output(void)
      * The value is the analog stage's output in Q12 of a DAC code, so
      * the code window's rails are the Q12 values of 2047 and -2048.
      * These expectations are the default reference
-     * (SLOPSIX_OUTPUT_HEADROOM_BITS = 0); one bit of headroom moves
-     * every value here down by one bit. */
+     * (SLOPSIX_OUTPUT_HEADROOM_BITS = 1); removing the headroom doubles
+     * every value here. */
     check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12,
-                               SLOPSIX_Q16_ONE) == 32752,
-          "the code window's top lands on 32752 at unity gain");
+                               SLOPSIX_Q16_ONE) == 16376,
+          "the code window's top lands on 16376 at unity gain");
     check(slopsix_output_scale(-2048 * (1 << SLOPSIX_FILTER_Q12),
-                               SLOPSIX_Q16_ONE) == -32768,
-          "the code window's floor lands on -32768");
+                               SLOPSIX_Q16_ONE) == -16384,
+          "the code window's floor lands on -16384");
     check(slopsix_output_scale(2046 << SLOPSIX_FILTER_Q12,
-                               SLOPSIX_Q16_ONE) == 32736,
+                               SLOPSIX_Q16_ONE) == 16368,
           "unity gain keeps the int16 output on the 12-bit grid");
     check(slopsix_output_scale(100 << SLOPSIX_FILTER_Q12,
-                               SLOPSIX_Q16_ONE) == 1600,
+                               SLOPSIX_Q16_ONE) == 800,
           "unity gain keeps the int16 output on the 12-bit grid");
-    check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12, 36052) == 18017,
+    check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12, 36052) == 9009,
           "a ladder tap scales the code");
-    check(slopsix_output_scale(-2048 * (1 << SLOPSIX_FILTER_Q12), 1340) == -670,
+    check(slopsix_output_scale(-2048 * (1 << SLOPSIX_FILTER_Q12), 1340) == -335,
           "the quietest tap scales the code");
     check(slopsix_output_scale(2047 << SLOPSIX_FILTER_Q12,
-                               SLOPSIX_Q16_ONE) == 32752 &&
+                               SLOPSIX_Q16_ONE) == 16376 &&
           slopsix_output_scale(4096 << SLOPSIX_FILTER_Q12,
                                SLOPSIX_Q16_ONE) == 32767,
           "the conversion saturates at the int16 rails");
@@ -2611,14 +2611,14 @@ static void stage_output(void)
          * window top out, left and right identical.  The analog tail's
          * filter is stateful, so the constant bus is settled first. */
         output_settle(state, 16376, &l1, &r1);
-        check(output_near(l1, 32752, 2) && output_near(r1, 32752, 2),
+        check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
               "the mixed bus's full scale lands on the code window's top");
         output_settle(state, 16384, &l1, &r1);
-        check(output_near(l1, 32752, 2) && output_near(r1, 32752, 2),
+        check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
               "a bus past one voice's window saturates instead of growing");
         output_settle(state, -16384, &l1, &r1);
-        check(output_near(l1, -32768, 2) && output_near(r1, -32768, 2),
-              "the negative rail saturates at -32768");
+        check(output_near(l1, -16384, 2) && output_near(r1, -16384, 2),
+              "the negative rail saturates at -16384");
 
         /* Determinism: the same state and the same input sequence produce
          * the same output.  The filter is stateful, so the replay starts
@@ -2650,11 +2650,11 @@ static void stage_output(void)
         /* The volume ladder through the composite. */
         slopsix_set_midi_volume(ctx, 0u);
         output_settle(state, 16376, &l1, &r1);
-        check(output_near(l1, 670, 2) && output_near(r1, 670, 2),
+        check(output_near(l1, 335, 2) && output_near(r1, 335, 2),
               "volume 0 is the ladder's bottom tap, not silence");
         slopsix_set_midi_volume(ctx, 3u);
         output_settle(state, 16376, &l1, &r1);
-        check(output_near(l1, 3215, 2) && output_near(r1, 3215, 2),
+        check(output_near(l1, 1607, 2) && output_near(r1, 1607, 2),
               "volume 3's tap scales the mixed code");
         slopsix_set_midi_volume(ctx, 7u);
 
@@ -2665,7 +2665,7 @@ static void stage_output(void)
               "the default output volume is unity");
         slopsix_set_output_gain(ctx, SLOPSIX_Q16_ONE / 2);
         output_settle(state, 16376, &l1, &r1);
-        check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
+        check(output_near(l1, 8188, 2) && output_near(r1, 8188, 2),
               "half output volume halves the converted code");
         slopsix_set_output_gain(ctx, 0);
         output_settle(state, 16376, &l1, &r1);
@@ -2679,7 +2679,7 @@ static void stage_output(void)
         check(state->master_gain_q16 == (6433 * (SLOPSIX_Q16_ONE / 2)) >> 16,
               "the gain composes the ladder tap with the output volume");
         output_settle(state, 16376, &l1, &r1);
-        check(output_near(l1, 1607, 2) && output_near(r1, 1607, 2),
+        check(output_near(l1, 804, 2) && output_near(r1, 804, 2),
               "the composed gain scales the converted code");
         slopsix_set_midi_volume(ctx, 7u);
         check(state->master_gain_q16 == (SLOPSIX_Q16_ONE / 2),
@@ -2690,29 +2690,29 @@ static void stage_output(void)
 #if SLOPSIX_HAS_EXTRAS
         /* The pan law through the composite: centre is bit-identical
          * mono-in-both-channels, the extremes are hard splits.  The bus
-         * 8000 maps to code 1000, which at unity gain is 16000. */
+         * 8000 maps to code 1000, which at unity gain is 8000. */
         output_settle(state, -12800, &l1, &r1);
-        check(output_near(l1, -25600, 2) && output_near(r1, -25600, 2),
+        check(output_near(l1, -12800, 2) && output_near(r1, -12800, 2),
               "the default centre keeps both channels identical");
         slopsix_set_pan(ctx, 0);
         output_settle(state, 8000, &l1, &r1);
-        check(output_near(l1, 16000, 2) && r1 == 0,
+        check(output_near(l1, 8000, 2) && r1 == 0,
               "hard left carries the mono signal alone");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE);
         output_settle(state, 8000, &l1, &r1);
-        check(l1 == 0 && output_near(r1, 16000, 2),
+        check(l1 == 0 && output_near(r1, 8000, 2),
               "hard right carries the mono signal alone");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 4);
         output_settle(state, 8000, &l1, &r1);
-        check(output_near(l1, 16000, 2) && output_near(r1, 8000, 2),
+        check(output_near(l1, 8000, 2) && output_near(r1, 4000, 2),
               "the left half keeps the mono level, the right fades");
         slopsix_set_pan(ctx, 3 * SLOPSIX_Q16_ONE / 4);
         output_settle(state, 8000, &l1, &r1);
-        check(output_near(l1, 8000, 2) && output_near(r1, 16000, 2),
+        check(output_near(l1, 4000, 2) && output_near(r1, 8000, 2),
               "the right half keeps the mono level, the left fades");
         slopsix_set_pan(ctx, SLOPSIX_Q16_ONE / 2);
         output_settle(state, -12800, &l1, &r1);
-        check(output_near(l1, -25600, 2) && output_near(r1, -25600, 2),
+        check(output_near(l1, -12800, 2) && output_near(r1, -12800, 2),
               "centre is bit-identical, negative codes included");
 
         /* The pan law's own clamps, called directly on a code. */
@@ -2734,7 +2734,7 @@ static void stage_output(void)
         /* Without the extras the mono code lands in both channels
          * whatever a host stores in the state. */
         output_settle(state, 8000, &l1, &r1);
-        check(output_near(l1, 16000, 2) && output_near(r1, 16000, 2),
+        check(output_near(l1, 8000, 2) && output_near(r1, 8000, 2),
               "without the extras both channels carry the mono signal");
 #endif
 

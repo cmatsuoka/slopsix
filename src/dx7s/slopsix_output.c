@@ -87,11 +87,11 @@ int32_t slopsix_dx7s_dac_step(int32_t bus)
  * the gain falls out of the shift.  The value rounds to nearest,
  * half away from zero.
  *
- * The reference level follows the same convention as the Mk1: with no
- * headroom the output's full-scale window maps onto the int16 rails;
- * one bit of headroom halves it (6.02 dB).  The actual hardware level
- * is out of the digital model (the DAC's absolute span and the analog
- * stage are unknown, research OQ-24/OU-04).
+ * The reference level follows the same convention as the Mk1: the
+ * default one bit of headroom puts the output's full-scale window
+ * 6.02 dB below the int16 rails (SLOPSIX_OUTPUT_HEADROOM_BITS).  The
+ * actual hardware level is out of the digital model (the DAC's absolute
+ * span and the analog stage are unknown, research OQ-24/OU-04).
  *
  * The analog stage can overshoot the 16-bit code window (the filter's
  * passband peaks at +0.8 dB in the Mk1 design; the DX7S filter is

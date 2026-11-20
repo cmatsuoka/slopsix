@@ -140,11 +140,11 @@ void slopsix_reset(slopsix_context ctx);
  * The output level is a library convention, not a hardware fact (the
  * DAC's absolute span and the board's analog stage are deliberately out
  * of the model).  At the default master volume - the hardware's top
- * ladder tap - the 12-bit code window's rails land on int16 full scale,
- * the level region of the common DX7 emulator baselines, so a host that
- * swaps engines keeps its gain staging.  The model's own saturation is
- * that code window; the analog tail's overshoot can reach the int16
- * rails, where the conversion saturates. */
+ * ladder tap - the 12-bit code window's rails sit 6 dB below int16 full
+ * scale, leaving room for the analog tail's passband and transient
+ * overshoot and for ordinary polyphony; the conversion saturates only at
+ * the int16 rails.  This matches the VDX7 reference renderer's gain
+ * staging. */
 void slopsix_process(slopsix_context ctx, int16_t *stereo_out, size_t frames);
 
 /* ---------------------------------------------------------------- patches */
