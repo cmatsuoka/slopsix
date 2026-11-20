@@ -19,10 +19,6 @@ Add experimental DX7S personality.
   window. The per-voice compander already owns that window and the bus is
   the analog sum, so loud chords no longer hard-clip at one voice's level;
   only the final int16 conversion (the analog stage's rail) saturates.
-- Deepen the self-feedback division by one bit. The previous feedback
-  level-to-shift map left level 7 one bit hot, so loud feedback patches
-  (for example a talkbox or sawtooth built on algorithm 17) hunted in a
-  near-Nyquist limit cycle instead of the intended sawtooth.
 - Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)

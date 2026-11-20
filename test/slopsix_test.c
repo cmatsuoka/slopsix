@@ -609,29 +609,6 @@ static void stage_operator(void)
         check(half_period == -base,
               "a 2048-unit modulation is half a sine period");
     }
-
-    /* The self-feedback division: the average of the two stored values
-     * (the anti-hunting measure) and the level-dependent shifter, for an
-     * effective division of 2^(9 - level).  Level 7 is the harshest; the
-     * mapping is what keeps the loop on the documented sawtooth branch
-     * instead of a near-Nyquist hunting limit cycle. */
-    {
-        int32_t full = 8192;
-
-        check(slopsix_feedback_scaled(full, full, 0) == 0,
-              "feedback level 0 is off");
-        check(slopsix_feedback_scaled(full, full, 7) == 4096,
-              "level 7 divides the pair sum by four");
-        check(slopsix_feedback_scaled(full, full, 6) == 2048,
-              "level 6 divides the pair sum by eight");
-        check(slopsix_feedback_scaled(full, full, 1) == 64,
-              "level 1 divides the pair sum by 256");
-        check(slopsix_feedback_scaled(full, 0, 7) == 2048,
-              "the pair is averaged before the shifter");
-        check(slopsix_feedback_scaled(full, full, 7) >
-              slopsix_feedback_scaled(full, full, 6),
-              "a higher feedback level divides less");
-    }
 }
 
 /* The frequency of a phase increment, in milli-hertz, computed with

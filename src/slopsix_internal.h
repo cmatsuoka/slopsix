@@ -176,6 +176,11 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * adds the operator sum as it is. */
 #define SLOPSIX_MOD_DEVIATION_SHIFT 11
 
+/* The feedback shifter's deepest position.  The die carries a 0..6-bit
+ * feedback shifter (research O-06); the level-to-shift mapping is
+ * provisional and documented in the constant block below. */
+#define SLOPSIX_FB_SHIFT_MAX 6
+
 /* The word for MIDI note 69 (A4): the note word's reference pitch, and
  * the anchor of the frequency calibration (see src/slopsix_pitch.c). */
 #define SLOPSIX_WORD_A4 23208
@@ -202,24 +207,14 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * generated tables above. */
 
 
-/* Evidence grade: emulator-derived model (research O-06; the hardware
- * level-to-shift capture is still open).
- *
- * The feedback field is 3 bits (0..7, level 0 = no feedback).  The path
- * averages its last two values (the anti-hunting measure, one bit of
- * division in slopsix_feedback_scaled) and the level-dependent shifter
- * divides by 2^(8 - level), so the effective division is 2^(9 - level).
- *
- * This is one bit deeper than the earlier 7 - level reading.  That
- * shallower mapping drove the self-feedback loop into a near-Nyquist
- * limit cycle at level 7 - a period-3 "hunting" tone near fs/3 - whenever
- * the feedback operator carried a large level, instead of the
- * sawtooth-like spectrum the path is documented to produce (research
- * O-06: the two-sample average is the anti-hunting measure).  The deeper
- * curve reproduces the sawtooth and matches the msfa model's 8 - fx
- * shift.  The die's shifter size and the exact mapping remain open; a
- * hardware capture closes them. */
-#define SLOPSIX_FB_SHIFT(level) (8u - (unsigned)(level))
+/* Evidence grade: emulator-derived model (research O-06).
+ * The feedback level-to-shift mapping: the OPS's feedback field is
+ * 3 bits (0..7, level 0 = no feedback) and the die's shifter has
+ * 0..6 positions.  The mapping used here is shift = 7 - level, i.e. the
+ * highest feedback level divides the least; a bit-synchronous OPS model
+ * agrees on the effective division. */
+#define SLOPSIX_FB_SHIFT(level) \
+    (SLOPSIX_FB_SHIFT_MAX + 1u - (unsigned)(level))
 
 /* Evidence grade: die's algorithm-box walkthrough (research A-01, A-02).
  * The sum/delay register: the walk's one per-voice register keeps its
@@ -1325,12 +1320,12 @@ static inline int32_t slopsix_signal_exp(int32_t log_q10)
  *
  * The hardware averages the last two stored values of the feedback pair
  * before feeding them back (the die's two feedback registers and the
- * averaging adder, the anti-hunting measure), and the result is divided
- * by a power of two (the feedback shifter).  The level-to-shift mapping
- * is 8 - level, so with the averaging bit the effective division is
- * 9 - level (research O-06).  The path's own value is pushed by the
- * operator whose row carries the feedback-store control bit (research
- * A-01 - in most algorithms that is the reading operator itself).
+ * averaging adder), and the result is divided by a power of two (the
+ * 0..6-bit feedback shifter).  The level-to-shift mapping is 7 - level,
+ * which a bit-synchronous OPS model corroborates (research O-06); the
+ * path's own value is pushed by the operator whose row carries the
+ * feedback-store control bit (research A-01 - in most algorithms that is
+ * the reading operator itself).
  */
 static inline int32_t slopsix_feedback_scaled(int32_t fren1, int32_t fren2,
     uint8_t feedback_level)

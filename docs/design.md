@@ -173,7 +173,7 @@ read together.
 | OQ-05 | Note-on phase initialisation? | **Answered:** the patch's OSC KEY SYNC bit selects OPS mode (`0x30` sync / `0x50` free-run); the reset value is chip-internal. |
 | OQ-06 | Compander shift-code rule and saturation/overflow? | **Partial (model):** the magnitude rule (drop 3/2/1/0 above `0x1000`/`0x800`/`0x400`) is decoded; exact SF-code numbering and saturation/overflow still need a capture. |
 | OQ-07 | Deviation scaling of the five modulation sources? | **Answered (model):** the 14-bit modulator is added directly to the 12-bit sine index; full-scale ≈±4 periods, no clamp. |
-| OQ-08 | Feedback level→shift map? | **Partial (model):** effective `>>(1+(8−level))` (one bit deeper than the earlier `7−level` reading); the shallower map drove level 7 into a near-Nyquist hunting limit cycle instead of the documented sawtooth. A capture is the closing evidence. |
+| OQ-08 | Feedback level→shift map? | **Partial (model):** effective `>>(1+(7−level))`; a capture is the closing evidence. |
 | OQ-09 | EG rate→increment, rate-scaling and key-level curves? | **Partial (firmware + model):** the key-level builder is decoded; the EG registers are pre-quantized to 0..63 and the EGS qrate/clock-gate law is model-derived. |
 | OQ-10 | Contents of the remaining scale/velocity/`statics` tables? | **Partial:** most tables located; the `statics` table is model-only. |
 | OQ-11 | Pitch-EG tables and LFO delay increments? | **Answered:** both pitch-EG tables known; the delay law `(16+u)<<(k+2)` is confirmed, with no transcription error. |
