@@ -249,17 +249,19 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 #define SLOPSIX_COMPANDER_MANTISSA_MIN (-2048)
 
 /* Evidence grade: the engine's V1 model of an open analog question
- * (research OU-02, OQ-24).  The mixed bus's master DAC stage reduces the
- * bus to the hardware's 12-bit DAC code grid.  The bus's unit is a
- * quantized voice's value (mantissa << shift), whose full scale is
- * 8 * 2047, so the code grid sits at one eighth of the bus unit - the
- * same domain the compander's 12-bit datum occupies - and the sum is
- * saturated at the code window's rails instead of wrapping.  The
- * hardware's true saturation level is set by the board's analog stage
- * and stays open; the rails are the engine's pinning. */
+ * (research OU-02, OQ-24).  The mixed bus's DAC stage reduces the bus to
+ * the hardware's 12-bit DAC code grid.  The bus's unit is a quantized
+ * voice's value (mantissa << shift), whose full scale is 8 * 2047, so the
+ * code grid sits at one eighth of the bus unit - the same domain the
+ * compander's 12-bit datum occupies.
+ *
+ * The step does not saturate.  The 12-bit DAC converts one voice per TDM
+ * slot and the voices sum in the analog domain after conversion
+ * (algorithm page §8); the per-voice 12-bit window is already the
+ * compander's clamp.  The bus is therefore the analog-domain sum, which
+ * legitimately exceeds one voice's window on a chord; the analog stage's
+ * rail is the int16 conversion's saturation, downstream. */
 #define SLOPSIX_DAC_GRID_SHIFT 3u
-#define SLOPSIX_DAC_CODE_MAX 2047
-#define SLOPSIX_DAC_CODE_MIN (-2048)
 
 /* The DX7S's DAC step (src/dx7s/slopsix_output.c): the 16-bit PCM54HP's
  * code grid.  The grid sits at half a bus unit, because the 16-bit DAC
@@ -1553,8 +1555,9 @@ static inline int32_t slopsix_compander_value(const slopsix_compander_word *word
     return (int32_t)word->mantissa * (1 << word->shift);
 }
 
-/* The master DAC step: the mixed bus reduced to the 12-bit code grid,
- * saturated at the rails (the constants above carry the model's grade). */
+/* The master DAC grid: the mixed bus reduced to the 12-bit code grid.
+ * The per-voice compander owns the code window, so this stage does not
+ * saturate (the constants above carry the model's grade). */
 int32_t slopsix_dac_step(int32_t bus);
 
 /* The DX7 per-voice bus stage: quantize every voice through the compander
@@ -1567,19 +1570,17 @@ void slopsix_voice_bus_companded(const int32_t *voice_out, int32_t *bus,
  * the top tap. */
 int32_t slopsix_master_gain_q16(unsigned level);
 
-/* The output stage's headroom, in bits: the model's own saturation point
- * (the 12-bit DAC code window) sits this far below int16 full scale.  One
- * bit is 6.02 dB.
+/* The output stage's headroom, in bits: the model's reference point
+ * (the 12-bit DAC code window, one full-scale voice) sits this far below
+ * int16 full scale.  One bit is 6.02 dB.
  *
  * The reference is the engine's choice, not a hardware fact: the DAC's
  * absolute span and the board's analog stage are deliberately out of the
  * model (research OQ-24, OU-04), so only the relative levels are pinned.
  * One bit matches the VDX7 reference renderer's convention and leaves
- * 6 dB for a host gain or a future effects chain.  It also keeps the
- * analog tail's passband and transient overshoot out of the int16 clamp:
- * a full-level voice already approaches the rails once the reconstruction
- * filter rings, so zero headroom turns loud patches - and any polyphonic
- * sum on top of them - into hard saturation at the final conversion.
+ * 6 dB for a host gain or a future effects chain.  The int16 conversion
+ * is the chain's only saturation now; it is the analog stage's rail, and
+ * the headroom sets where a polyphonic sum reaches it.
  *
  * Changing this changes every rendered level, so the output stage's
  * absolute-level checks in the harness move with it. */

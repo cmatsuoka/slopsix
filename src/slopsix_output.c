@@ -6,7 +6,8 @@
  * (it runs for every voice on every sample).  This translation unit holds
  * the once-per-sample stages and the master-volume ladder:
  *
- *   mixed bus  ->  12-bit DAC code step with saturation
+ *   mixed bus  ->  the 12-bit code grid (no saturation: the per-voice
+ *                  compander already holds each voice to that window)
  *              ->  the analog tail's reconstruction filter (the DX7's
  *                 own stage, src/slopsix_filter.c)
  *              ->  optional pan split (SLOPSIX_EXTRAS only)
@@ -67,22 +68,21 @@ int32_t slopsix_master_gain_q16(unsigned level)
     return slopsix_master_ladder_q16[level];
 }
 
-/* The mixed bus's master DAC step (plan decision D-5): the bus value
- * drops onto the hardware's 12-bit code grid and saturates at the code
- * window's rails.  The grid sits at SLOPSIX_DAC_GRID_SHIFT of the bus's
- * unit because one voice's full compander scale is eight codes; see the
- * constant block for the model's grade. */
+/* The mixed bus's DAC grid conversion (plan decision D-5): the bus value
+ * drops onto the hardware's 12-bit code grid at SLOPSIX_DAC_GRID_SHIFT of
+ * the bus's unit, because one voice's full compander scale is eight
+ * codes.  See the constant block for the model's grade.
+ *
+ * The step does not saturate.  The 12-bit DAC converts one voice per TDM
+ * slot and the voices are summed in the analog domain after conversion
+ * (algorithm page §8), so the per-voice 12-bit window is the compander's:
+ * the quantizer already clamps each voice's mantissa to it.  Saturating
+ * the bus here would apply that single-voice window to the whole mix and
+ * hard-clip every chord above one voice.  The chain's only remaining
+ * saturation is the int16 conversion, which is the analog stage's rail. */
 int32_t slopsix_dac_step(int32_t bus)
 {
-    int32_t code = slopsix_floor_div(bus, SLOPSIX_DAC_GRID_SHIFT);
-
-    if (code > SLOPSIX_DAC_CODE_MAX) {
-        code = SLOPSIX_DAC_CODE_MAX;
-    } else if (code < SLOPSIX_DAC_CODE_MIN) {
-        code = SLOPSIX_DAC_CODE_MIN;
-    }
-
-    return code;
+    return slopsix_floor_div(bus, SLOPSIX_DAC_GRID_SHIFT);
 }
 
 /* The final conversion: the analog stage's output times a Q16 gain onto
@@ -101,11 +101,11 @@ int32_t slopsix_dac_step(int32_t bus)
  * 2048 * 32 = 65536 - and matches the VDX7 reference renderer's gain
  * staging.
  *
- * The analog stage can overshoot the code window (the filter's passband
- * peaks at +0.8 dB and its high-Q section rings, and a full-level voice
- * already sits near the top of the window), so the conversion saturates
- * at the int16 rails: that saturation is the chain's last one, and the
- * headroom keeps ordinary single voices and small chords out of it.
+ * The analog stage can exceed the code window (the filter's passband
+ * peaks at +0.8 dB, its high-Q section rings, and the bus is the sum of
+ * several voices), so the conversion saturates at the int16 rails.  That
+ * is the chain's only saturation: it stands in for the analog stage's
+ * rail, and the headroom sets where the polyphonic sum reaches it.
  */
 int16_t slopsix_output_scale(int32_t code_q12, int32_t gain_q16)
 {

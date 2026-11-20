@@ -14,7 +14,11 @@ Add experimental DX7S personality.
   corner, the DX7S tail is set to 20 kHz.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7
   reference level. Full-level patches no longer saturate at the final
-  conversion when the analog tail overshoots or voices sum.
+  conversion when the analog tail overshoots.
+- Stop clamping the mixed voice bus at a single voice's 12-bit DAC
+  window. The per-voice compander already owns that window and the bus is
+  the analog sum, so loud chords no longer hard-clip at one voice's level;
+  only the final int16 conversion (the analog stage's rail) saturates.
 - Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)

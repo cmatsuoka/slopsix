@@ -2450,8 +2450,10 @@ static void stage_output(void)
     check(monotonic, "the compander's value is monotone in the input");
     check(in_window, "the compander's value is its grid floor and stays in reach");
 
-    /* The DAC step: the 12-bit grid at one eighth of the bus unit and
-     * the rails' saturation. */
+    /* The DAC step: the 12-bit grid at one eighth of the bus unit.  It
+     * does not saturate: the per-voice compander owns the 12-bit window,
+     * and the bus is the analog sum of the converted voices, so a chord
+     * past one voice's window must keep growing here. */
     check(slopsix_dac_step(0) == 0, "the DAC step maps zero to zero");
     check(slopsix_dac_step(7) == 0, "the DAC step floors below the grid");
     check(slopsix_dac_step(8) == 1, "the DAC step's grid is 8 bus units");
@@ -2462,14 +2464,15 @@ static void stage_output(void)
           "the DAC step floors negative and positive alike");
     check(slopsix_dac_step(16376) == 2047,
           "one full-scale voice is the code window's top");
-    check(slopsix_dac_step(16377) == 2047 && slopsix_dac_step(16384) == 2047,
-          "the positive rail saturates at 2047");
+    check(slopsix_dac_step(16377) == 2047 && slopsix_dac_step(16384) == 2048,
+          "a bus past one voice's window keeps growing");
     check(slopsix_dac_step(-16376) == -2047 &&
           slopsix_dac_step(-16377) == -2048 &&
           slopsix_dac_step(-16384) == -2048,
-          "the negative rail saturates at -2048");
-    check(slopsix_dac_step(262016) == 2047 && slopsix_dac_step(-262144) == -2048,
-          "a full 16-voice bus saturates instead of wrapping");
+          "the negative side floors past one voice's window");
+    check(slopsix_dac_step(262016) == 32752 &&
+          slopsix_dac_step(-262144) == -32768,
+          "a full 16-voice bus spans the wide grid, not one voice's window");
     {
         int monotone = 1;
 
@@ -2478,14 +2481,12 @@ static void stage_output(void)
             int32_t code = slopsix_dac_step(bus);
             int32_t lower = slopsix_dac_step(bus - 1);
 
-            if (code < lower) {
-                monotone = 0;
-            }
-            if (code > 2047 || code < -2048) {
+            if (code < lower ||
+                code != slopsix_floor_div(bus, SLOPSIX_DAC_GRID_SHIFT)) {
                 monotone = 0;
             }
         }
-        check(monotone == 1, "the DAC step is monotone and stays in the window");
+        check(monotone == 1, "the DAC step is monotone on the wide grid");
     }
 
 #if SLOPSIX_HAS_DX7S
@@ -2614,11 +2615,17 @@ static void stage_output(void)
         check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
               "the mixed bus's full scale lands on the code window's top");
         output_settle(state, 16384, &l1, &r1);
-        check(output_near(l1, 16376, 2) && output_near(r1, 16376, 2),
-              "a bus past one voice's window saturates instead of growing");
+        check(output_near(l1, 16384, 2) && output_near(r1, 16384, 2),
+              "a bus past one voice's window keeps growing");
+        output_settle(state, 32752, &l1, &r1);
+        check(output_near(l1, 32752, 2) && output_near(r1, 32752, 2),
+              "a two-voice bus stays below the int16 rails");
+        output_settle(state, 40000, &l1, &r1);
+        check(output_near(l1, 32767, 2) && output_near(r1, 32767, 2),
+              "only the int16 conversion saturates a loud polyphonic bus");
         output_settle(state, -16384, &l1, &r1);
         check(output_near(l1, -16384, 2) && output_near(r1, -16384, 2),
-              "the negative rail saturates at -16384");
+              "the negative side keeps growing past one voice's window");
 
         /* Determinism: the same state and the same input sequence produce
          * the same output.  The filter is stateful, so the replay starts
