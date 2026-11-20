@@ -1149,7 +1149,7 @@ void slopsix_dx7_all_notes_off(slopsix_context_state *state);
 
 #if SLOPSIX_HAS_DX7S
 /* The DX7S personality's own entry points.  They live under src/dx7s/ and
- * are compiled in only when SLOPSIX_DX7S_PERSONALITY is defined; the state
+ * are compiled in only when SLOPSIX_DX7S is defined; the state
  * is the shared context state (the DX7S is a superset of the DX7 path). */
 void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate);
 void slopsix_dx7s_reset(slopsix_context_state *state);

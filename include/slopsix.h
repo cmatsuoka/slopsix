@@ -49,14 +49,13 @@
  * compile time, so a program that uses an optional feature can be built
  * for a build without it.
  *
- * SLOPSIX_HAS_DX7S follows the *presence of the personality's own
- * translation units*: SLOPSIX_DX7S selects the configuration, and
- * SLOPSIX_DX7S_PERSONALITY says that the personality itself is compiled
- * in.  Until the personality's phase lands the second macro is not
- * defined and the capability reports 0 - a context for that engine is
- * then rejected at creation. */
+ * SLOPSIX_HAS_DX7S follows the personality's own controlling macro: a
+ * build that selects the DX7S configuration (SLOPSIX_DX7S) also compiles
+ * the personality's translation units, so the capability reports 1; a
+ * build without the macro reports 0 and rejects that engine at
+ * creation. */
 #define SLOPSIX_HAS_DX7 1
-#if defined(SLOPSIX_DX7S) && defined(SLOPSIX_DX7S_PERSONALITY)
+#if defined(SLOPSIX_DX7S)
 #define SLOPSIX_HAS_DX7S 1
 #else
 #define SLOPSIX_HAS_DX7S 0

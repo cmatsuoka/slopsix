@@ -35,11 +35,12 @@ ifeq ($(CONFIG),dx7)
   TESTBIN := slopsix_test
   TESTRUN := ./slopsix_test
 endif
-# The DX7S configuration.  SLOPSIX_DX7S selects the configuration and
-# SLOPSIX_DX7S_PERSONALITY says the personality's own translation units
-# under src/dx7s/ are part of the build; the two travel together here.
+# The DX7S configuration.  SLOPSIX_DX7S is the personality's controlling
+# macro: it selects the configuration, enables the shared DX7S paths and
+# brings the personality's own translation units under src/dx7s/ into the
+# build.
 ifeq ($(CONFIG),dx7s)
-  FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY
+  FEATURE_DEFS := -DSLOPSIX_DX7S
   ARCHIVE := build/$(CONFIG)/libslopsix.a
   TESTBIN := build/$(CONFIG)/slopsix_test
   TESTRUN := $(TESTBIN)
@@ -48,7 +49,7 @@ endif
 # on, so the paths that only exist when they are combined (the DX7S's pan
 # split) are built and tested.
 ifeq ($(CONFIG),dx7s-extras)
-  FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_DX7S_PERSONALITY -DSLOPSIX_EXTRAS
+  FEATURE_DEFS := -DSLOPSIX_DX7S -DSLOPSIX_EXTRAS
   ARCHIVE := build/$(CONFIG)/libslopsix.a
   TESTBIN := build/$(CONFIG)/slopsix_test
   TESTRUN := $(TESTBIN)
