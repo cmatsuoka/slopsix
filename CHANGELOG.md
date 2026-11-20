@@ -28,6 +28,10 @@ Add experimental DX7S personality.
   re-homing. Previously a Mono key mode under `set_mono_mode(false)`
   allocated the polyphonic path and a Poly key mode under
    `set_mono_mode(true)` allocated the mono one.
+- Reset the stolen stack's LFO state on the DX7S: a key event that
+  continues the envelopes (the Forced Damp Off steal) now also runs the
+  LFO note-on resets, re-seeding the keyed voice's sync'd phase and
+  clearing its patch delay's fade pair, like the fresh trigger does.
 - Implement portamento in the DX7S unison modes: the key events take the
   polyphonic composition, so with the pedal a fresh group glides from the
   instrument's last target and a stolen stack glides out of its own

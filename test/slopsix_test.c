@@ -3926,18 +3926,31 @@ static void stage_unison(void)
               "the stolen note's old key-off releases nothing");
 
         /* Unison Mono: one sixteen-voice group, and a re-press steals
-         * the group by continuing its envelopes. */
+         * the group by continuing its envelopes.  In Multi mode the
+         * stolen key event also runs its own LFO note-on resets, the
+         * two sides of the Forced Damp switch living apart. */
         slopsix_reset(ctx);
         slopsix_set_voice(ctx, dump, sizeof(dump));
         slopsix_set_key_mode(ctx, SLOPSIX_KEY_UNISON_MONO);
+        slopsix_set_lfo_mode(ctx, SLOPSIX_LFO_MULTI);
+        state->patch.lfo_sync = true;
         slopsix_note_on(ctx, 60u, 100u);
         check(count_voices(state, 60u, SLOPSIX_VOICE_ON) ==
                   SLOPSIX_VOICE_COUNT,
               "Unison Mono stacks all sixteen voices on one note");
+        check(state->engines[3].lfo.phase == 0x7FFFu &&
+              state->engines[9].lfo.phase == 0x7FFFu,
+              "the fresh stack's key events seed their LFOs in Multi");
         slopsix_process(ctx, render_buf_a, 200u);
+        check(state->engines[3].lfo.phase != 0x7FFFu,
+              "the per-voice LFOs drift on their own after the seed");
         {
             uint8_t stage_before = state->engines[0].eg[0].stage;
             int32_t level_before = state->engines[0].eg[0].level;
+
+            state->patch.lfo_delay = 5u;
+            state->engines[9].lfo.delay_acc = 123u;
+            state->engines[9].lfo.fade = 45u;
 
             slopsix_note_on(ctx, 64u, 100u);
             check(count_voices(state, 64u, SLOPSIX_VOICE_ON) ==
@@ -3948,6 +3961,23 @@ static void stage_unison(void)
                   state->engines[0].eg[0].level == level_before,
                   "the stolen stack continues its envelopes (Forced Damp "
                   "off)");
+            check(state->engines[3].lfo.phase == 0x7FFFu,
+                  "the stolen key event re-seeds the sync'd phase");
+            check(state->engines[9].lfo.delay_acc == 0u &&
+                  state->engines[9].lfo.fade == 0u,
+                  "the stolen key event clears the patch delay's pair");
+        }
+        {
+            unsigned v;
+            int all_seeded = state->engines[0].lfo.phase == 0x7FFFu;
+
+            for (v = 1u; v < SLOPSIX_VOICE_COUNT; v++) {
+                if (state->engines[v].lfo.phase != 0x7FFFu) {
+                    all_seeded = 0;
+                }
+            }
+            check(all_seeded,
+                  "every voice of the stolen stack re-seeds its phase");
         }
 
         /* Detune: the provisional spread is symmetric, zero by default

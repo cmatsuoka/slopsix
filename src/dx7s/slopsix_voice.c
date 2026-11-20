@@ -225,6 +225,17 @@ static void slopsix_dx7s_key_voice(slopsix_context_state *state,
         slot->held = true;
         slot->state = SLOPSIX_VOICE_ON;
         slot->seq = ++state->voice_seq;
+        /* The key event runs its LFO note-on resets although the
+         * envelopes continue (the two live on different sides of the
+         * Forced Damp switch): Key Sync seeds this voice's phase and a
+         * patch delay clears its delay/fade pair, in Multi mode on the
+         * voice's own LFI state, in Single mode on the context-wide
+         * LFO, exactly as the fresh trigger's VOICE_ADD side does. */
+        if (state->lfo_mode == (uint8_t)SLOPSIX_LFO_MULTI) {
+            slopsix_dx7s_lfo_note_on(state, engine);
+        } else {
+            slopsix_lfo_note_on(state);
+        }
         slopsix_voice_engine_update_frequency(state, slot, engine);
     } else {
         slopsix_voice_engine_note_on(state, slot, engine);
