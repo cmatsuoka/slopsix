@@ -10,68 +10,13 @@ Add experimental DX7S personality.
 - Add DX7S unison modes: fixed unison groups, oldest-group-first
   stealing with envelope continuation, per-group pedal and all-notes-off,
   and a provisional unison detune spread (neutral by default).
-- Fix the DX7S unison detune spread: the rendered offsets now round onto
-  whole EGS frequency-field units, the same grid the per-operator detune
-  steps on, instead of the grid's floor division rendering the stack
-  biased flat-downward with half its spread rounded away.
-- Fix DX7S key-mode switching: the sounding voices re-pitch at once when
-  the switch drops their unison offsets, and the keys the old mode's
-  bookkeeping owned stay releasable - the unison note-off/all-notes-off
-  paths free orphaned held voices through a per-voice pass, and a switch
-  into mono seeds its single-key bookkeeping from voices[0] and frees
-  the held voices mono cannot own (the pedal defers these releases).
-  Re-applying the current mode is a no-op, so it cannot clear a live
-  stack's groups or flatten its detune.
-- Synchronize the DX7S's `slopsix_set_mono_mode` with its key mode: the
-  DX7S has no separate mono switch, so the setter now maps onto the key
-  mode (mono-on = Mono, mono-off = Poly) and reuses the key-mode switch's
-  re-homing. Previously a Mono key mode under `set_mono_mode(false)`
-  allocated the polyphonic path and a Poly key mode under
-   `set_mono_mode(true)` allocated the mono one.
-- Reset the stolen stack's LFO state on the DX7S: a key event that
-  continues the envelopes (the Forced Damp Off steal) now also runs the
-  LFO note-on resets, re-seeding the keyed voice's sync'd phase and
-  clearing its patch delay's fade pair, like the fresh trigger does.
-- Record the DX7S LFO mode transition model: entering Multi re-seeds all
-  sixteen voices from the Single engine (a Single/Multi round trip resets
-  the voices' independent histories), and the Single engine stays parked
-  through Multi and resumes untouched on the return. Document-only
-  provisionally pinned by the harness (OQ-DX7S-01); no behaviour change.
-- Correct the controller-recompose documentation: a routed controller's
-  event recomposes the pitch-modification register at once, but the
-  sounding voices re-pitch at the next LFO tick, where the firmware's
-  per-tick register push is the engine's rewrite gate (the bend's own
-  setters refresh immediately; both are deliberate). Pinned by the
-  controller stage's checks.
-- Let the DX7S's next key event sound after a patch load: the patch
-  activation's voice silence now empties the unison group bookkeeping,
-  so the following key takes the fresh trigger instead of stealing the
-  silenced group and continuing its silence as a silent note.
-- Record the unison stack's key-sync alignment: with the patch's OSC KEY
-  SYNC set, a fresh stack's voices all start on the shared reset phase,
-  so a detune-0 stack is one voice amplified until the accumulators
-  diverge (or key sync is off). Deliberate per-voice application of the
-  key-sync rule, no behaviour change; pinned by the unison stage.
-- Record that the DX7S unison detune rides the voice frequency word and
-  so does not reach fixed-frequency operators, the same rule that keeps
-  them off the voice's bend/pitch-EG/master-tune contributions; a patch
-  with an all-fixed stack carries no unison spread. Pinned by the
-  unison stage.
-- Implement portamento in the DX7S unison modes: the key events take the
-  polyphonic composition, so with the pedal a fresh group glides from the
-  instrument's last target and a stolen stack glides out of its own
-  buffer (full time mode drags pedal-held and released voices along);
-  without the pedal the buffers snap. The unison paths previously snapped
-  every buffer, making portamento and glissando inert there.
-- Set the DX7's analog output tail to the measured 17.02 kHz -3 dB
-  corner, the DX7S tail is set to 20 kHz.
+- Synchronize the DX7S's `slopsix_set_mono_mode` with its key mode.
+- Reset the stolen stack's LFO state on the DX7S.
+- Let the DX7S's next key event sound after a patch load.
+- Record the unison stack's key-sync alignment.
+- Implement portamento in the DX7S unison modes.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7
-  reference level. Full-level patches no longer saturate at the final
-  conversion when the analog tail overshoots.
-- Stop clamping the mixed voice bus at a single voice's 12-bit DAC
-  window. The per-voice compander already owns that window and the bus is
-  the analog sum, so loud chords no longer hard-clip at one voice's level;
-  only the final int16 conversion (the analog stage's rail) saturates.
+  reference level.
 - Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)
