@@ -101,11 +101,11 @@ int32_t slopsix_dac_step(int32_t bus)
  * 2048 * 32 = 65536 - and matches the VDX7 reference renderer's gain
  * staging.
  *
- * The analog stage can exceed the code window (the filter's passband
- * peaks at +0.8 dB, its high-Q section rings, and the bus is the sum of
- * several voices), so the conversion saturates at the int16 rails.  That
- * is the chain's only saturation: it stands in for the analog stage's
- * rail, and the headroom sets where the polyphonic sum reaches it.
+ * The analog stage can exceed the code window (the low-pass's gentle
+ * overshoot and the bus's several voices), so the conversion saturates at
+ * the int16 rails.  That is the chain's only saturation: it stands in for
+ * the analog stage's rail, and the headroom sets where the polyphonic sum
+ * reaches it.
  */
 int16_t slopsix_output_scale(int32_t code_q12, int32_t gain_q16)
 {

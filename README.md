@@ -1,8 +1,10 @@
-# Slopsix
+# Slopsix - A six-operator FM synthesis library
 
 A dependency-free, 32-bit friendly, integer-only, fixed-point FM
 synthesis library that emulates the DX7 sound generator, with optional
-extras behind compile-time feature macros.
+extras behind compile-time feature macros. Experimental support
+for DX7S features (per-voice LFO, pitch envelope extras, unison modes)
+is available.
 
 The library renders into caller-supplied buffers, performs no I/O, and
 allocates only when a context is created. It aims to be more accurate

@@ -93,10 +93,9 @@ int32_t slopsix_dx7s_dac_step(int32_t bus)
  * actual hardware level is out of the digital model (the DAC's absolute
  * span and the analog stage are unknown, research OQ-24/OU-04).
  *
- * The analog stage can overshoot the 16-bit code window (the filter's
- * passband peaks at +0.8 dB in the Mk1 design; the DX7S filter is
- * similar), so the conversion saturates at the int16 rails: that
- * saturation is the chain's last one. */
+ * The analog stage can overshoot the 16-bit code window (the low-pass's
+ * gentle overshoot and the polyphonic bus), so the conversion saturates
+ * at the int16 rails: that saturation is the chain's last one. */
 int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16)
 {
     int64_t product = (int64_t)code_q12 * (int64_t)gain_q16;
