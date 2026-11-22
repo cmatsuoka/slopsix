@@ -471,8 +471,9 @@ void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
     /* The DX7S brings its own tail: re-design the filter from the
      * personality's prototype after the shared DX7 initialization. */
     slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
-    /* No compander in the DX7S path: the voices sum at the operator
-     * core's resolution, and the 16-bit DAC step saturates the bus. */
+    /* No compander in the DX7S path: the voices sum linearly in the
+     * wide accumulator, and the transmitted DA word carries the whole
+     * polyphonic sum (divided by sixteen) to the DAC. */
     state->voice_bus = slopsix_dx7s_voice_bus;
     state->output_mix = slopsix_dx7s_output_mix;
     /* The personality's own parameters and its pitch-EG law. */

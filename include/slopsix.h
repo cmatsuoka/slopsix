@@ -39,7 +39,7 @@
 /* Library version. major/minor/patch are packed as 0x00MMmmpp.
  * The plain integer constants keep SLOPSIX_VERSION_NUMBER usable in #if. */
 #define SLOPSIX_VERSION_MAJOR 0
-#define SLOPSIX_VERSION_MINOR 2
+#define SLOPSIX_VERSION_MINOR 3
 #define SLOPSIX_VERSION_PATCH 0
 #define SLOPSIX_VERSION_NUMBER \
     ((SLOPSIX_VERSION_MAJOR << 16) | \

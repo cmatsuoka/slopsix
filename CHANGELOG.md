@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-21)
 
 Add experimental DX7S personality.
 
@@ -17,6 +17,7 @@ Add experimental DX7S personality.
 - Implement portamento in the DX7S unison modes.
 - Give the output stage one bit (6 dB) of headroom, matching the VDX7
   reference level.
+- Restructure the DX7S output stage around the DAC's real word.
 - Remove DX100 support scaffolding.
 
 ## 0.2.0 (2026-11-19)

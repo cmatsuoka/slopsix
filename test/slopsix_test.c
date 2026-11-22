@@ -2460,48 +2460,13 @@ static void stage_output(void)
     }
 
 #if SLOPSIX_HAS_DX7S
-    /* The DX7S's PCM54HP output is 16-bit linear: its DAC step is a plain
-     * 16-bit grid with rail saturation, not the Mk1's 12-bit grid, and
-     * the per-voice bus adds the raw operator words without the
-     * compander's low-bit truncation.  The grid sits at half a bus unit,
-     * so the 16-bit DAC spans the same analog window as the Mk1's
-     * 12-bit one and the two personalities share one reference level. */
-    check(slopsix_dx7s_dac_step(0) == 0,
-          "the DX7S DAC step maps zero to zero");
-    check(slopsix_dx7s_dac_step(1) == 2 &&
-          slopsix_dx7s_dac_step(0x1234) == 0x2468,
-          "the DX7S DAC step keeps all 16 bits, at half a bus unit");
-    check(slopsix_dx7s_dac_step(-1) == -2 &&
-          slopsix_dx7s_dac_step(-0x1234) == -0x2468,
-          "the DX7S DAC step keeps negative low bits too");
-    check(slopsix_dx7s_dac_step(16383) == 32766 &&
-          slopsix_dx7s_dac_step(-16384) == -32768,
-          "the DX7S DAC step passes the 16-bit rails");
-    check(slopsix_dx7s_dac_step(16384) == 32767 &&
-          slopsix_dx7s_dac_step(-16385) == -32768,
-          "the DX7S DAC step saturates past the rails");
-    check(slopsix_dx7s_dac_step(16376) == 32752,
-          "one full-scale voice lands on the DX7S DAC's top code");
+    /* The DX7S's voices sum linearly into the wide accumulator (no
+     * compander, no per-voice clamp), and the transmitted DA word is
+     * the accumulator's sum divided by sixteen on the 15-bit rails:
+     * sixteen full-scale voices fill the word exactly, so the DAC
+     * never saturates for any polyphony. */
     {
-        int monotone = 1;
-
-        for (i = 0; i < 40000u; i++) {
-            int32_t bus = (int32_t)i - 20000;
-            int32_t code = slopsix_dx7s_dac_step(bus);
-            int32_t lower = slopsix_dx7s_dac_step(bus - 1);
-
-            if (code < lower) {
-                monotone = 0;
-            }
-            if (code > 32767 || code < -32768) {
-                monotone = 0;
-            }
-        }
-        check(monotone == 1,
-              "the DX7S DAC step is monotone and stays in the window");
-    }
-    {
-        const int32_t raw[4] = { 0x1234, -0x4321, 1, -1 };
+        const int32_t raw[4] = { 0x1234, -4320, 16383, -16384 };
         int32_t bus[4] = { 1, 2, 3, 4 };
         int i2;
 
@@ -2516,12 +2481,35 @@ static void stage_output(void)
         check(i2 == 4,
               "the DX7S voice bus adds raw voice words, low bits intact");
     }
+    check(slopsix_dx7s_dac_step(16376) == 1023,
+          "one full-scale voice lands a sixteenth of the way up the word");
+    check(slopsix_dx7s_dac_step(262016) == 16376,
+          "a full sixteen-voice sum fills the DA word without clipping");
+    check(slopsix_dx7s_dac_step(262144) == 16383 &&
+          slopsix_dx7s_dac_step(-262145) == -16384,
+          "the DA word's rails clamp only past sixteen voices");
+    check(slopsix_dx7s_dac_step(1) == 0 &&
+          slopsix_dx7s_dac_step(-1) == -1,
+          "the DA division floors like the Mk1's master grid");
+    /* The delivery applies the analog restore gain (the DAC code times
+     * eight, matching the -6 dB real-device measurement), and the
+     * analog ceiling compresses a hot stack's top toward the rail
+     * instead of flat-clipping. */
     check(slopsix_dx7s_output_scale(1 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 1,
-          "the DX7S conversion keeps a one-LSB 16-bit code");
-    check(slopsix_dx7s_output_scale(32767 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 16384,
-          "the DX7S conversion keeps the default headroom below int16");
+            SLOPSIX_Q16_ONE) == 8,
+          "the DX7S delivery applies the analog restore's code-times-eight");
+    check(slopsix_dx7s_output_scale(1023 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 8184,
+          "one full-scale voice delivers at the -6 dB real-device figure");
+    check(slopsix_dx7s_output_scale(3070 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 24560,
+          "content at three stacked windows rides the ceiling linearly");
+    check(slopsix_dx7s_output_scale(16376 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 32463,
+          "a full sixteen-voice stack compresses at the analog ceiling");
+    check(slopsix_dx7s_output_scale(16384 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE) == 32463,
+          "the ceiling keeps past-word content under the int16 rail");
 #endif
 
     /* The master ladder: the resistor string's taps as exact Q16 gains. */
@@ -3629,12 +3617,14 @@ static void stage_plfo(void)
         slopsix_destroy_context(dx7s);
     }
 
-    /* The output level: the two personalities end in different DAC stages
-     * (the Mk1's 12-bit companded grid, the DX7S's 16-bit PCM54HP), but
-     * they must land on the same reference level, so a host that swaps one
-     * engine for the other keeps its gain staging.  The voices differ
-     * only by the compander's quantization, which is well under a
-     * percent, so the peaks must agree to within a couple of percent. */
+    /* The output level: the two personalities end in different DAC
+     * stages (the Mk1's 12-bit companded grid, the DX7S's 15-bit DA
+     * word carrying the whole sum divided by sixteen and delivered
+     * doubled), so the DX7S's delivered peak sits one eighth of the
+     * Mk1's - the ~real-device calibration (-18 dB).  The voices
+     * differ only by the compander's quantization and the tails'
+     * different prototypes, so the relation holds to within ten
+     * percent. */
     {
         slopsix_context dx7 = slopsix_create_context(SLOPSIX_ENGINE_DX7,
             SLOPSIX_DEFAULT_SAMPLE_RATE);
@@ -3660,9 +3650,9 @@ static void stage_plfo(void)
             peak_dx7s = render_peak(render_buf_b, 8000u);
             check(peak_dx7 > 1000 && peak_dx7s > 1000,
                   "both personalities render an audible level");
-            check((peak_dx7 - peak_dx7s) * 50 <= peak_dx7 &&
-                  (peak_dx7s - peak_dx7) * 50 <= peak_dx7,
-                  "the DX7S output stage lands on the DX7's reference level");
+            check((peak_dx7 - peak_dx7s * 2) * 50 <= peak_dx7 &&
+                  (peak_dx7s * 2 - peak_dx7) * 50 <= peak_dx7,
+                  "the DX7S delivers the Mk1's level over two");
         }
         slopsix_destroy_context(dx7);
         slopsix_destroy_context(dx7s);

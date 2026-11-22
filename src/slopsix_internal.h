@@ -277,20 +277,55 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * rail is the int16 conversion's saturation, downstream. */
 #define SLOPSIX_DAC_GRID_SHIFT 3u
 
-/* The DX7S's DAC step (src/dx7s/slopsix_output.c): the 16-bit PCM54HP's
- * code grid.  The grid sits at half a bus unit, because the 16-bit DAC
- * spans the same analog window as the Mk1's 12-bit one with sixteen
- * times the codes (32768 against 2048), and the Mk1's grid sits at eight
- * bus units per code.  A single full-scale voice (8 * 2047 = 16376 bus
- * units) therefore lands on the rails in both personalities, so the two
- * share one reference level and the DX7S spends the extra codes on
- * resolution rather than on headroom.
+/* The DX7S transmitted DAC word (src/dx7s/slopsix_output.c): the
+ * mixed bus's sum divided by sixteen, on the 15-bit DA2-DA16 rails.
+ * The OPS2 emits the DAC code on fifteen lines (the IC pin list's
+ * "digital code for analog convert"; the PCM54HP's top Bit 1 runs
+ * grounded on the Overall Circuit Diagram), so the transmitted word is
+ * 15-bit linear, and sixteen voice windows (the sum of sixteen
+ * full-scale voices, 262016 bus units) land on 16376 - just inside the
+ * rails - when the accumulator's sum is divided by sixteen.  The DAC
+ * word never saturates for any polyphony the engine can sum; the
+ * machine's analog side (the scaled hold legs and the volume VCA)
+ * restores the line level outside the model.
  *
- * Evidence grade: proportional estimate (hypothesis-grade, D7S-13). */
-#define SLOPSIX_DX7S_DAC_CODE_MAX 32767
-#define SLOPSIX_DX7S_DAC_CODE_MIN (-32768)
-#define SLOPSIX_DX7S_DAC_BUS_MAX 16384
-#define SLOPSIX_DX7S_DAC_BUS_MIN (-16384)
+ * Evidence grade: hypothesis-grade (D7S-13, 2026-11-21).  The pin
+ * evidence pins the word's width and linearity; the divide-by-sixteen
+ * is what sixteen voice windows require to land inside the word with
+ * zero overflow, and the analog restore gain stays out of the model
+ * (research OQ-24/OU-04). */
+#define SLOPSIX_DX7S_DA_SHIFT 4u
+#define SLOPSIX_DX7S_DA_MAX 16383
+#define SLOPSIX_DX7S_DA_MIN (-16384)
+
+/* The DX7S conversion's scale and analog ceiling
+ * (src/dx7s/slopsix_output.c).
+ *
+ * The scale is the DAC code times eight (12 signal bits of Q12 plus 16
+ * gain bits, three dropped): the machine's analog restore gain
+ * relative to the transmitted word, landing the delivered difference
+ * at the real-device figure (about -6 dB per full-scale voice vs the
+ * Mk1's delivered reference, one voice at 8184).
+ *
+ * The ceiling is the board's output swing (the reconstruction filter,
+ * then the volume VCA and the output amplifier): the delivered int16
+ * rail is where this model places it at the restore calibration.  The
+ * knee sits at 24564 (three stacked Mk1 windows), above which the
+ * value compresses toward the rail with a rational soft clip -
+ * continuous with unit slope at the knee, asymptotic below the rail -
+ * so a hot stack's top is limited the way an output amp approaches its
+ * swing, and the digital flat-top never occurs.  The real machine's
+ * analog ceiling carries more room above its line level than a 16-bit
+ * deliverable at this calibration does; the curve is what the int16
+ * delivery keeps of that headroom.
+ *
+ * Evidence grade: hypothesis-grade (D7S-13, 2026-11-21).  The -6 dB
+ * delivered gain is the maintainer's pin from the real-device
+ * measurement; the knee's placement and the curve stand in for the
+ * output stage's saturation, which no capture pins yet. */
+#define SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT 25u
+#define SLOPSIX_DX7S_OUTPUT_SATURATION_KNEE 24564
+#define SLOPSIX_DX7S_OUTPUT_RAIL 32767
 
 /* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
  * every second OCF tick (about 187.6 Hz), as the firmware does (research
@@ -1194,22 +1229,30 @@ void slopsix_dx7s_lfo_tick(slopsix_context_state *state);
 void slopsix_dx7s_lfo_note_on(slopsix_context_state *state,
     slopsix_voice_engine *engine);
 
-/* The DX7S 16-bit output stage (src/dx7s/slopsix_output.c): the PCM54HP
- * DAC step, the analog tail filter, and the int16 conversion.  Unlike the
- * Mk1, the DX7S has no compander in the master path - the bus goes through
- * a 16-bit quantizer directly.  The master volume is the shared hardware
- * ladder (slopsix_master_gain_q16): the DX7S has the same resistor
- * string as the Mk1. */
+/* The DX7S output stage (src/dx7s/slopsix_output.c): the wide voice
+ * accumulator, the 15-bit DA word (the sum divided by sixteen, the
+ * only saturation the mix meets - rails it never reaches below the
+ * sixteen-voice window), the analog tail filter, and the int16
+ * delivery of the DAC code.  Unlike the Mk1, the DX7S has no compander
+ * in the voice path: the voices sum linearly in the accumulator, and
+ * the transmitted word is their sum divided by sixteen
+ * (SLOPSIX_DX7S_DA_SHIFT).  The delivery is unity in the DAC code's
+ * unit (SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT): one full-scale voice
+ * delivers a sixteenth of the rails.  The master volume is the shared
+ * hardware ladder (slopsix_master_gain_q16): the DX7S has the same
+ * resistor string as the Mk1. */
 int32_t slopsix_dx7s_dac_step(int32_t bus);
 int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16);
-/* The DX7S per-voice bus stage: add the voice words unchanged, so the
- * operator core's resolution reaches the 16-bit DAC.  No compander. */
+/* The DX7S per-voice bus stage: add the voice words into the wide
+ * accumulator.  No compander, no per-voice output stage, no master
+ * rail below the DA word. */
 void slopsix_dx7s_voice_bus(const int32_t *voice_out, int32_t *bus,
     unsigned count);
 /* The DX7S analog tail (src/dx7s/slopsix_filter.c): the personality's own
  * reconstruction prototype, designed through the shared filter core.  The
- * 16-bit DAC's codes enter the core directly (no downshift: the core takes
- * the code in Q12, so a full-scale 16-bit code is a full-scale signal).
+ * analog node's value enters the core directly (no downshift: the core
+ * scales the signal to Q12 internally, and the node's sixteen-voice
+ * window fits the Q12 domain with room for the low-pass's overshoot).
  *
  * The DX7S prototype is a generated descriptor table (a 21 kHz Butterworth
  * pair and, first in the cascade, the aperture shelf); it is compiled only
