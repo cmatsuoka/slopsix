@@ -16,6 +16,7 @@ than Dexed, reproducing the hardware's tables, curves and quirks.
 make            # libslopsix.a and the test binary
 make check      # regenerate-and-compare the tables, then run the harness
 make example    # OpenAL terminal keyboard player
+make example-bank  # DX7 SysEx bank voice loader
 make validate-render  # the slopsix side of the validation loop
 make validate BANKS="bank1.syx bank2.syx"  # render and compare
 make clean
@@ -204,6 +205,19 @@ keyboard player that streams the engine through OpenAL. It starts with a
 small built-in voice; keys toggle notes (the terminal has no key-release
 event), `[`/`]` transpose the octave, Space releases everything, and Q or
 Esc quits.
+
+`make example-bank` builds `build/<config>/examples/load_bank`, which
+selects a voice from a DX7 32-voice SysEx bank and loads it:
+
+```sh
+build/dx7/examples/load_bank ROM1A.syx        # list the 32 voices
+build/dx7/examples/load_bank ROM1A.syx 11     # load program 11
+build/dx7/examples/load_bank ROM1A.syx 11 out.wav  # load and render a preview
+```
+
+It shows the bank indexing, the packed-128-byte to 156-byte voice dump
+conversion, and the `slopsix_set_voice()` call; it does not implement
+SysEx framing or checksums.
 
 ## Scope
 

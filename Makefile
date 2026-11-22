@@ -8,6 +8,7 @@
 #   check-dx7s-extras the DX7S personality with the extras conveniences
 #   check-extras   the extras build (conveniences beyond the original hardware)
 #   example        build the OpenAL terminal keyboard player
+#   example-bank   build the DX7 SysEx bank voice loader
 #   validate-render build the slopsix side of the validation loop
 #   validate       build it and run tools/validate.py with BANKS="..."
 #   tables         regenerate the generated tables under build/tables/
@@ -69,6 +70,7 @@ BUILD := build/$(CONFIG)
 OPENAL_CFLAGS := $(shell pkg-config --cflags openal 2>/dev/null)
 OPENAL_LIBS   := $(shell pkg-config --libs openal 2>/dev/null || echo -lopenal)
 EXAMPLE       := $(BUILD)/examples/play_keys
+BANK_EXAMPLE  := $(BUILD)/examples/load_bank
 
 # -Wfloat-conversion and -Wdouble-promotion are where the compiler has
 # them; a floating-point operation anywhere in the library is an error.
@@ -145,7 +147,7 @@ TABLES := build/tables/logsin_table.c \
           build/tables/filter_table.c
 
 .PHONY: all check check-dx7 check-dx7s check-dx7s-extras \
-        check-extras example tables tables-install check-tables \
+        check-extras example example-bank tables tables-install check-tables \
         validate-render validate clean
 
 all: $(ARCHIVE) $(TESTBIN)
@@ -180,6 +182,15 @@ $(EXAMPLE): examples/play_keys.c $(ARCHIVE)
 	@mkdir -p $(dir $@)
 	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) \
 	    $(OPENAL_CFLAGS) $< $(ARCHIVE) $(OPENAL_LIBS) -o $@
+
+# The bank loader needs no audio device: it selects a voice from a DX7
+# SysEx bank and optionally renders a short WAV preview.
+example-bank: $(BANK_EXAMPLE)
+
+$(BANK_EXAMPLE): examples/load_bank.c $(ARCHIVE)
+	@mkdir -p $(dir $@)
+	$(CC) $(WARNINGS) $(OPT_SIZE) $(INCLUDES) $(FEATURE_DEFS) $< \
+	    $(ARCHIVE) -o $@
 
 # --- validation loop -------------------------------------------------------
 
