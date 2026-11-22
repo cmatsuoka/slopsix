@@ -123,7 +123,7 @@ int32_t slopsix_dx7s_dac_step(int32_t bus)
  * run their swing against the restored line level, and the delivered
  * int16 rail is where this model places that swing.  Above
  * SLOPSIX_DX7S_OUTPUT_SATURATION_KNEE the value compresses toward the
- * rail with a rational soft clip - continuous with unit slope at the
+ * rail with a rational soft clip - continuous with unit gain at the
  * knee, asymptotic below the rail - so a hot stack's top is limited
  * the way an output amp approaches its swing, not flat-clipped by a
  * digital boundary.  Content up to about three stacked Mk1 windows

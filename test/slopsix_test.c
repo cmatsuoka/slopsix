@@ -2316,20 +2316,20 @@ static void stage_filter(void)
 
 #ifdef SLOPSIX_DX7S
     /* The DX7S tail: the aperture shelf first, then the 24 dB/oct
-     * Butterworth at 21 kHz; the shelf pulls the combined corner down to
-     * about 16.8 kHz. */
+     * Butterworth at 20.5 kHz; the shelf pulls the combined corner down to
+     * about 16.7 kHz. */
     check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
                                                 1000), 65536, 2),
           "the DX7S passband is flat at 1 kHz");
     check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
-                                                16808), 46400, 3),
+                                                16700), 46400, 3),
           "the DX7S combined corner is -3 dB");
     check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
-                                                20000), 36100, 5),
-          "the DX7S response at 20 kHz is about -5 dB");
-    check(filter_gain_near(filter_gain_dx7s_q16(48000u, 16662), 46400, 3),
+                                                20000), 35222, 5),
+          "the DX7S response at 20 kHz is about -5.4 dB");
+    check(filter_gain_near(filter_gain_dx7s_q16(48000u, 16600), 46400, 3),
           "the 48 kHz DX7S design keeps the corner at -3 dB");
-    check(filter_gain_near(filter_gain_dx7s_q16(44100u, 16019), 46400, 3),
+    check(filter_gain_near(filter_gain_dx7s_q16(44100u, 16020), 46400, 3),
           "the 44.1 kHz DX7S design keeps the corner at -3 dB");
 #endif
 }
@@ -2509,7 +2509,7 @@ static void stage_output(void)
           "a full sixteen-voice stack compresses at the analog ceiling");
     check(slopsix_dx7s_output_scale(16384 << SLOPSIX_FILTER_Q12,
             SLOPSIX_Q16_ONE) == 32463,
-          "the ceiling keeps past-word content under the int16 rail");
+          "the ceiling compresses a value at the DAC's top rail");
 #endif
 
     /* The master ladder: the resistor string's taps as exact Q16 gains. */

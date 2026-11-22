@@ -93,7 +93,7 @@ extern const uint8_t slopsix_pitch_mod_sens[8];     /* the PMS table */
  * VDX7-derived 5th-order fit.  The DX7's is a single 12 dB/oct low-pass
  * at 13.5 kHz (Q 0.68) that folds in the zero-order-hold aperture shelf,
  * followed by two transparent sections; the DX7S's is the same shelf
- * first, then a 24 dB/oct Butterworth at 21 kHz.  Each personality
+   * first, then a 24 dB/oct Butterworth at 20.5 kHz.  Each personality
  * describes its tail as generated section descriptors (kind, corner, Q,
  * shelf gain); the digital coefficients are designed at the host's rate at
  * context creation with a Vicanek-matched low-pass and an RBJ high-shelf
@@ -311,8 +311,8 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * then the volume VCA and the output amplifier): the delivered int16
  * rail is where this model places it at the restore calibration.  The
  * knee sits at 24564 (three stacked Mk1 windows), above which the
- * value compresses toward the rail with a rational soft clip -
- * continuous with unit slope at the knee, asymptotic below the rail -
+  * value compresses toward the rail with a rational soft clip -
+  * continuous with unit gain at the knee, asymptotic below the rail -
  * so a hot stack's top is limited the way an output amp approaches its
  * swing, and the digital flat-top never occurs.  The real machine's
  * analog ceiling carries more room above its line level than a 16-bit
@@ -1254,9 +1254,9 @@ void slopsix_dx7s_voice_bus(const int32_t *voice_out, int32_t *bus,
  * scales the signal to Q12 internally, and the node's sixteen-voice
  * window fits the Q12 domain with room for the low-pass's overshoot).
  *
- * The DX7S prototype is a generated descriptor table (a 21 kHz Butterworth
- * pair and, first in the cascade, the aperture shelf); it is compiled only
- * into the DX7S personality. */
+   * The DX7S prototype is a generated descriptor table (a 20.5 kHz Butterworth
+   * pair and, first in the cascade, the aperture shelf); it is compiled only
+   * into the DX7S personality. */
 #ifdef SLOPSIX_DX7S
 extern const int32_t
     slopsix_dx7s_filter_desc[SLOPSIX_FILTER_SECTIONS][4];
