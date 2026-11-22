@@ -139,3 +139,9 @@
   work?"** —
   <https://electronics.stackexchange.com/questions/512992/how-does-the-yamaha-dx7-digital-analog-converter-work>.
   Cross-check of the DAC and compander description.
+- **Gearspace, "Is DX7 II quieter output than Mk1?"** —
+  <https://gearspace.com/threads/is-dx7-ii-quieter-output-than-mk1.1443233/>.
+  Field report: DX7 II (DX7S-class hardware with 16-bit PCM54HP DAC) has a
+  lower noise floor and quieter output compared to the Mk1's companded
+  12-bit output stage, consistent with the DX7S service manual's 16-bit DAC
+  and Mk1-class output-filter components.
