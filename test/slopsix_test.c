@@ -2486,24 +2486,41 @@ static void stage_output(void)
           slopsix_dx7s_dac_step(-1) == -1,
           "the DA division floors like the Mk1's master grid");
     /* The delivery applies the analog restore gain (the DAC code times
-     * eight, matching the -6 dB real-device measurement), and the
-     * analog ceiling compresses a hot stack's top toward the rail
-     * instead of flat-clipping. */
+     * eight by default, matching the -6 dB real-device measurement),
+     * and the analog ceiling compresses a hot stack's top toward the
+     * rail instead of flat-clipping. */
     check(slopsix_dx7s_output_scale(1 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 8,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT) == 8,
           "the DX7S delivery applies the analog restore's code-times-eight");
     check(slopsix_dx7s_output_scale(1023 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 8184,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT) == 8184,
           "one full-scale voice delivers at the -6 dB real-device figure");
     check(slopsix_dx7s_output_scale(3070 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 24560,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT) == 24560,
           "content at three stacked windows rides the ceiling linearly");
     check(slopsix_dx7s_output_scale(16376 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 32463,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT) == 32463,
           "a full sixteen-voice stack compresses at the analog ceiling");
     check(slopsix_dx7s_output_scale(16384 << SLOPSIX_FILTER_Q12,
-            SLOPSIX_Q16_ONE) == 32463,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT) == 32463,
           "the ceiling compresses a value at the DAC's top rail");
+
+    /* Normalized mode: one bit hotter (code times sixteen, +6 dB),
+     * cancelling the default's -6 dB so the delivery matches the DX7
+     * Mk1's level; the analog ceiling still applies, so hot content is
+     * compressed near the rail, not at it. */
+    check(slopsix_dx7s_output_scale(1 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT) == 16,
+          "normalized delivery applies the code-times-sixteen restore");
+    check(slopsix_dx7s_output_scale(1023 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT) == 16368,
+          "normalized: one full-scale voice delivers at the Mk1 level");
+    check(slopsix_dx7s_output_scale(2047 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT) == 30030,
+          "normalized: two stacked windows compress past the knee");
+    check(slopsix_dx7s_output_scale(16376 << SLOPSIX_FILTER_Q12,
+            SLOPSIX_Q16_ONE, SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT) == 32628,
+          "normalized: a full sixteen-voice stack is compressed near the rail");
 #endif
 
     /* The master ladder: the resistor string's taps as exact Q16 gains. */

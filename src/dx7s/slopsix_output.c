@@ -110,13 +110,14 @@ int32_t slopsix_dx7s_dac_step(int32_t bus)
  * int16, through the analog ceiling's compression.
  *
  * The value is the filter's output in Q12 of the DAC code, so the
- * product is a 64-bit multiply; the shift is
- * SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT - the DAC code times eight - the
- * machine's analog restore gain relative to the transmitted word: the
- * delivered difference against the Mk1's hot delivered reference lands
- * at the measurable real-device figure (about -6 dB per full-scale
- * voice, one voice at 8184).  The value rounds to nearest, half away
- * from zero.
+ * product is a 64-bit multiply; the shift selects the analog restore
+ * gain: SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT (25, the code times eight) is
+ * the hardware's restore that lands the delivered difference at the
+ * real-device figure (about -6 dB per full-scale voice vs the Mk1, one
+ * voice at 8184), SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT (24, the code
+ * times sixteen) is one bit hotter, +6 dB, bringing the output to the
+ * DX7 Mk1's level (one voice at 16368).  The value rounds to nearest, half
+ * away from zero.
  *
  * The analog ceiling follows: the board's output stages (the
  * reconstruction filter, then the volume VCA and the output amplifier)
@@ -131,20 +132,19 @@ int32_t slopsix_dx7s_dac_step(int32_t bus)
  * to the curve - the analogue of the real machine's output stage
  * running into its swing at the same calibration.
  *
- * Evidence grade: hypothesis-grade (D7S-13).  The delivered gain (-6
- * dB) is the maintainer's pin from the real-device measurement; the
+ * Evidence grade: hypothesis-grade (D7S-13).  The -6 dB delivered
+ * gain is the maintainer's pin from the real-device measurement; the
  * knee's placement and the curve stand in for the output stage's
  * saturation, which no capture pins yet.  The real machine's analog
  * ceiling sits above its line level with more room than a 16-bit
  * deliverable at this calibration carries - the curve is what the
  * int16 delivery keeps of that headroom. */
-int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16)
+int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16,
+    unsigned shift)
 {
     int64_t product = (int64_t)code_q12 * (int64_t)gain_q16;
     int64_t magnitude = product < 0 ? -product : product;
-    int64_t rounded = (magnitude +
-        (1LL << (SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT - 1))) >>
-        SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT;
+    int64_t rounded = (magnitude + (1LL << (shift - 1))) >> shift;
     int64_t saturated = rounded;
     int64_t value;
 
@@ -180,7 +180,8 @@ int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16)
  * code to Q12 internally - the word's values (up to the 15-bit rails)
  * fit the Q12 domain with room for the low-pass's overshoot.  The
  * output is Q12 of the same unit, which the conversion's restore gain
- * and analog ceiling fold onto int16.
+ * (code x8 hardware default, x16 when normalized) and analog ceiling fold
+ * onto int16.
  *
  * Evidence grade: provisional prototype (hypothesis-grade, D7S-13).
  * The DX7S output stage's exact response is not pinned from a schematic
@@ -196,6 +197,11 @@ void slopsix_dx7s_output_mix(void *vstate, int32_t bus,
     int32_t left_code;
     int32_t right_code;
     int32_t gain = state->master_gain_q16;
+    unsigned shift;
+
+    shift = state->normalize_output ?
+        SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT :
+        SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT;
 
     value = slopsix_filter_process(&state->filter, code);
 
@@ -208,6 +214,6 @@ void slopsix_dx7s_output_mix(void *vstate, int32_t bus,
     right_code = value;
 #endif
 
-    *left = slopsix_dx7s_output_scale(left_code, gain);
-    *right = slopsix_dx7s_output_scale(right_code, gain);
+    *left = slopsix_dx7s_output_scale(left_code, gain, shift);
+    *right = slopsix_dx7s_output_scale(right_code, gain, shift);
 }

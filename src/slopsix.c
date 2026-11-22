@@ -1457,6 +1457,31 @@ slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
     }
 }
 
+slopsix_error slopsix_set_digital_output_gain(slopsix_context ctx,
+    bool normalize)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+
+    if (impl == NULL) {
+        return SLOPSIX_ERR_INVALID;
+    }
+#if !SLOPSIX_HAS_DX7S
+    (void)normalize;
+#endif
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        impl->dx7.normalize_output = normalize;
+        return SLOPSIX_OK;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
 slopsix_error slopsix_set_portamento_time(slopsix_context ctx,
     uint8_t time_0_99)
 {

@@ -302,8 +302,8 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 /* The DX7S conversion's scale and analog ceiling
  * (src/dx7s/slopsix_output.c).
  *
- * The scale is the DAC code times eight (12 signal bits of Q12 plus 16
- * gain bits, three dropped): the machine's analog restore gain
+ * The default scale is the DAC code times eight (12 signal bits of Q12
+ * plus 16 gain bits, three dropped): the machine's analog restore gain
  * relative to the transmitted word, landing the delivered difference
  * at the real-device figure (about -6 dB per full-scale voice vs the
  * Mk1's delivered reference, one voice at 8184).
@@ -312,8 +312,8 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * then the volume VCA and the output amplifier): the delivered int16
  * rail is where this model places it at the restore calibration.  The
  * knee sits at 24564 (three stacked Mk1 windows), above which the
-  * value compresses toward the rail with a rational soft clip -
-  * continuous with unit gain at the knee, asymptotic below the rail -
+ * value compresses toward the rail with a rational soft clip -
+ * continuous with unit gain at the knee, asymptotic below the rail -
  * so a hot stack's top is limited the way an output amp approaches its
  * swing, and the digital flat-top never occurs.  The real machine's
  * analog ceiling carries more room above its line level than a 16-bit
@@ -324,9 +324,20 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
  * delivered gain is the maintainer's pin from the real-device
  * measurement; the knee's placement and the curve stand in for the
  * output stage's saturation, which no capture pins yet. */
-#define SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT 25u
+#define SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT 25
 #define SLOPSIX_DX7S_OUTPUT_SATURATION_KNEE 24564
 #define SLOPSIX_DX7S_OUTPUT_RAIL 32767
+
+/* The normalized DX7S scale: the DAC code times sixteen, twice the
+ * default's times eight - one bit of gain (+6 dB) that cancels the
+ * default's -6 dB against the Mk1, so the same patch delivers at the
+ * DX7 Mk1's level (one full-scale DX7S voice at 16368 instead of
+ * 8184).  The analog ceiling still applies: content past the knee at
+ * 24564 compresses toward the rail, so a hot stack loses more of its
+ * top here than in the default stage.  Switch the stage at runtime
+ * through the normalize_output flag; the per-sample path only selects
+ * one of the two constants. */
+#define SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT 24
 
 /* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
  * every second OCF tick (about 187.6 Hz), as the firmware does (research
@@ -1063,6 +1074,7 @@ typedef struct {
     uint8_t key_mode;        /* SLOPSIX_KEY_*, poly by default */
     uint8_t unison_detune;   /* 0..7, neutral by default */
     uint8_t lfo_mode;        /* SLOPSIX_LFO_SINGLE/MULTI, single by default */
+    bool normalize_output;   /* true: code x16, same level as Mk1 */
 
     /* The fixed unison groups' bookkeeping (D7S-3).  A group is active
      * from its first key event; `seq` orders the groups for the
@@ -1231,19 +1243,25 @@ void slopsix_dx7s_lfo_note_on(slopsix_context_state *state,
     slopsix_voice_engine *engine);
 
 /* The DX7S output stage (src/dx7s/slopsix_output.c): the wide voice
- * accumulator, the 15-bit DA word (the sum divided by sixteen, the
- * only saturation the mix meets - rails it never reaches below the
- * sixteen-voice window), the analog tail filter, and the int16
- * delivery of the DAC code.  Unlike the Mk1, the DX7S has no compander
- * in the voice path: the voices sum linearly in the accumulator, and
- * the transmitted word is their sum divided by sixteen
- * (SLOPSIX_DX7S_DA_SHIFT).  The delivery is unity in the DAC code's
- * unit (SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT): one full-scale voice
- * delivers a sixteenth of the rails.  The master volume is the shared
- * hardware ladder (slopsix_master_gain_q16): the DX7S has the same
- * resistor string as the Mk1. */
+   * accumulator, the 15-bit DA word (the sum divided by sixteen, the
+   * only saturation the mix meets - rails it never reaches below the
+   * sixteen-voice window), the analog tail filter, and the int16
+   * delivery of the DAC code.  Unlike the Mk1, the DX7S has no
+   * compander in the voice path: the voices sum linearly in the
+   * accumulator, and the transmitted word is their sum divided by
+   * sixteen (SLOPSIX_DX7S_DA_SHIFT).  The delivery scale is the DAC
+   * code times eight by default (SLOPSIX_DX7S_OUTPUT_SCALE_SHIFT: -6 dB
+   * vs the Mk1, one voice at 8184); the normalize_output flag switches
+   * it to times sixteen (SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT: same
+   * level as the Mk1, one voice at 16368), though the analog ceiling
+   * compresses the hottest stack past the knee at 24564 near the rail.
+   * The master
+   * volume is the shared hardware
+  * ladder (slopsix_master_gain_q16): the DX7S has the same resistor
+  * string as the Mk1. */
 int32_t slopsix_dx7s_dac_step(int32_t bus);
-int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16);
+int16_t slopsix_dx7s_output_scale(int32_t code_q12, int32_t gain_q16,
+    unsigned shift);
 /* The DX7S per-voice bus stage: add the voice words into the wide
  * accumulator.  No compander, no per-voice output stage, no master
  * rail below the DA word. */

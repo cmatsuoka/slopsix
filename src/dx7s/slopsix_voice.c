@@ -457,6 +457,7 @@ static void slopsix_dx7s_defaults(slopsix_context_state *state)
     state->unison_detune = 0u;
     state->lfo_mode = SLOPSIX_LFO_SINGLE;
     state->mono = false;
+    state->normalize_output = false;
     slopsix_dx7s_clear_groups(state);
     state->patch.peg_range = SLOPSIX_PEG_RANGE_DEFAULT;
     state->patch.peg_velocity = 0u;

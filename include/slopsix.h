@@ -267,6 +267,15 @@ slopsix_error slopsix_set_peg_velocity(slopsix_context ctx, bool on);
 slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
     uint8_t depth_0_7);
 
+/* Digital output gain: when true, the DX7S analog restore gain is
+ * halved (x4 instead of x8), bringing the output to the same level
+ * as the DX7 Mk1.  The default is false (-6 dB below the Mk1,
+ * matching the real-device measurement).  A context whose engine
+ * is not the DX7S reports SLOPSIX_ERR_UNSUPPORTED and leaves the
+ * value unchanged. */
+slopsix_error slopsix_set_digital_output_gain(slopsix_context ctx,
+    bool normalize);
+
 /* ------------------------------------------------------------- portamento */
 
 /* The hardware's two portamento modes.  In fingered mode a legato press
