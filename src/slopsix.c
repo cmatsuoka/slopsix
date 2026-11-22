@@ -1457,6 +1457,39 @@ slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
     }
 }
 
+slopsix_error slopsix_set_amp_mod_sensitivity(slopsix_context ctx,
+    uint8_t op_1_6, uint8_t sens_0_7)
+{
+    slopsix_context_impl *impl = SLOPSIX_IMPL(ctx);
+    slopsix_error err = SLOPSIX_OK;
+
+    if (impl == NULL || op_1_6 < 1u || op_1_6 > SLOPSIX_OP_COUNT) {
+        return SLOPSIX_ERR_INVALID;
+    }
+    if (sens_0_7 > 7u) {
+        sens_0_7 = 7u;
+        err = SLOPSIX_ERR_RANGE;
+    }
+#if !SLOPSIX_HAS_DX7S
+    (void)err;
+#endif
+
+    switch (impl->engine) {
+    case SLOPSIX_ENGINE_DX7S:
+#if SLOPSIX_HAS_DX7S
+        /* The patch's operator array is indexed operator 1 first.  The
+         * value is read at note-on, as the dump's own field is; the
+         * sounding voices keep the sensitivity they started with. */
+        impl->dx7.patch.ops[op_1_6 - 1u].ams_sens = sens_0_7;
+        return err;
+#else
+        return SLOPSIX_ERR_UNSUPPORTED;
+#endif
+    default:
+        return SLOPSIX_ERR_UNSUPPORTED;
+    }
+}
+
 slopsix_error slopsix_set_digital_output_gain(slopsix_context ctx,
     bool normalize)
 {

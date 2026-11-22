@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add the DX7S's 0..7 per-operator amplitude modulation sensitivity
+  (`slopsix_set_amp_mod_sensitivity`); values above 3 use a provisional
+  depth law.
+
 ## 0.3.0 (2026-11-21)
 
 Add experimental DX7S personality.

@@ -91,8 +91,9 @@ slopsix_error slopsix_set_lfo_mode(slopsix_context ctx,
                                    slopsix_lfo_mode mode);
 ```
 
-DX7S-only voice parameters (key mode, unison detune and the pitch-EG
-range/velocity/rate scaling). They default to the Mk1-equivalent behaviour,
+DX7S-only voice parameters (key mode, unison detune, the pitch-EG
+range/velocity/rate scaling and the per-operator 0..7 amplitude modulation
+sensitivity, which loading voice data resets to the dump's 0..3 field). They default to the Mk1-equivalent behaviour,
 so a neutral DX7S context matches the DX7; an engine without them, such as
 the DX7, reports `SLOPSIX_ERR_UNSUPPORTED` and leaves the value unchanged:
 
@@ -106,6 +107,9 @@ slopsix_error slopsix_set_peg_range(slopsix_context ctx,
 slopsix_error slopsix_set_peg_velocity(slopsix_context ctx, bool on);
 slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
                                            uint8_t depth_0_7);
+slopsix_error slopsix_set_amp_mod_sensitivity(slopsix_context ctx,
+                                              uint8_t op_1_6,
+                                              uint8_t sens_0_7);
 ```
 
 Portamento (`SLOPSIX_PORTA_FINGERED` or `SLOPSIX_PORTA_FULL_TIME`) and

@@ -3249,6 +3249,9 @@ static void stage_personality_params(void)
         check(slopsix_set_peg_rate_scaling(ctx, 7u) ==
               SLOPSIX_ERR_UNSUPPORTED,
               "the DX7 has no pitch-EG rate scaling");
+        check(slopsix_set_amp_mod_sensitivity(ctx, 1u, 7u) ==
+              SLOPSIX_ERR_UNSUPPORTED,
+              "the DX7 has no 3-bit amplitude modulation sensitivity");
 
         /* A malformed value is reported as such regardless of engine. */
         check(slopsix_set_key_mode(ctx, (slopsix_key_mode)9) ==
@@ -3341,6 +3344,120 @@ static void stage_personality_params(void)
               state->key_mode == (uint8_t)SLOPSIX_KEY_MONO,
               "the mapped mono switch overrides a unison key mode");
         slopsix_set_mono_mode(ctx, false);
+        slopsix_destroy_context(ctx);
+    }
+#endif
+}
+
+/*
+ * The DX7S's 3-bit amplitude modulation sensitivity (algorithm page
+ * §4.5.1): 0..3 keep the Mk1's law, 4..7 extend the shift and saturate at
+ * the 12-bit envelope floor, the per-operator setter is DX7S-only, the
+ * voice data resets it to the dump's 2-bit field, and a note-on carries
+ * the patch's value into the voice.
+ */
+static void stage_ams(void)
+{
+#if SLOPSIX_HAS_DX7S
+    slopsix_context ctx;
+    slopsix_context_state *state;
+    uint8_t dump[SLOPSIX_VOICE_DUMP_SIZE];
+    unsigned s;
+    int ok;
+#endif
+
+    printf("stage ams\n");
+
+    /* The Mk1 range: the shift law, 0 disabled. */
+    check(slopsix_ams_reduction_q8(0u, 255u) == 0 &&
+          slopsix_ams_reduction_q8(1u, 255u) == 510 &&
+          slopsix_ams_reduction_q8(3u, 255u) == 2040,
+          "sensitivities 0..3 follow the Mk1 shift law");
+
+#if SLOPSIX_HAS_DX7S
+    ok = 1;
+    for (s = 4u; s <= 7u; s++) {
+        int32_t small = (int32_t)16u << s;
+        int32_t full = (int32_t)255u << s;
+
+        if (small > SLOPSIX_AMS_REDUCTION_FLOOR) {
+            small = SLOPSIX_AMS_REDUCTION_FLOOR;
+        }
+        if (full > SLOPSIX_AMS_REDUCTION_FLOOR) {
+            full = SLOPSIX_AMS_REDUCTION_FLOOR;
+        }
+        if (slopsix_ams_reduction_q8((uint8_t)s, 16u) != small ||
+            slopsix_ams_reduction_q8((uint8_t)s, 255u) != full) {
+            ok = 0;
+        }
+    }
+    check(ok, "sensitivities 4..7 extend the shift and saturate at the "
+              "12-bit floor");
+    check(slopsix_ams_reduction_q8(9u, 1u) == 128,
+          "an out-of-contract sensitivity clamps to 7");
+
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7S,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7S context");
+    if (ctx == NULL) {
+        return;
+    }
+    state = SLOPSIX_CONTEXT(ctx);
+    make_init_patch(dump);
+    /* Operator 1 is the last block; its dump field is 2 bits. */
+    dump[5u * SLOPSIX_DUMP_OP_BLOCK + 14u] = 3u;
+    slopsix_set_voice(ctx, dump, sizeof(dump));
+    check(state->patch.ops[0].ams_sens == 3u,
+          "the voice data loads the 2-bit sensitivity");
+
+    check(slopsix_set_amp_mod_sensitivity(ctx, 1u, 7u) == SLOPSIX_OK &&
+          state->patch.ops[0].ams_sens == 7u,
+          "the DX7S takes a 3-bit sensitivity for operator 1");
+    check(slopsix_set_amp_mod_sensitivity(ctx, 6u, 9u) ==
+              SLOPSIX_ERR_RANGE &&
+          state->patch.ops[5].ams_sens == 7u,
+          "an oversized sensitivity clamps to 7");
+    check(slopsix_set_amp_mod_sensitivity(ctx, 0u, 1u) ==
+              SLOPSIX_ERR_INVALID &&
+          slopsix_set_amp_mod_sensitivity(ctx, 7u, 1u) ==
+              SLOPSIX_ERR_INVALID,
+          "an operator outside 1..6 is rejected");
+
+    slopsix_note_on(ctx, 60u, 100u);
+    check(state->engines[0].params[0].ams_sens == 7u,
+          "a note-on carries the 3-bit sensitivity into the voice");
+    state->lfo.amp_mod_register = 64u;
+    slopsix_voice_engine_update_ams(state, &state->engines[0]);
+    check(state->engines[0].params[0].ams_reduction_q8 ==
+              SLOPSIX_AMS_REDUCTION_FLOOR,
+          "sensitivity 7 drives the operator to the floor");
+    slopsix_note_off(ctx, 60u);
+
+    slopsix_set_voice(ctx, dump, sizeof(dump));
+    check(state->patch.ops[0].ams_sens == 3u &&
+          state->patch.ops[5].ams_sens == 0u,
+          "loading voice data resets the sensitivity to the dump's field");
+    slopsix_destroy_context(ctx);
+
+    /* The helper selects the wide clamp in this build, so a DX7 context
+     * reaching it must still stay on the Mk1 law: the dump field is
+     * masked to 2 bits and the wide setter is unavailable, leaving no
+     * way to reach the floor. */
+    dump[5u * SLOPSIX_DUMP_OP_BLOCK + 14u] = 0xFFu;
+    ctx = slopsix_create_context(SLOPSIX_ENGINE_DX7,
+        SLOPSIX_DEFAULT_SAMPLE_RATE);
+    check(ctx != NULL, "create_context returns a DX7 context");
+    if (ctx != NULL) {
+        state = SLOPSIX_CONTEXT(ctx);
+        slopsix_set_voice(ctx, dump, sizeof(dump));
+        slopsix_note_on(ctx, 60u, 100u);
+        check(state->engines[0].params[0].ams_sens == 3u,
+              "a DX7 context masks the sensitivity to its 2-bit field");
+        state->lfo.amp_mod_register = 255u;
+        slopsix_voice_engine_update_ams(state, &state->engines[0]);
+        check(state->engines[0].params[0].ams_reduction_q8 ==
+                  (int32_t)255u << 3,
+              "a DX7 context keeps the Mk1 reduction in a DX7S build");
         slopsix_destroy_context(ctx);
     }
 #endif
@@ -5960,6 +6077,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--lfo") == 0) {
             stage_lfo();
             ran = 1;
+        } else if (strcmp(argv[i], "--ams") == 0) {
+            stage_ams();
+            ran = 1;
         } else if (strcmp(argv[i], "--plfo") == 0) {
             stage_plfo();
             ran = 1;
@@ -6019,6 +6139,7 @@ int main(int argc, char **argv)
         stage_pitcheg();
         stage_porta();
         stage_lfo();
+        stage_ams();
         stage_plfo();
         stage_peg_range();
         stage_unison();

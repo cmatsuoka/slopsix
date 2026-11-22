@@ -267,6 +267,20 @@ slopsix_error slopsix_set_peg_velocity(slopsix_context ctx, bool on);
 slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
     uint8_t depth_0_7);
 
+/* Per-operator amplitude modulation sensitivity, 0..7 (operator 1..6).
+ * The DX7S widens the voice data's 2-bit field (0..3) to three bits and
+ * carries the wide value in its additional voice data; the voice data
+ * holds min(value, 3), and 0..3 mean what they mean on the Mk1.  Loading
+ * voice data (slopsix_set_voice) resets every operator to the dump's
+ * 2-bit value, so apply this afterwards.  The value takes effect at the
+ * next note-on.  An operator outside 1..6 reports SLOPSIX_ERR_INVALID.
+ * On the DX7S a sensitivity above 7 is clamped to 7 and reported as
+ * SLOPSIX_ERR_RANGE; a context whose engine is not the DX7S reports
+ * SLOPSIX_ERR_UNSUPPORTED.  The depth law for 4..7 is provisional (it
+ * extends the Mk1's doubling per step). */
+slopsix_error slopsix_set_amp_mod_sensitivity(slopsix_context ctx,
+    uint8_t op_1_6, uint8_t sens_0_7);
+
 /* Digital output gain: when true, the DX7S analog restore gain is
  * halved (x4 instead of x8), bringing the output to the same level
  * as the DX7 Mk1.  The default is false (-6 dB below the Mk1,

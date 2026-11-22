@@ -620,7 +620,8 @@ typedef struct {
     uint8_t levels[4];      /* the four stage levels, 0..99 */
     uint8_t rate_scaling;   /* the hardware's 3-bit field, 0..7 */
     uint8_t velocity_sens;  /* the hardware's 3-bit field, 0..7 */
-    uint8_t ams_sens;       /* the hardware's 2-bit field, 0..3 */
+    uint8_t ams_sens;       /* the dump's 2-bit field, 0..3; the DX7S's
+                             * additional voice data widens it to 0..7 */
     uint8_t out_level;      /* the operator output level, 0..99 */
     uint8_t mode;           /* 0 = ratio, 1 = fixed frequency */
     uint8_t coarse;         /* 0..31 */
@@ -846,7 +847,8 @@ typedef struct {
     /* The level pipeline's parameters (Phase 3). */
     uint8_t out_level;     /* the operator output level, 0..99 */
     uint8_t velocity_sens; /* the key velocity sensitivity, 0..7 */
-    uint8_t ams_sens;      /* the amplitude modulation sensitivity, 0..3 */
+    uint8_t ams_sens;      /* the amplitude modulation sensitivity, 0..3
+                            * (0..7 on the DX7S) */
     int8_t kls[SLOPSIX_KLS_GROUPS]; /* the keyboard level scaling offsets,
                                      * one per key-code group */
     /* The amplitude modulation's reduction, in the Q8 domain (a
@@ -1536,17 +1538,56 @@ static inline int32_t slopsix_com_q8(uint8_t com)
  * reduction is composed at note-on and on every tick and cached in the
  * voice's operator parameters; the render path only reads the cached
  * value.
+ *
+ * The sensitivity's width is the personality's.  The Mk1's voice data
+ * field is 2 bits (0..3), and at 3 the 8-bit register spans 2040 of the
+ * 12-bit range, so the reduction never reaches the floor by itself.  The
+ * DX7S's additional voice data widens it to 3 bits (0..7; algorithm page
+ * §4.5.1); 0..3 keep the Mk1's meaning and 4..7 extend the same shift
+ * law (hypothesis-grade, OQ-DX7S-09).  At 4 the full register spans
+ * 4080, one step short of the 12-bit envelope floor (0xFFF, the EGS's
+ * own clamp), and from 5 up the shift alone passes it, so the DX7S build
+ * saturates the reduction there.  A DX7 context never holds a
+ * value above 3 (the dump field is masked and the setter is DX7S-only),
+ * so the saturation never acts on its path; the DX7-only build compiles
+ * it out.
+ *
+ * The width is selected per build rather than per engine, so in a DX7S
+ * build the DX7 personality shares this wide helper and its path carries
+ * the wide clamp and floor.  That is output-neutral only because of the
+ * DX7 value cap above.  Splitting the helper per engine would put the
+ * personality check on the amplitude-modulation reduction path, which the
+ * sample loop evaluates for every operator of every voice, so the
+ * build-time choice is kept and the cap is what keeps the shared helper
+ * from changing the DX7 output.
  */
+#if defined(SLOPSIX_DX7S)
+#define SLOPSIX_AMS_SENS_MAX 7u
+#else
+#define SLOPSIX_AMS_SENS_MAX 3u
+#endif
+
+/* The 12-bit envelope attenuation's floor, in Q8 units (§4.5). */
+#define SLOPSIX_AMS_REDUCTION_FLOOR 0xFFF
+
 static inline int32_t slopsix_ams_reduction_q8(uint8_t ams_sens,
     uint8_t amp_mod_register)
 {
+    int32_t reduction;
+
     if (ams_sens == 0u) {
         return 0;
     }
-    if (ams_sens > 3u) {
-        ams_sens = 3u;
+    if (ams_sens > SLOPSIX_AMS_SENS_MAX) {
+        ams_sens = SLOPSIX_AMS_SENS_MAX;
     }
-    return (int32_t)amp_mod_register << ams_sens;
+    reduction = (int32_t)amp_mod_register << ams_sens;
+#if defined(SLOPSIX_DX7S)
+    if (reduction > SLOPSIX_AMS_REDUCTION_FLOOR) {
+        reduction = SLOPSIX_AMS_REDUCTION_FLOOR;
+    }
+#endif
+    return reduction;
 }
 
 /* Floor division by a power of two, defined for negative values.  C leaves
