@@ -2260,11 +2260,46 @@ static int filter_gain_near(int32_t got, int32_t expect, int percent)
     return delta <= tolerance;
 }
 
+/* The DX7 prototype, as the generator emits it: the base research fit
+ * rescaled to the DX7 tail's measured 17.02 kHz corner. */
+static const int32_t filter_prototype[3][5] = {
+    { 535692986, 535692986, 0, -2355853, 0 },
+    { 611162297, 1222324595, 611162297, 763595718, 607311647 },
+    { 953404960, 1906809919, 953404960, 1795222135, 944655879 }
+};
+
 static void stage_filter(void)
 {
     slopsix_filter filter;
+    unsigned section;
+    unsigned k;
 
     printf("stage filter\n");
+
+    /* The anchor rate's design is the prototype: the transform's round
+     * trip is exact up to the fixed point's last bits. */
+    slopsix_filter_init(&filter, SLOPSIX_DEFAULT_SAMPLE_RATE);
+    for (section = 0; section < SLOPSIX_FILTER_SECTIONS; section++) {
+        int match = 1;
+
+        for (k = 0; k < 5u; k++) {
+            int32_t want = filter_prototype[section][k];
+            int32_t got;
+
+            switch (k) {
+            case 0: got = filter.section[section].b0; break;
+            case 1: got = filter.section[section].b1; break;
+            case 2: got = filter.section[section].b2; break;
+            case 3: got = filter.section[section].a1; break;
+            default: got = filter.section[section].a2; break;
+            }
+
+            if (got > want + 64 || got < want - 64) {
+                match = 0;
+            }
+        }
+        check(match, "the anchor rate's design is the prototype");
+    }
 
     /* The DC gain: a constant code settles on its own value. */
     {
@@ -2288,35 +2323,35 @@ static void stage_filter(void)
               "the filter's DC gain is one on the negative side too");
     }
 
-    /* The response of the folded DX7 tail (Vicanek-matched single low-pass
-     * at 13.5 kHz, Q 0.68, standing in for the low-pass plus the shelf):
-     * the passband, the -3 dB corner and the stopband above it. */
+    /* The response at the DX7 tail's measured frequencies: the passband,
+     * the -3 dB corner at 17.02 kHz and the stopband above it. */
     check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 1000),
                            65536, 2), "the passband is flat at 1 kHz");
-    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 12946),
-                           46400, 3), "the -3 dB corner is near 12.9 kHz");
+    check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 17020),
+                           46400, 3), "the corner at 17.02 kHz is -3 dB");
     check(filter_gain_near(filter_gain_q16(SLOPSIX_DEFAULT_SAMPLE_RATE, 20000),
-                           28400, 5), "the stopband at 20 kHz is about -7 dB");
+                           13170, 5), "the stopband at 20 kHz is -14 dB");
 
-    /* The same analog tail at another host rate: the matched design keeps
-     * the corner and the low passband where they are (no Nyquist
-     * cramping). */
+    /* The rate scaling: the corner stays where it is at another host
+     * rate, and the low passband stays flat. */
     check(filter_gain_near(filter_gain_q16(48000u, 1000), 65536, 2),
           "the 48 kHz design's passband is flat");
-    check(filter_gain_near(filter_gain_q16(48000u, 12944), 46400, 3),
+    check(filter_gain_near(filter_gain_q16(48000u, 17020), 46400, 3),
           "the 48 kHz design keeps the corner at -3 dB");
-    check(filter_gain_near(filter_gain_q16(44100u, 12933), 46400, 3),
+    check(filter_gain_near(filter_gain_q16(44100u, 17020), 46400, 3),
           "the 44.1 kHz design keeps the corner at -3 dB");
 
-    /* A host rate too low to carry the 13.5 kHz corner: the corner is
-     * clamped to 0.45 fs (12.6 kHz at 28 kHz) so the poles stay inside the
-     * unit circle, and the low passband stays flat. */
-    check(filter_gain_near(filter_gain_q16(28000u, 1000), 65536, 2),
-          "a low rate clamps the corner and keeps the passband flat");
+    /* A host rate that cannot carry the corner: the filter is
+     * transparent, because the prototype is flat below the corner and the
+     * corner is at or above the host's Nyquist.  The DX7's corner is
+     * 17.02 kHz, so 34.04 kHz is the boundary; the probe sits below the
+     * 32 kHz design's 16 kHz Nyquist. */
+    check(filter_gain_near(filter_gain_q16(32000u, 5000), 65536, 2),
+          "a rate that cannot carry the corner leaves the filter flat");
 
 #ifdef SLOPSIX_DX7S
     /* The DX7S tail: the aperture shelf first, then the 24 dB/oct
-     * Butterworth at 20.5 kHz; the shelf pulls the combined corner down to
+     * Butterworth at 21 kHz; the shelf pulls the combined corner down to
      * about 16.7 kHz. */
     check(filter_gain_near(filter_gain_dx7s_q16(SLOPSIX_DEFAULT_SAMPLE_RATE,
                                                 1000), 65536, 2),
