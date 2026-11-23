@@ -10,9 +10,7 @@
 - Fix the operator envelopes' rate scaling from the key-on voice-pitch word.
 - Anchor the EGS master clock to the engine's rate so that a stage takes the
   same real time at every host sample rate.
-- Add the DX7S's 0..7 per-operator amplitude modulation sensitivity
-  (`slopsix_set_amp_mod_sensitivity`); values above 3 use a provisional
-  depth law.
+- Add the DX7S's 0..7 per-operator amplitude modulation sensitivity.
 - Fix the DX7S pitch envelope arithmetic.
 
 ## 0.3.0 (2026-11-21)

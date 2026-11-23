@@ -275,8 +275,10 @@ slopsix_error slopsix_set_peg_rate_scaling(slopsix_context ctx,
  * next note-on.  An operator outside 1..6 reports SLOPSIX_ERR_INVALID.
  * On the DX7S a sensitivity above 7 is clamped to 7 and reported as
  * SLOPSIX_ERR_RANGE; a context whose engine is not the DX7S reports
- * SLOPSIX_ERR_UNSUPPORTED.  The depth law for 4..7 is provisional (it
- * extends the Mk1's doubling per step). */
+ * SLOPSIX_ERR_UNSUPPORTED.  The DX7S carries the three-bit value in the
+ * same per-operator sensitivity field the Mk1 uses, so 4..7 continue the
+ * Mk1's doubling per step and saturate at the 12-bit attenuation floor;
+ * there is no separate high-range curve. */
 slopsix_error slopsix_set_amp_mod_sensitivity(slopsix_context ctx,
     uint8_t op_1_6, uint8_t sens_0_7);
 

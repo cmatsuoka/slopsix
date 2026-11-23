@@ -1580,13 +1580,19 @@ static inline int32_t slopsix_com_q8(uint8_t com)
  * 12-bit range, so the reduction never reaches the floor by itself.  The
  * DX7S's additional voice data widens it to 3 bits (0..7; algorithm page
  * §4.5.1); 0..3 keep the Mk1's meaning and 4..7 extend the same shift
- * law (hypothesis-grade, OQ-DX7S-09).  At 4 the full register spans
- * 4080, one step short of the 12-bit envelope floor (0xFFF, the EGS's
- * own clamp), and from 5 up the shift alone passes it, so the DX7S build
- * saturates the reduction there.  A DX7 context never holds a
- * value above 3 (the dump field is masked and the setter is DX7S-only),
- * so the saturation never acts on its path; the DX7-only build compiles
- * it out.
+ * law.  This is the hardware's own field widened in place, not a model:
+ * the DX7S writes rate scaling to bits 0..2 and the whole three-bit
+ * sensitivity to bits 3..5 of the same per-operator sensitivity register
+ * the Mk1 uses, taking the larger of the additional value and the voice
+ * data's `min(value, 3)` (the value the instrument stores in the
+ * Mk1-compatible dump).  At 4 the full register spans 4080, one step
+ * short of the 12-bit envelope floor (0xFFF, the EGS's own clamp), and
+ * from 5 up the shift alone passes it, so the DX7S build saturates the
+ * reduction there.  The saturation is the hardware's clipped tremolo
+ * duty cycle at the top settings, not a separate curve.  A DX7 context
+ * never holds a value above 3 (the dump field is masked and the setter
+ * is DX7S-only), so the saturation never acts on its path; the DX7-only
+ * build compiles it out.
  *
  * The width is selected per build rather than per engine, so in a DX7S
  * build the DX7 personality shares this wide helper and its path carries
