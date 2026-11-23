@@ -88,7 +88,10 @@ void slopsix_dx7s_pitch_eg_configure(const slopsix_patch_state *patch,
      * scales the increment, so a key at the top of the keyboard moves
      * the stage about twice as fast as the bottom one. */
     if (patch->peg_rate_scaling != 0u) {
-        uint32_t rs = slopsix_rate_scaling(note, patch->peg_rate_scaling);
+        /* The pitch envelope's own rate scaling is the provisional operator
+         * shape, keyed by the note; the voice pitch offset is not applied
+         * (the operator envelopes see it through their own rate scaling). */
+        uint32_t rs = slopsix_rate_scaling(note, 0, patch->peg_rate_scaling);
 
         for (i = 0; i < 4u; i++) {
             int32_t increment = ((int32_t)eg->increment[i] *

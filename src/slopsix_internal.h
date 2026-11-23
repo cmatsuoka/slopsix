@@ -757,25 +757,32 @@ static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
  * spectral distance drops from 0.434 to 0.058 (2026-11-18). */
 #define SLOPSIX_LEVEL_OFFSET_Q8 4000
 
-/* The envelope's own fixed point: the Q8 level with 16 fractional bits.
- * The attack's asymptote and its jump target are the model's constants
- * (research E-01). */
+/* The envelope's own fixed point: the EGS attenuation with 16
+ * fractional bits for the block cadence's interpolation.  The level is
+ * held in the hardware's inverted 12-bit attenuation domain (0 is full
+ * level, 0xFF0 is the model's silence floor); the render path converts
+ * it to the engine's gain direction with SLOPSIX_EG_GAIN_BASE. */
 #define SLOPSIX_EG_FRAC 16
-#define SLOPSIX_EG_MIN_Q8 16
-#define SLOPSIX_EG_JUMP_Q8 1716
-#define SLOPSIX_EG_MAX_Q8 4352
 
-/* The envelope increment's saturation point: the top four six-bit rates
- * (60..63) all select the fastest step.  The chip's documented envelope
- * time table lists one identical 96 dB decay time for the four, and the
- * chip's clock gate clamps the step there (research E-02).  The rate
- * register keeps its 0..63 value; only the increment saturates. */
-#define SLOPSIX_EG_RATE_MAX 60
+/* The EGS attenuation domain.  0xFF0 is the target/level clamp ("minimum
+ * level is 4096 - 16").  The attack jumps a louder envelope to 0x94C
+ * (4096 - 1716) before it slopes towards its target (research E-01). */
+#define SLOPSIX_EG_ATT_MAX 0xFF0
+#define SLOPSIX_EG_ATT_JUMP 0x94Cu
 
-/* The envelope's block cadence: the reference model advances the
- * envelope once per 64-sample block and interpolates the gain across
- * it.  The engine keeps both cadences behind one switch until a capture
- * pins the hardware's own (plan decision D-9). */
+/* The gain direction's base: attenuation A is gain (4032 - A) in the
+ * engine's Q8 domain.  4032 is 63 level-register steps of 64 units, the
+ * largest target the EGS composition produces. */
+#define SLOPSIX_EG_GAIN_BASE 4032
+
+/* The measured static durations are gone with the msfa model; the EGS
+ * target composition's smallest operator volume register value is 4,
+ * which makes 0x40 the smallest attenuation a target can carry. */
+#define SLOPSIX_EG_OP_LEVEL_MIN 4
+
+/* The envelope's block cadence: the EGS model advances every sample,
+ * but the diagnostic block cadence runs 64 steps at a time and
+ * interpolates the level across the block (plan decision D-9). */
 #define SLOPSIX_EG_BLOCK 64
 
 /* The render path's per-block, operator-major evaluation (the DX7
@@ -788,32 +795,49 @@ static inline int32_t slopsix_effective_note(uint8_t note, int8_t transpose)
 
 /* One operator's envelope generator.
  *
- * The state machine walks the four stages (attack, decay, sustain,
- * release); the key-up jumps straight to the release stage.  The level
- * is held in the engine's fixed point and moves towards the current
- * stage's target.
+ * The EGS model (algorithm page §5.1): the level lives in the chip's
+ * inverted 12-bit attenuation domain, the stage machine walks
+ * S0 -> S1 -> S2 while the key is held and jumps to S3 at key-up, and
+ * the rate gate clocks the movement from the 16-bit master clock.  The
+ * render path converts the attenuation to the engine's gain direction.
  */
 typedef struct {
     /* The parameters, set at note-on. */
-    uint8_t rates[4];       /* the four stage rates, 0..99 */
-    uint8_t levels[4];      /* the four stage levels, 0..99 */
-    int32_t op_level_q8;    /* the operator's own level (Q8) */
+    uint8_t rate_reg[4];    /* the EGS rate registers, (rate*164)>>8 */
+    uint8_t level_reg[4];   /* the EGS attenuation levels, 0..63 */
+    uint8_t op_level;       /* the EGS operator-volume register, 4..255 */
     uint8_t rate_scaling;   /* the note's rate scaling delta, 0..31 */
 
-    /* The runtime state. */
-    int32_t level;          /* the current level, Q8 << SLOPSIX_EG_FRAC */
-    int32_t target;         /* the current stage's target */
-    int32_t inc;            /* the current stage's increment */
-    int32_t static_count;   /* the remaining static-count samples */
+    /* The runtime state (attenuation << SLOPSIX_EG_FRAC). */
+    int32_t level;          /* the current attenuation */
+    int32_t target;         /* the current stage's target attenuation */
     uint8_t stage;          /* 0..3, 4 when the envelope has finished */
     uint8_t active;         /* the envelope is in use */
-    uint8_t rising;         /* the stage rises towards its target */
+    uint8_t rising;         /* the stage lowers the attenuation */
     uint8_t down;           /* the key is down */
-    uint8_t block_mode;     /* the cadence switch (plan decision D-9) */
+    uint8_t compress;       /* the stage-0 delay compression flag: set
+                             * by a stage-0 key-off (the previous stage-0
+                             * delay did not complete), cleared by a
+                             * completed stage 0, as the model does */
+    uint8_t nshift;         /* the slow-rate clock shift */
+    uint8_t pshift;         /* the fast-rate movement shift */
+    uint8_t mask;           /* the fractional-qrate clock mask */
+    uint16_t small;         /* the slow-rate clock mask */
+    uint16_t clock;         /* the envelope's 16-bit master clock,
+                             * free-running at the engine's anchor rate
+                             * and reset at note-on (the model's one
+                             * shared master clock never resets; a key
+                             * event realigning the gate's phase within
+                             * one gate period is the engine's documented
+                             * deviation - slopsix_eg_clock) */
+    uint32_t tick_acc;      /* the master clock's sub-tick accumulator */
+    uint32_t tick_threshold; /* the host rate the accumulator crosses */
+
+    /* The diagnostic block cadence (plan decision D-9). */
+    uint8_t block_mode;     /* 1: step once per block and interpolate */
     uint8_t block_pos;      /* the sample position inside the block */
-    int32_t block_level;    /* the block's starting level */
-    int32_t block_step;     /* the block's per-sample step */
-    uint32_t sample_rate;   /* the host's sample rate */
+    int32_t block_level;    /* the block's starting attenuation */
+    int32_t block_step;     /* the block's per-sample attenuation step */
 } slopsix_eg;
 
 /* ------------------------------------------------------- operator (Phase 2) */
@@ -2003,7 +2027,12 @@ int32_t slopsix_op_level_q8(uint8_t out_level, int8_t kls_offset,
 uint8_t slopsix_note_group(uint8_t note);
 
 /* The rate scaling: the note's contribution to the envelope's rate. */
-uint8_t slopsix_rate_scaling(uint8_t note, uint8_t sensitivity);
+uint8_t slopsix_rate_scaling(uint8_t note, int32_t pitch_offset,
+    uint8_t sensitivity);
+
+/* The EGS master clock's tick threshold for a host rate (zero means the
+ * anchor rate; the value is bounded like the cadence gates' rate). */
+uint32_t slopsix_eg_tick_threshold(uint32_t sample_rate);
 
 /* The envelope. */
 void slopsix_eg_init(slopsix_eg *eg, const uint8_t rates[4],

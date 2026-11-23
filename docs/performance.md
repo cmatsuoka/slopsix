@@ -138,3 +138,37 @@ translation unit is slower than `-O2`, so `-O2` is the floor there.
 With this change the optimization candidates' big structural item is
 done; the remaining candidates are the oscillator core (number 8) and
 profile-guided optimization (number 9).
+
+## The EGS envelope (2026-11-23)
+
+The envelope left the msfa per-block increment model for the
+bit-synchronous EGS model (per-sample gated movement from a 16-bit master
+clock), and the clock was anchored to the engine's rate so a stage takes
+the same real time at every host rate.  At the anchor rate the clock runs
+the previous one-tick-per-sample ladder unchanged; a host rate other than
+49,096 Hz dithers the schedule through a sub-tick accumulator, selected
+outside the render loop so the anchor path keeps the old shape.
+
+Measurement method: the local-only `local/bench` harness, ROM 1A, one
+pinned CPU (`taskset -c 2`), interleaved binaries, seven runs per cell,
+medians.  The CPU governor was `powersave`, so only the interleaved
+comparisons are meaningful, and they move with the governor more than the
+2-6% figures below.
+
+- The rework with the anchored clock reaches about 424-447 ns/frame at
+  sixteen voices (BRASS 446, E.PIANO 434, SYN-LEAD 425) and 37-38
+  ns/frame on one voice, against the msfa engine's 389-422 / 34-37: a
+  **6% to 12% regression** from the EGS model itself, most of it the gate
+  arithmetic replacing the single per-block multiply.
+- The clock anchoring itself measured **free at the anchor rate**: against
+  the unanchored EGS build the fixed tree is 3% to 8% *faster* (the
+  per-envelope struct lost twelve dead bytes in the same change), and
+  0-3% faster at 44.1, 48 and 96 kHz.  The dithered ladder's accounting
+  is invisible against the rest of the render path.
+- The single-note and 16-voice renders are byte-identical to the
+  unanchored build at the anchor rate across all thirty-two ROM 1A
+  programs (the compress-flag timing fix only differs on retriggers).
+
+Both engines remain comfortably realtime (the 16-voice worst case is
+about 22x), so the trade stands: the EGS model's accuracy is bought for
+6-12%, and the anchor rate's ladder costs nothing.

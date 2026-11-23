@@ -1,19 +1,19 @@
 /*
  * slopsix_eg.c - The amplitude envelope and the level pipeline.
  *
- * The pipeline is the hardware's own: everything is composed in the Q8
- * log2 domain (256 units per octave) and converted once, at the signal
+ * The envelope is the EGS model (algorithm page §5.1): the level is the
+ * chip's inverted 12-bit attenuation (0 is full level, 0xFF0 the model's
+ * silence floor), the stage target composes the stage's 6-bit level
+ * register and the operator-volume register in that domain, and the rate
+ * gate clocks the movement from a 16-bit master clock that advances at
+ * the engine's anchor rate.  The render path works in the opposite
+ * (gain) direction: the level pipeline still composes everything in the
+ * Q8 log2 domain (256 units per octave) and converts once, at the signal
  * exponent.  The chain is
  *
  *   log_amp = envelope level (Q8)
  *            + carrier-count compensation (Q8, negative)
  *            + amplitude modulation (Phase 4)
- *
- * and the envelope's own target is composed of
- *
- *   target = the stage's level curve (Q8)
- *          + the operator's level: the output level, the keyboard level
- *            scaling and the velocity (Q8)
  *
  * The units of the level parameters are the hardware's: the operator
  * output level and the envelope's stage levels are 0..99 parameters, the
@@ -70,28 +70,6 @@ static const uint8_t slopsix_velocity_attenuation_table[33] = {
     122, 124, 126, 128, 130, 131, 132, 133,
     189
 };
-
-/* The measured stage durations: 77 entries, the number of samples a
- * stage whose target is the current level lasts, measured at 44.1 kHz
- * (research E-02).  The values are re-anchored to the engine's own rate
- * when they are used, and the rates beyond the measured range are
- * approximated (research E-02).
- *
- * Evidence grade: measured model (hypothesis-grade, plan section 3.0). */
-static const int32_t slopsix_eg_statics[77] = {
-    1764000, 1764000, 1411200, 1411200, 1190700, 1014300, 992250,
-    882000, 705600, 705600, 584325, 507150, 502740, 441000, 418950,
-    352800, 308700, 286650, 253575, 220500, 220500, 176400, 145530,
-    145530, 125685, 110250, 110250, 88200, 88200, 74970, 61740,
-    61740, 55125, 48510, 44100, 37485, 31311, 30870, 27562, 27562,
-    22050, 18522, 17640, 15435, 14112, 13230, 11025, 9261, 9261, 7717,
-    6615, 6615, 5512, 5512, 4410, 3969, 3969, 3439, 2866, 2690, 2249,
-    1984, 1896, 1808, 1411, 1367, 1234, 1146, 926, 837, 837, 705,
-    573, 573, 529, 441, 441
-};
-
-/* The rate at which the measured stage durations were taken. */
-#define SLOPSIX_EG_MODEL_RATE 44100u
 
 /* ---------------------------------------------------------- the level curve */
 
@@ -307,24 +285,34 @@ int32_t slopsix_op_level_q8(uint8_t out_level, int8_t kls_offset,
  * the note's group above the lowest octave and saturates (research
  * E-03).
  */
-uint8_t slopsix_rate_scaling(uint8_t note, uint8_t sensitivity)
+uint8_t slopsix_rate_scaling(uint8_t note, int32_t pitch_offset,
+    uint8_t sensitivity)
 {
     uint8_t sens = sensitivity > 7u ? 7u : sensitivity;
-    int32_t x = ((int32_t)(note & 127u) / 3) - 7;
+    int32_t word;
+    int32_t x;
+
+    /* The EGS derives the rate-scaling group from the voice-pitch word it
+     * receives with the key event, not from the key number: the firmware
+     * writes `note word + pitch EG level - bias + master tune`, and the
+     * chip forms `clamp((voicePitch >> 8) - 16, 0..27)`.  The neutral pitch
+     * EG level is 0x4000 and the firmware's shipped master tune is 0x100,
+     * so the constant below is the same word bias the note-only form
+     * (`note / 3 - 7`) already reproduced for neutral envelopes.  A pitch
+     * EG that starts away from neutral therefore moves the rate-scaling
+     * group with it, exactly as the EGS's voice-pitch register does. */
+    word = (int32_t)slopsix_note_word[note & 127u] + pitch_offset +
+           (SLOPSIX_PITCH_EG_NEUTRAL_WORD - SLOPSIX_FREQ_BIAS + 0x100);
+    x = slopsix_floor_div(word, 10) - 16;
 
     if (x < 0) {
         x = 0;
     }
-    if (x > 31) {
-        x = 31;
+    if (x > 27) {
+        x = 27;
     }
 
-    /* The EGS's key-scaling law, as the bit-synchronous model carries it:
-     * round(x * sens / 7), in qrate units.  A BANJO trace (2026-11-18)
-     * gives 6 for sens 3 and 13 for sens 7; the old >>3 form gave 4 and
-     * 11 and left the envelope too slow.  The note-dependent x is still
-     * the engine's approximation (note / 3 - 7); the EGS derives it from
-     * the voice-pitch word. */
+    /* round(x * sens / 7), in qrate units (research E-03). */
     return (uint8_t)(((int32_t)sens * x + 3) / 7);
 }
 
@@ -333,133 +321,306 @@ uint8_t slopsix_rate_scaling(uint8_t note, uint8_t sensitivity)
 /* ------------------------------------------------------------ the envelope */
 
 /*
- * The rate's increment.
+ * The EGS envelope model (algorithm page §5.1).
  *
- * The model turns a rate and the note's rate scaling into an increment
- * of the envelope's level per sample (research E-01):
+ * The level is the chip's inverted 12-bit attenuation: 0 is full level,
+ * 0xFF0 is the model's silence floor.  The target is composed from the
+ * stage's 6-bit attenuation register and the operator-volume register;
+ * the stage's rate comes from the 6-bit rate register plus the note's
+ * rate scaling.  A 16-bit master clock drives the rate gate: slow rates
+ * step once every 2^nshift clocks with a fractional mask, fast rates
+ * move by 1<<pshift on the mask's phases.  The stage machine is the
+ * EGS's own (S0 -> S1 -> S2 while the key is held, S3 at key-up).
  *
- *   q   = (rate * 41) >> 6, plus the rate scaling
- *   inc = (4 + (q & 3)) << (8 + (q >> 2))
- *
- * The increment is in the model's own 44.1 kHz domain and is re-anchored
- * to the host's rate.
+ * The engine's render path works in the opposite (gain) direction, so
+ * the exported level is SLOPSIX_EG_GAIN_BASE - attenuation.  The two
+ * domains meet at the target composition, where the engine's level
+ * pipeline already composes the same quantities.
  */
-static int32_t slopsix_eg_scale(int32_t value, uint32_t sample_rate)
+
+/* The fractional-qrate clock masks: bit 0 is the clock's phase 0.  A set
+ * bit lets the envelope step on that phase of the eight-clock cycle. */
+static const uint8_t slopsix_eg_outmask[4] = {
+    0xAA, 0xEA, 0xEE, 0xFE
+};
+
+/* The envelope's level in the render path's gain direction, in the Q8
+ * domain with the block cadence's fractional bits still attached. */
+static int32_t slopsix_eg_gain_q8(const slopsix_eg *eg)
 {
-    int64_t scaled;
-
-    if (sample_rate == 0u) {
-        sample_rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
-    }
-
-    /* A host rate far below the model's own pushes the fastest stage's
-     * increment past the word's range; the conversion saturates instead
-     * of wrapping, so the behaviour stays deterministic. */
-    scaled = ((int64_t)value * (int64_t)SLOPSIX_EG_MODEL_RATE +
-        (int64_t)(sample_rate / 2u)) / (int64_t)sample_rate;
-
-    if (scaled > INT32_MAX) {
-        return INT32_MAX;
-    }
-    if (scaled < INT32_MIN) {
-        return INT32_MIN;
-    }
-
-    return (int32_t)scaled;
+    return ((int32_t)SLOPSIX_EG_GAIN_BASE << SLOPSIX_EG_FRAC) - eg->level;
 }
 
-/*
- * The stage's target and its increment.
- *
- * The target is the stage's level, composed with the operator's own
- * level, in the Q8 domain; the envelope's level is held in that domain
- * with 16 fractional bits.  A target below the domain's floor is
- * clamped there.
- */
-static void slopsix_eg_advance(slopsix_eg *eg, uint8_t stage)
+static int32_t slopsix_eg_gain_value(const slopsix_eg *eg)
 {
-    int32_t target;
-    int32_t q;
-    int32_t inc;
-    uint8_t rate;
-    uint8_t level_param;
+    return slopsix_floor_div(slopsix_eg_gain_q8(eg), SLOPSIX_EG_FRAC);
+}
 
-    eg->stage = stage;
-    if (stage > 3u) {
-        /* The envelope has run out of stages. */
-        eg->static_count = 0;
+/* The EGS's pre-quantized registers.  The rate register is the firmware's
+ * (rate * 164) >> 8, 0..63; the level register is TABLE_LOG[level] >> 1,
+ * which is the exact inverse of the engine's gain curve. */
+static uint8_t slopsix_eg_rate_reg(uint8_t rate)
+{
+    if (rate > 99u) {
+        rate = 99u;
+    }
+    return (uint8_t)(((unsigned)rate * 164u) >> 8);
+}
+
+static uint8_t slopsix_eg_level_reg(uint8_t level)
+{
+    if (level > 99u) {
+        level = 99u;
+    }
+    return (uint8_t)(63u - ((unsigned)slopsix_level_curve(level) >> 1));
+}
+
+/* The operator-volume register from the engine's Q8 operator level.  The
+ * firmware clamps it to at least SLOPSIX_EG_OP_LEVEL_MIN. */
+static uint8_t slopsix_eg_op_level(int32_t op_level_q8)
+{
+    int32_t value = slopsix_floor_div(
+        SLOPSIX_LEVEL_OFFSET_Q8 - op_level_q8, 4);
+
+    if (value < SLOPSIX_EG_OP_LEVEL_MIN) {
+        value = SLOPSIX_EG_OP_LEVEL_MIN;
+    }
+    if (value > 255) {
+        value = 255;
+    }
+    return (uint8_t)value;
+}
+
+/* The current attenuation, as the stage walk sees it. */
+static int32_t slopsix_eg_att(const slopsix_eg *eg)
+{
+    return eg->level >> SLOPSIX_EG_FRAC;
+}
+
+/* Set the stage's target, its delay compression and the attack direction. */
+static void slopsix_eg_update_target(slopsix_eg *eg)
+{
+    uint8_t stage = eg->stage;
+    int32_t target;
+
+    target = ((int32_t)eg->level_reg[stage] << 6) +
+             ((int32_t)eg->op_level << 4);
+    if (target > SLOPSIX_EG_ATT_MAX) {
+        target = SLOPSIX_EG_ATT_MAX;
+    }
+
+    /* The delay compression: a stage 0/1 whose current and previous
+     * levels are both at or beyond 40 (the level parameter is below 20)
+     * is delayed.  Stage 0's delay is compressed when the previous
+     * stage-0 delay did not complete. */
+    if (stage < 2u) {
+        uint8_t prev = (uint8_t)((stage + 3u) & 3u);
+
+        if (eg->level_reg[stage] >= 40u && eg->level_reg[prev] >= 40u) {
+            int32_t delay = (stage == 0u && eg->compress) ? 15 : 479;
+            int32_t level = slopsix_eg_att(eg);
+
+            target = level + delay;
+            if (target > SLOPSIX_EG_ATT_MAX) {
+                eg->level = (SLOPSIX_EG_ATT_MAX - delay) <<
+                            SLOPSIX_EG_FRAC;
+                target = SLOPSIX_EG_ATT_MAX;
+            }
+        }
+    }
+
+    eg->target = target << SLOPSIX_EG_FRAC;
+    eg->rising = (target < slopsix_eg_att(eg)) ? 1u : 0u;
+}
+
+/* Set the stage's clock gate. */
+static void slopsix_eg_update_rate(slopsix_eg *eg)
+{
+    unsigned qrate = (unsigned)eg->rate_reg[eg->stage] +
+                     (unsigned)eg->rate_scaling;
+
+    if (qrate > 63u) {
+        qrate = 63u;
+    }
+
+    eg->pshift = 0u;
+    eg->nshift = 0u;
+    eg->small = 0u;
+    if (qrate < 44u) {
+        eg->nshift = (uint8_t)(11u - (qrate >> 2));
+        eg->small = (uint16_t)((1u << eg->nshift) - 1u);
+    } else {
+        eg->pshift = (uint8_t)((qrate >> 2) - 11u);
+    }
+    eg->mask = slopsix_eg_outmask[qrate & 3u];
+}
+
+/* Advance the stage machine.  A key-up jumps to the release stage; a
+ * key-on starts again at stage 0. */
+static void slopsix_eg_advance(slopsix_eg *eg)
+{
+    switch (eg->stage) {
+    case 0u:
+        if (eg->down == 0u) {
+            eg->stage = 3u;
+            eg->compress = 1u;
+        } else {
+            eg->stage = 1u;
+            eg->compress = 0u;
+        }
+        break;
+    case 1u:
+        if (eg->down == 0u) {
+            eg->stage = 3u;
+        } else {
+            eg->stage = 2u;
+        }
+        break;
+    case 2u:
+        if (eg->down == 0u) {
+            eg->stage = 3u;
+        } else {
+            return;
+        }
+        break;
+    case 3u:
+        if (eg->down != 0u) {
+            eg->stage = 0u;
+        } else {
+            return;
+        }
+        break;
+    default:
         return;
     }
 
-    rate = eg->rates[stage];
-    level_param = eg->levels[stage];
+    slopsix_eg_update_target(eg);
+    slopsix_eg_update_rate(eg);
+}
 
-    /* The target. */
-    target = ((slopsix_level_curve(level_param) >> 1) << 6) +
-             eg->op_level_q8 - SLOPSIX_LEVEL_OFFSET_Q8;
-    if (target < SLOPSIX_EG_MIN_Q8) {
-        target = SLOPSIX_EG_MIN_Q8;
+/* The EGS master clock's tick threshold: the 16-bit clock advances at the
+ * engine's anchor rate (research E-02), whatever the host's rate, so the
+ * envelope's durations are real-time quantities (research F-04).  The
+ * threshold is the host rate itself: the clock's sub-tick accumulator
+ * adds the anchor per host sample and a tick fires each time it crosses
+ * the threshold, so `threshold == anchor` ticks once per sample and other
+ * rates dither the schedule.  The rate is bounded like the cadence gates'
+ * and the frequency path's (zero means the anchor; at most eight times,
+ * and at least a 64th of the anchor so one sample cannot owe too many
+ * ticks). */
+uint32_t slopsix_eg_tick_threshold(uint32_t sample_rate)
+{
+    uint32_t rate = sample_rate;
+
+    if (rate == 0u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
     }
-    eg->target = target << SLOPSIX_EG_FRAC;
-    eg->rising = (eg->target > eg->level) ? 1u : 0u;
-
-    /* The increment.
-     *
-     * The rate gate.  The firmware pre-quantises the patch's 0..99 rate
-     * with (rate * 164) >> 8 (chip register domain 0..63); the engine
-     * adds the note's rate scaling and forms
-     *
-     *   q = (rate * 41) >> 6 + rate scaling
-     *
-     * which is the firmware expression rewritten in the engine's Q6
-     * domain.  The increment doubles every four q steps and the low two
-     * bits select the fraction 4/4..7/4 (research E-02).  A
-     * bit-synchronous EGS model follows the same law, and the chip's
-     * documented envelope time table agrees with it across the rate
-     * range.  The table also lists one identical fastest decay time for
-     * the top four q values (60..63), and the chip's clock gate clamps
-     * the step there; the register value itself is unchanged, only the
-     * increment saturates (SLOPSIX_EG_RATE_MAX).
-     *
-     * The increment is the amount the envelope's level moves per
-     * envelope *step*, and the reference cadence steps the envelope
-     * once per 64-sample block: the increment is therefore a block's
-     * worth.  The per-sample cadence divides it by the block size, so
-     * that the two cadences agree in timing and differ only in how the
-     * level is interpolated across the block.
-     */
-    q = ((int32_t)rate * 41) >> 6;
-    q += (int32_t)eg->rate_scaling;
-    if (q > SLOPSIX_EG_RATE_MAX) {
-        q = SLOPSIX_EG_RATE_MAX;
+    if (rate > SLOPSIX_DEFAULT_SAMPLE_RATE * 8u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
     }
-    inc = (4 + (q & 3)) << (8 + (q >> 2));
-    eg->inc = slopsix_eg_scale(inc, eg->sample_rate);
+    if (rate < SLOPSIX_DEFAULT_SAMPLE_RATE / 64u) {
+        rate = SLOPSIX_DEFAULT_SAMPLE_RATE / 64u;
+    }
 
-    /* The static count: the measured duration of a stage that does not
-     * move the level, and of the attack out of silence. */
-    eg->static_count = 0;
-    if (((eg->target == eg->level) && (stage >= 2u)) ||
-        ((stage == 0u) && (level_param == 0u))) {
-        uint32_t static_rate = (uint32_t)rate + (uint32_t)eg->rate_scaling;
-        int32_t count;
+    return rate;
+}
 
-        if (static_rate > 99u) {
-            static_rate = 99u;
-        }
+/* The gate's body, shared by the two ladders below: the gate reads the
+ * clock's pre-increment value, the movement happens on the phases the
+ * rate selects, and the walk advances when the level reaches the target.
+ * The clock and the threshold live in the caller's registers; the body
+ * writes the level and may advance the stage. */
+#define SLOPSIX_EG_TICK_BODY           \
+    do {                               \
+        if (!(eg->stage > 1u && eg->level == eg->target) &&                 \
+            ((clock & eg->small) == 0u) &&                                  \
+            ((eg->mask & (1u << ((clock >> eg->nshift) & 7u))) != 0u)) {    \
+            int32_t level = slopsix_eg_att(eg);                             \
+            int32_t target = eg->target >> SLOPSIX_EG_FRAC;                 \
+            uint8_t reached = 0u;                                           \
+            if (eg->rising) {                                               \
+                if (level > (int32_t)SLOPSIX_EG_ATT_JUMP) {                 \
+                    level = (int32_t)SLOPSIX_EG_ATT_JUMP;                   \
+                }                                                           \
+                level -= ((level >> 8) + 2) << eg->pshift;                  \
+                if (level <= target) {                                      \
+                    level = target;                                         \
+                    reached = 1u;                                           \
+                }                                                           \
+            } else {                                                        \
+                level += 1 << eg->pshift;                                   \
+                if (level >= target) {                                      \
+                    level = target;                                         \
+                    reached = 1u;                                           \
+                }                                                           \
+            }                                                               \
+            if (level < 0) {                                                \
+                level = 0;                                                  \
+            }                                                               \
+            if (level > (int32_t)SLOPSIX_EG_ATT_MAX) {                      \
+                level = (int32_t)SLOPSIX_EG_ATT_MAX;                        \
+            }                                                               \
+            eg->level = level << SLOPSIX_EG_FRAC;                           \
+            if (reached) {                                                  \
+                slopsix_eg_advance(eg);                                     \
+            }                                                               \
+        }                                                                   \
+    } while (0)
 
-        if (static_rate < 77u) {
-            count = slopsix_eg_statics[static_rate];
-            if ((stage == 0u) && (level_param == 0u)) {
-                /* The attack out of silence is twenty times faster. */
-                count /= 20;
-            }
-        } else {
-            /* The rates beyond the measured range are approximated. */
-            count = 20 * (int32_t)(99u - static_rate);
-        }
+/* The anchor's own ladder: one tick per host sample, no accumulator (the
+ * common host, and the only host the hardware itself runs at). */
+static void slopsix_eg_clock_1(slopsix_eg *eg)
+{
+    uint16_t clock;
 
-        eg->static_count = slopsix_eg_scale(count, eg->sample_rate);
+    if (eg->stage > 3u) {
+        return;
+    }
+
+    clock = eg->clock;
+    SLOPSIX_EG_TICK_BODY;
+    eg->clock = (uint16_t)(clock + 1u);
+}
+
+/* The dithered ladder: the clock advances at the anchor rate; each tick
+ * evaluates the gate once - the gate's phases and its fractional masks
+ * are the clock's own - and the stage's movement happens on the phases
+ * the rate selects.  At rates above the anchor one sample owes at most
+ * one tick; below it, the loop runs for the ticks the sample owes. */
+static void slopsix_eg_clock_d(slopsix_eg *eg)
+{
+    uint32_t threshold;
+    uint32_t acc;
+    uint16_t clock;
+
+    if (eg->stage > 3u) {
+        return;
+    }
+
+    threshold = eg->tick_threshold;
+    acc = eg->tick_acc + SLOPSIX_DEFAULT_SAMPLE_RATE;
+    clock = eg->clock;
+
+    while (acc >= threshold) {
+        SLOPSIX_EG_TICK_BODY;
+        clock = (uint16_t)(clock + 1u);
+        acc -= threshold;
+    }
+
+    eg->clock = clock;
+    eg->tick_acc = acc;
+}
+
+/* One step of the master clock: the anchor's ladder without the
+ * accumulator, the dithered ladder otherwise.  The selection is one
+ * predictable compare; the envelope's durations are real-time quantities
+ * at every host rate (research F-04). */
+static void slopsix_eg_clock(slopsix_eg *eg)
+{
+    if (eg->tick_threshold == SLOPSIX_DEFAULT_SAMPLE_RATE) {
+        slopsix_eg_clock_1(eg);
+    } else {
+        slopsix_eg_clock_d(eg);
     }
 }
 
@@ -475,27 +636,42 @@ void slopsix_eg_init(slopsix_eg *eg, const uint8_t rates[4],
     memset(eg, 0, sizeof(*eg));
 
     for (i = 0; i < 4u; i++) {
-        eg->rates[i] = rates[i];
-        eg->levels[i] = levels[i];
+        eg->rate_reg[i] = slopsix_eg_rate_reg(rates[i]);
+        eg->level_reg[i] = slopsix_eg_level_reg(levels[i]);
     }
 
-    eg->op_level_q8 = op_level_q8;
+    eg->op_level = slopsix_eg_op_level(op_level_q8);
     eg->rate_scaling = rate_scaling;
-    eg->sample_rate = sample_rate;
-    eg->down = 1u;
+    eg->tick_threshold = slopsix_eg_tick_threshold(sample_rate);
+    /* A fresh envelope counts as one whose previous stage-0 delay did
+     * not complete (the model's own default: the first trigger takes the
+     * compressed stage-0 delay). */
+    eg->compress = 1u;
     eg->active = 1u;
 
-    slopsix_eg_advance(eg, 0u);
+    slopsix_eg_note_on(eg);
 }
 
 void slopsix_eg_note_on(slopsix_eg *eg)
 {
-    eg->level = 0;
-    eg->static_count = 0;
+    /* A full trigger starts from the hardware's silence floor; the
+     * key-on transition then enters stage 0.  The compress flag keeps
+     * whatever the envelope's previous walk left: the stage machine
+     * tracks whether the previous stage-0 delay completed (a stage-0
+     * key-off sets it, a completed stage 0 clears it), exactly as the
+     * model does (algorithm page §5.1). */
+    eg->level = (int32_t)SLOPSIX_EG_ATT_MAX << SLOPSIX_EG_FRAC;
+    eg->target = eg->level;
+    eg->stage = 3u;
     eg->down = 1u;
+    eg->clock = 0u;
+    eg->tick_acc = 0u;
+    eg->rising = 0u;
     eg->block_pos = 0u;
+    eg->block_level = eg->level;
+    eg->block_step = 0;
 
-    slopsix_eg_advance(eg, 0u);
+    slopsix_eg_advance(eg);
 }
 
 void slopsix_eg_note_off(slopsix_eg *eg)
@@ -504,121 +680,55 @@ void slopsix_eg_note_off(slopsix_eg *eg)
         return;
     }
     eg->down = 0u;
-    eg->static_count = 0;
-
-    /* The key up jumps straight to the release stage. */
-    slopsix_eg_advance(eg, 3u);
+    slopsix_eg_advance(eg);
 }
 
 void slopsix_eg_silence(slopsix_eg *eg)
 {
-    int32_t silence = SLOPSIX_EG_MIN_Q8 << SLOPSIX_EG_FRAC;
-
-    /* The firmware's VOICE_RESET_EGS sets the operator level registers
-     * to their maximum attenuation and then keys every voice off, so
-     * the envelope comes to rest on the domain's floor.  Stage 4 is the
-     * finished state: it holds the level without moving. */
-    eg->level = silence;
-    eg->target = silence;
-    eg->inc = 0;
-    eg->static_count = 0;
+    /* The firmware's VOICE_RESET_EGS drives every operator level to its
+     * maximum attenuation and keys the voice off.  Its key event walk
+     * (off, on, off) leaves the stage-0 delay compressed, as a stage-0
+     * key-off does; stage 4 holds the floor without moving. */
+    eg->level = (int32_t)SLOPSIX_EG_ATT_MAX << SLOPSIX_EG_FRAC;
+    eg->target = eg->level;
     eg->stage = 4u;
     eg->active = 1u;
     eg->rising = 0u;
     eg->down = 0u;
+    eg->compress = 1u;
     eg->block_pos = 0u;
-    eg->block_level = silence;
+    eg->block_level = eg->level;
     eg->block_step = 0;
 }
 
 /*
- * One envelope step.
- *
- * The level moves towards the current stage's target: downwards by the
- * stage's increment, upwards along the attack's curve, which jumps to
- * its starting point and then converges on the asymptote.  A stage that
- * does not move the level waits for its measured duration.
- *
- * The number of samples the step covers is one in the per-sample cadence
- * and the block's size in the block cadence; the increment and the static
- * count follow it.
- *
- * The function returns the envelope's level in the Q8 domain.
+ * One envelope step.  The per-sample cadence advances the EGS master
+ * clock once; the diagnostic block cadence advances it across a block
+ * and interpolates the level between the block's endpoints.
  */
-static int32_t slopsix_eg_advance_level(slopsix_eg *eg, uint32_t samples)
-{
-    int32_t inc = eg->inc;
-    uint8_t expired = 0u;
-
-    if (samples > 1u) {
-        /* The block cadence: the increment is a block's worth. */
-    } else {
-        /* The per-sample cadence: the increment is divided by the block
-         * size, so that both cadences agree in timing. */
-        inc >>= 6;
-    }
-
-    if (eg->static_count > 0) {
-        eg->static_count -= (int32_t)samples;
-        if (eg->static_count <= 0) {
-            eg->static_count = 0;
-            slopsix_eg_advance(eg, (uint8_t)(eg->stage + 1u));
-            /* The step that ends a hold is the held stage's own last
-             * step: like the step that reaches a stage's target, it
-             * still belongs to the stage that is ending, so the hold
-             * lasts its measured count in full and the next stage's
-             * movement starts on the following call. */
-            expired = 1u;
-        }
-    }
-
-    if ((eg->stage < 3u) || ((eg->stage == 3u) && (eg->down == 0u))) {
-        if ((eg->static_count == 0) && (expired == 0u)) {
-            if (eg->rising) {
-                /* The attack: jump to the starting point, then converge
-                 * on the asymptote. */
-                if (eg->level < (SLOPSIX_EG_JUMP_Q8 << SLOPSIX_EG_FRAC)) {
-                    eg->level = SLOPSIX_EG_JUMP_Q8 << SLOPSIX_EG_FRAC;
-                }
-                eg->level += (((SLOPSIX_EG_MAX_Q8 << SLOPSIX_EG_FRAC) -
-                               eg->level) >> 24) * inc;
-                if (eg->level >= eg->target) {
-                    eg->level = eg->target;
-                    slopsix_eg_advance(eg, (uint8_t)(eg->stage + 1u));
-                }
-            } else {
-                eg->level -= inc;
-                if (eg->level <= eg->target) {
-                    eg->level = eg->target;
-                    slopsix_eg_advance(eg, (uint8_t)(eg->stage + 1u));
-                }
-            }
-        }
-    }
-
-    return eg->level;
-}
-
 int32_t slopsix_eg_step(slopsix_eg *eg)
 {
     if (eg->block_mode) {
-        /* The block cadence: the envelope advances once per block and
-         * the level is interpolated across it (plan decision D-9). */
         int32_t out;
 
         if (eg->block_pos == 0u) {
             int32_t start = eg->level;
-            int32_t end = slopsix_eg_advance_level(eg, SLOPSIX_EG_BLOCK);
+            int32_t end;
+            unsigned i;
 
+            for (i = 0; i < SLOPSIX_EG_BLOCK; i++) {
+                slopsix_eg_clock(eg);
+            }
+            end = eg->level;
             eg->block_level = start;
-            eg->block_step = ((end - start) + (1 << 5)) >> 6;
+            eg->block_step = slopsix_floor_div(end - start + (1 << 5), 6);
         }
 
-        /* The first sample of the block is one step into the
-         * interpolation, the last one is at the block's end. */
-        out = (eg->block_level +
-               (((int32_t)eg->block_pos + 1) * eg->block_step)) >>
-              SLOPSIX_EG_FRAC;
+        out = slopsix_floor_div(
+            ((int32_t)SLOPSIX_EG_GAIN_BASE << SLOPSIX_EG_FRAC) -
+                (eg->block_level +
+                 (((int32_t)eg->block_pos + 1) * eg->block_step)),
+            SLOPSIX_EG_FRAC);
 
         eg->block_pos =
             (uint8_t)((eg->block_pos + 1u) & (SLOPSIX_EG_BLOCK - 1u));
@@ -626,7 +736,14 @@ int32_t slopsix_eg_step(slopsix_eg *eg)
         return out;
     }
 
-    return slopsix_eg_advance_level(eg, 1u) >> SLOPSIX_EG_FRAC;
+    /* The per-sample walk: one clock call per sample, the ladder chosen
+     * here rather than in a wrapper (the render path's walk loop). */
+    if (eg->tick_threshold == SLOPSIX_DEFAULT_SAMPLE_RATE) {
+        slopsix_eg_clock_1(eg);
+    } else {
+        slopsix_eg_clock_d(eg);
+    }
+    return slopsix_eg_gain_value(eg);
 }
 
 /*
@@ -635,6 +752,11 @@ int32_t slopsix_eg_step(slopsix_eg *eg)
  * block renderer fills an operator's level buffer for the whole
  * sub-block with this and pays the cross-TU call once per operator and
  * sub-block instead of once per sample.
+ *
+ * The per-sample loop selects the clock ladder once, outside the loop:
+ * the anchor's ladder is the common host's, and the dithered ladder is
+ * the one that pays the sub-tick accounting (docs/performance.md's
+ * benchmark runs the render path in this loop).
  */
 void slopsix_eg_fill(slopsix_eg *eg, int16_t *out, unsigned count)
 {
@@ -646,15 +768,22 @@ void slopsix_eg_fill(slopsix_eg *eg, int16_t *out, unsigned count)
 
             if (eg->block_pos == 0u) {
                 int32_t start = eg->level;
-                int32_t end = slopsix_eg_advance_level(eg, SLOPSIX_EG_BLOCK);
+                int32_t end;
+                unsigned i;
 
+                for (i = 0; i < SLOPSIX_EG_BLOCK; i++) {
+                    slopsix_eg_clock(eg);
+                }
+                end = eg->level;
                 eg->block_level = start;
-                eg->block_step = ((end - start) + (1 << 5)) >> 6;
+                eg->block_step = slopsix_floor_div(end - start + (1 << 5), 6);
             }
 
-            value = (eg->block_level +
-                     (((int32_t)eg->block_pos + 1) * eg->block_step)) >>
-                    SLOPSIX_EG_FRAC;
+            value = slopsix_floor_div(
+                ((int32_t)SLOPSIX_EG_GAIN_BASE << SLOPSIX_EG_FRAC) -
+                    (eg->block_level +
+                     (((int32_t)eg->block_pos + 1) * eg->block_step)),
+                SLOPSIX_EG_FRAC);
 
             out[s] = (int16_t)value;
 
@@ -664,8 +793,16 @@ void slopsix_eg_fill(slopsix_eg *eg, int16_t *out, unsigned count)
         return;
     }
 
+    if (eg->tick_threshold == SLOPSIX_DEFAULT_SAMPLE_RATE) {
+        for (s = 0; s < count; s++) {
+            slopsix_eg_clock_1(eg);
+            out[s] = (int16_t)slopsix_eg_gain_value(eg);
+        }
+        return;
+    }
+
     for (s = 0; s < count; s++) {
-        out[s] = (int16_t)(slopsix_eg_advance_level(eg, 1u) >>
-                           SLOPSIX_EG_FRAC);
+        slopsix_eg_clock_d(eg);
+        out[s] = (int16_t)slopsix_eg_gain_value(eg);
     }
 }

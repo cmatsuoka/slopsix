@@ -355,7 +355,8 @@ static void stage_monovoice(void)
           state->voices[0].note == 60 &&
           state->voices[0].velocity == 100,
           "the first mono key full-triggers voice 0");
-    check(state->engines[0].eg[0].level == 0,
+    check(state->engines[0].eg[0].level >=
+              ((SLOPSIX_EG_ATT_MAX - 479) << SLOPSIX_EG_FRAC),
           "the full trigger starts the envelope out of silence");
     check(state->engines[0].pitch_eg.step == 0u,
           "the full trigger resets the pitch EG");
@@ -437,7 +438,8 @@ static void stage_monovoice(void)
 
     /* A release tail: the next first key re-triggers over it. */
     slopsix_note_on(ctx, 60, 100);
-    check(state->engines[0].eg[0].level == 0,
+    check(state->engines[0].eg[0].level >=
+              ((SLOPSIX_EG_ATT_MAX - 479) << SLOPSIX_EG_FRAC),
           "a retrigger after silence starts out of silence");
 
     /* The sustain pedal defers only the final release; the intermediate
@@ -1192,13 +1194,22 @@ static void stage_algorithms(void)
 /* The envelope's target level, as the engine composes it. */
 static int32_t test_eg_target(uint8_t level_param, int32_t op_level_q8)
 {
-    int32_t target = ((slopsix_level_curve(level_param) >> 1) << 6) +
-                     op_level_q8 - SLOPSIX_LEVEL_OFFSET_Q8;
+    int32_t level_reg = 63 - (slopsix_level_curve(level_param) >> 1);
+    int32_t op_level = slopsix_floor_div(
+        SLOPSIX_LEVEL_OFFSET_Q8 - op_level_q8, 4);
+    int32_t att;
 
-    if (target < SLOPSIX_EG_MIN_Q8) {
-        target = SLOPSIX_EG_MIN_Q8;
+    if (op_level < SLOPSIX_EG_OP_LEVEL_MIN) {
+        op_level = SLOPSIX_EG_OP_LEVEL_MIN;
     }
-    return target;
+    if (op_level > 255) {
+        op_level = 255;
+    }
+    att = (level_reg << 6) + (op_level << 4);
+    if (att > SLOPSIX_EG_ATT_MAX) {
+        att = SLOPSIX_EG_ATT_MAX;
+    }
+    return SLOPSIX_EG_GAIN_BASE - att;
 }
 
 static void stage_eg(void)
@@ -1269,7 +1280,7 @@ static void stage_eg(void)
         slopsix_eg_init(&low, middle, levels, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
         slopsix_eg_init(&high, middle, levels, TEST_OP_LEVEL_Q8,
-                        slopsix_rate_scaling(96, 7),
+                        slopsix_rate_scaling(96, 0, 7),
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
 
         for (i = 0; i < 10000; i++) {
@@ -1283,47 +1294,134 @@ static void stage_eg(void)
             }
         }
 
-        check(slopsix_rate_scaling(96, 7) > 0,
+        check(slopsix_rate_scaling(96, 0, 7) > 0,
               "the rate scaling grows with the note");
-        check(slopsix_rate_scaling(0, 7) == 0,
+        check(slopsix_rate_scaling(0, 0, 7) == 0,
               "the rate scaling is zero at the bottom of the keyboard");
         check(high_samples > 0 && low_samples > 0 &&
               high_samples < low_samples,
               "the rate scaling makes the envelope faster");
     }
 
-    /* The increment's saturation: the top four q values (60..63, from
-     * patch rates 95..99) share the fastest step, while a rate just
-     * below still has a smaller increment. */
+    /* The EGS rate gate: the fast rates (rate register >= 44) move by
+     * 1 << pshift on the fractional masks, the slow ones divide the
+     * clock by 1 << nshift. */
     {
         slopsix_eg fast;
-        slopsix_eg top;
         slopsix_eg mid;
+        slopsix_eg slow;
         uint8_t r91[4] = { 91, 91, 91, 91 };
         uint8_t r95[4] = { 95, 95, 95, 95 };
-        uint8_t r96[4] = { 96, 96, 96, 96 };
-        uint8_t r97[4] = { 97, 97, 97, 97 };
         uint8_t r99[4] = { 99, 99, 99, 99 };
 
         slopsix_eg_init(&fast, r95, levels, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
         slopsix_eg_init(&mid, r91, levels, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
+        slopsix_eg_init(&slow, r99, levels, TEST_OP_LEVEL_Q8, 0,
+                        SLOPSIX_DEFAULT_SAMPLE_RATE);
 
-        slopsix_eg_init(&top, r96, levels, TEST_OP_LEVEL_Q8, 0,
+        check(fast.rate_reg[0] == 60u,
+              "rate 95 quantizes to the EGS rate register 60");
+        check(slow.rate_reg[0] == 63u,
+              "rate 99 quantizes to the EGS rate register 63");
+        check(fast.nshift == 0u && fast.pshift == 4u,
+              "a fast rate uses the movement shift");
+        check(mid.pshift == 3u && mid.pshift < fast.pshift,
+              "a lower rate uses a smaller movement shift");
+        check(slow.mask == 0xFEu,
+              "the top rate keeps the fastest fractional mask");
+    }
+
+    /* The stage-0 delay compression flag is the stage machine's own
+     * state: a fresh envelope takes the compressed delay, a completed
+     * stage 0 clears it and a stage-0 key-off sets it again (§5.1). */
+    {
+        slopsix_eg comp;
+        uint8_t comp_rates[4] = { 99, 99, 99, 99 };
+        uint8_t comp_levels[4] = { 50, 50, 50, 0 };
+
+        slopsix_eg_init(&comp, comp_rates, comp_levels, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
-        check(top.inc == fast.inc,
-              "rates 96 and 95 share the fastest increment");
-        slopsix_eg_init(&top, r97, levels, TEST_OP_LEVEL_Q8, 0,
+        check(comp.compress == 1u,
+              "a fresh envelope's stage-0 delay is compressed");
+
+        for (i = 0; i < 4096 && comp.compress != 0u; i++) {
+            slopsix_eg_step(&comp);
+        }
+        check(comp.compress == 0u && comp.stage >= 1u,
+              "a completed stage 0 clears the compression");
+
+        comp.down = 1u;
+        slopsix_eg_note_on(&comp);
+        check(comp.compress == 0u && comp.stage == 0u,
+              "a full trigger keeps a completed stage-0 state");
+
+        slopsix_eg_note_off(&comp);
+        check(comp.compress == 1u && comp.stage == 3u,
+              "a stage-0 key-off recompresses the delay");
+    }
+
+    /* The EGS master clock is anchored at the engine's rate: the same
+     * envelope takes the same real time at any host rate.  The tick
+     * schedule itself is the exact floor(i * anchor / rate) ladder. */
+    {
+        slopsix_eg at_anchor;
+        slopsix_eg at_44k;
+        slopsix_eg at_96k;
+        uint8_t slow_rates[4] = { 50, 50, 50, 50 };
+        int anchor_samples = -1;
+        int rate44_samples = -1;
+        int rate96_samples = -1;
+        int expected;
+        long j;
+
+        slopsix_eg_init(&at_anchor, slow_rates, levels, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
-        check(top.inc == fast.inc,
-              "rates 97 and 95 share the fastest increment");
-        slopsix_eg_init(&top, r99, levels, TEST_OP_LEVEL_Q8, 0,
-                        SLOPSIX_DEFAULT_SAMPLE_RATE);
-        check(top.inc == fast.inc,
-              "rates 99 and 95 share the fastest increment");
-        check(mid.inc < fast.inc,
-              "a rate below the saturation point is still slower");
+        slopsix_eg_init(&at_44k, slow_rates, levels, TEST_OP_LEVEL_Q8, 0,
+                        44100u);
+        slopsix_eg_init(&at_96k, slow_rates, levels, TEST_OP_LEVEL_Q8, 0,
+                        96000u);
+
+        for (i = 0; i < 100000; i++) {
+            if (anchor_samples < 0 &&
+                slopsix_eg_step(&at_anchor) == target) {
+                anchor_samples = i;
+            }
+            if (rate44_samples < 0 && slopsix_eg_step(&at_44k) == target) {
+                rate44_samples = i;
+            }
+            if (rate96_samples < 0 && slopsix_eg_step(&at_96k) == target) {
+                rate96_samples = i;
+            }
+            if (anchor_samples >= 0 && rate44_samples >= 0 &&
+                rate96_samples >= 0) {
+                break;
+            }
+        }
+        check(anchor_samples > 0 && rate44_samples > 0 && rate96_samples > 0,
+              "the envelopes reach the target at every rate");
+
+        check(abs(rate44_samples * 49096 - anchor_samples * 44100) <=
+                  (rate44_samples < 2000 ? 800 : rate44_samples * 44100 / 50),
+              "a 44.1 kHz envelope takes the anchor's real time");
+        check(abs(rate96_samples * 49096 - anchor_samples * 96000) <=
+                  (rate96_samples < 1000 ? 800 : rate96_samples * 96000 / 50),
+              "a 96 kHz envelope takes the anchor's real time");
+
+        /* The tick ladder: after i host samples at 44,100 Hz the master
+         * clock has advanced floor(i * 49096 / 44100) ticks (wrapped). */
+        slopsix_eg_init(&at_44k, slow_rates, levels, TEST_OP_LEVEL_Q8, 0,
+                        44100u);
+        for (j = 1; j <= 200000; j++) {
+            slopsix_eg_step(&at_44k);
+            expected = (int)((int64_t)j * 49096 / 44100);
+            if (at_44k.clock != (uint16_t)(expected & 0xFFFFu)) {
+                break;
+            }
+        }
+        check(j > 200000,
+              "the master clock follows the floor(i * anchor / rate) ladder");
     }
 
     /* The attack out of silence: the level jumps to the attack's
@@ -1344,8 +1442,9 @@ static void stage_eg(void)
         check(jump > 0, "the attack out of silence jumps to its start point");
     }
 
-    /* A stage whose target is the current level waits for its measured
-     * duration instead of moving. */
+    /* A stage whose target is the current level holds instead of
+     * moving: the sustain and release stages short out of the clock
+     * (§5.1), a held stage 0/1 waits for its own rate gate. */
     {
         uint8_t equal[4] = { 99, 99, 99, 0 };
         int held = 0;
@@ -1353,8 +1452,8 @@ static void stage_eg(void)
         slopsix_eg_init(&eg, rates, equal, TEST_OP_LEVEL_Q8, 0,
                         SLOPSIX_DEFAULT_SAMPLE_RATE);
 
-        /* The first stage's target equals the second one's, so the
-         * envelope holds the level while the static count runs. */
+        /* The sustain's target equals the stage's level, so the
+         * envelope holds the level once it is reached. */
         for (i = 0; i < 64; i++) {
             level = slopsix_eg_step(&eg);
             if (level == target) {
@@ -1362,13 +1461,13 @@ static void stage_eg(void)
             }
         }
         check(held > 0,
-              "a stage with a reached target holds the level for its "
-              "measured duration");
+              "a stage with a reached target holds the level");
     }
 
-    /* BANJO's carrier holds L1 == L2 on stage 1.  The EGS advances such
-     * a held stage immediately; only the sustain/release stages hold for
-     * their measured duration. */
+    /* BANJO's carrier holds L1 == L2 on stage 1.  Such a held stage
+     * advances on the stage's next gated clock instead of holding for a
+     * stage duration; only the sustain and release stages hold for as
+     * long as the envelope lasts (§5.1). */
     {
         uint8_t banjo_rates[4] = { 98, 36, 44, 56 };
         uint8_t banjo_levels[4] = { 99, 99, 0, 0 };
@@ -2966,7 +3065,7 @@ static void stage_render(void)
     check(slopsix_set_voice(ctx, dump, sizeof(dump)) == SLOPSIX_OK,
           "a patch load while the note is held succeeds");
     check(state->engines[0].eg[0].level ==
-              (SLOPSIX_EG_MIN_Q8 << SLOPSIX_EG_FRAC),
+              (SLOPSIX_EG_ATT_MAX << SLOPSIX_EG_FRAC),
           "the patch load silences the held voice's envelope");
     check(state->voices[0].state == SLOPSIX_VOICE_ON &&
           state->voices[0].held,
@@ -4335,7 +4434,8 @@ static void stage_unison(void)
         slopsix_note_on(ctx, 60u, 100u);
         slopsix_process(ctx, render_buf_a, 200u);
         check(state->unison_group_active[0] &&
-              state->engines[0].eg[0].level > 0,
+              state->engines[0].eg[0].level <
+                  (SLOPSIX_EG_ATT_MAX << SLOPSIX_EG_FRAC),
               "the pre-load key sounds and owns its group");
         slopsix_set_voice(ctx, dump, sizeof(dump));
         check(!state->unison_group_active[0] &&
@@ -4345,7 +4445,8 @@ static void stage_unison(void)
         slopsix_note_on(ctx, 62u, 100u);
         slopsix_process(ctx, render_buf_a, 100u);
         check(state->engines[0].eg[0].stage != 4u &&
-              state->engines[0].eg[0].level > 0,
+              state->engines[0].eg[0].level <
+                  (SLOPSIX_EG_ATT_MAX << SLOPSIX_EG_FRAC),
               "the post-load key takes a fresh trigger, not the silence");
 
         /* The pedal defers per group, all-notes-off acts as the poly

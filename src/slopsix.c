@@ -109,16 +109,19 @@ void slopsix_dx7_set_sample_rate(slopsix_context_state *state,
      * design is derived again, and its state starts cleared. */
     slopsix_filter_init(&state->filter, sample_rate);
 
-    /* The sounding voices re-anchor: the envelopes take the host rate
-     * (a stage already in progress keeps its current timing until the
-     * next stage change), and the phase increments are recomposed from
-     * the voices' current pitch state. */
+    /* The sounding voices re-anchor: the envelopes' master clocks take
+     * the host rate's tick threshold (the clock keeps its position, so a
+     * stage already in progress keeps its current timing until the next
+     * stage change; the sub-tick accumulator restarts), and the phase
+     * increments are recomposed from the voices' current pitch state. */
     for (i = 0; i < SLOPSIX_VOICE_COUNT; i++) {
         if (state->voices[i].state == SLOPSIX_VOICE_FREE) {
             continue;
         }
         for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
-            state->engines[i].eg[k].sample_rate = sample_rate;
+            state->engines[i].eg[k].tick_threshold =
+                slopsix_eg_tick_threshold(sample_rate);
+            state->engines[i].eg[k].tick_acc = 0u;
         }
         slopsix_voice_engine_update_frequency(state, &state->voices[i],
             &state->engines[i]);

@@ -178,6 +178,7 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
     slopsix_voice *slot, slopsix_voice_engine *engine)
 {
     int32_t note;
+    int32_t pitch_offset;
     uint8_t group;
 
     /* The transpose is keyed with the note, so a later patch load does
@@ -186,6 +187,16 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
     note = slopsix_effective_note(slot->note, slot->transpose);
     group = slopsix_note_group((uint8_t)note);
     unsigned k;
+
+    /* The pitch EG's initial (release) level is part of the voice pitch
+     * word the EGS sees at key-on, so the operator envelopes' rate scaling
+     * composes it before the operator loop. */
+    slopsix_pitch_eg_init(&engine->pitch_eg, state->patch.peg_rates,
+        state->patch.peg_levels);
+    state->pitch_eg_configure(&state->patch, &engine->pitch_eg,
+        (uint8_t)note, slot->velocity);
+    slopsix_pitch_eg_note_on(&engine->pitch_eg);
+    pitch_offset = state->pitch_eg_offset(&engine->pitch_eg);
 
     for (k = 0; k < SLOPSIX_OP_COUNT; k++) {
         const slopsix_patch_op *pop = &state->patch.ops[k];
@@ -214,28 +225,19 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
         /* The level pipeline: the patch's operator level, this note's
          * keyboard scaling correction and the key's velocity compose
          * the operator's played level (research E-05, E-07).  The rate
-         * scaling follows the note, not the key. */
+         * scaling follows the EGS voice-pitch word, which includes the
+         * pitch EG's initial level. */
         op_level_q8 = slopsix_op_level_q8(pop->out_level, pop->kls[group],
             slot->velocity, pop->velocity_sens);
 
         slopsix_eg_init(&engine->eg[k], pop->rates, pop->levels,
             op_level_q8,
-            slopsix_rate_scaling((uint8_t)note, pop->rate_scaling),
+            slopsix_rate_scaling((uint8_t)note, pitch_offset,
+                pop->rate_scaling),
             state->sample_rate);
     }
 
     engine->feedback_level = state->patch.feedback;
-
-    /* The pitch EG: the patch's rate/level pairs, started at the final
-     * (release) level, as the firmware's VOICE_ADD_MONO does.  The
-     * personality's law composes the envelope afterwards: the DX7's
-     * leaves it as the firmware has it, the DX7S's applies its range,
-     * velocity switch and rate scaling (D7S-4). */
-    slopsix_pitch_eg_init(&engine->pitch_eg, state->patch.peg_rates,
-        state->patch.peg_levels);
-    state->pitch_eg_configure(&state->patch, &engine->pitch_eg,
-        (uint8_t)note, slot->velocity);
-    slopsix_pitch_eg_note_on(&engine->pitch_eg);
 
     /* The LFO's note-on side: in Single mode the global delay/fade and
      * sync resets, as the firmware's voice-add paths run them on every

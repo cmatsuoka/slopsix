@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Implement the bit-synchronous EGS envelope model: the 12-bit inverted
+  attenuation target and `0xFF0` clamp, the stage-0/1 delay compression,
+  the `qrate` gate (`nshift`/`pshift` and the fractional masks) and the
+  16-bit master clock.  This supersedes the msfa per-block increment and
+  the measured static-duration tables.
+- Compose the operator envelopes' rate scaling from the key-on voice-pitch
+  word, including the pitch EG's initial (L4) level, as the EGS's
+  voice-pitch register does.
+- Anchor the EGS master clock to the engine's rate: a stage takes the same
+  real time at every host sample rate.  At the anchor rate (49,096 Hz) the
+  clock ladder runs as before; other rates dither the schedule through a
+  sub-tick accumulator and re-derive it when the context's rate changes.
+- Track the stage-0 delay compression across key events as the EGS model
+  does: a trigger after a completed stage 0 takes the full 479-step delay,
+  a trigger after an interrupted one the compressed 15-step delay.
 - Add the DX7S's 0..7 per-operator amplitude modulation sensitivity
   (`slopsix_set_amp_mod_sensitivity`); values above 3 use a provisional
   depth law.
