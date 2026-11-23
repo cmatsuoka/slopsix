@@ -193,8 +193,11 @@ void slopsix_voice_engine_note_on(slopsix_context_state *state,
      * composes it before the operator loop. */
     slopsix_pitch_eg_init(&engine->pitch_eg, state->patch.peg_rates,
         state->patch.peg_levels);
+    /* The DX7S's PEG rate scaling is keyed to the played key, not to the
+     * transposed note (the ROM's DAT_004b is the sub-CPU key number), so
+     * the hook gets the slot's own note; the DX7's hook ignores it. */
     state->pitch_eg_configure(&state->patch, &engine->pitch_eg,
-        (uint8_t)note, slot->velocity);
+        slot->note, slot->velocity);
     slopsix_pitch_eg_note_on(&engine->pitch_eg);
     pitch_offset = state->pitch_eg_offset(&engine->pitch_eg);
 
@@ -359,9 +362,9 @@ void slopsix_refresh_pitch(slopsix_context_state *state)
  */
 
 /* The cadence's fire threshold, the gate's own rate handling. */
-uint32_t slopsix_cadence_threshold(uint32_t sample_rate)
+uint32_t slopsix_cadence_threshold(const slopsix_cadence *cadence)
 {
-    uint32_t rate = sample_rate;
+    uint32_t rate = cadence->sample_rate;
 
     if (rate == 0u) {
         rate = SLOPSIX_DEFAULT_SAMPLE_RATE;
@@ -370,7 +373,7 @@ uint32_t slopsix_cadence_threshold(uint32_t sample_rate)
         rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
     }
 
-    return SLOPSIX_CADENCE_TICK_NUM * rate;
+    return cadence->tick_num * rate;
 }
 
 /* The samples until the gate fires, one-based: the accumulator fires on
@@ -492,8 +495,8 @@ void slopsix_dx7_process(slopsix_context ctx, int16_t *stereo_out,
     }
 
     alg = slopsix_algorithm_get(state->patch.algorithm);
-    lfo_threshold = slopsix_cadence_threshold(state->lfo_cadence.sample_rate);
-    peg_threshold = slopsix_cadence_threshold(state->pitch_cadence.sample_rate);
+    lfo_threshold = slopsix_cadence_threshold(&state->lfo_cadence);
+    peg_threshold = slopsix_cadence_threshold(&state->pitch_cadence);
 
     while (done < frames) {
         uint32_t lfo_distance = slopsix_cadence_distance(

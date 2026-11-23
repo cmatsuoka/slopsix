@@ -201,6 +201,17 @@ void slopsix_pitch_eg_init(slopsix_pitch_eg *eg, const uint8_t rates[4],
  */
 void slopsix_pitch_eg_note_on(slopsix_pitch_eg *eg)
 {
+#if defined(SLOPSIX_DX7S)
+    /* The DX7S ROM starts the envelope at level 1 when the first composed
+     * rate byte is the 0xFF instant sentinel (research dx7s-firmware
+     * §3.1).  The personality's configure hook sets this flag; a DX7
+     * context's envelope carries the zeroed (release-level) value. */
+    if (eg->start_at_first != 0u) {
+        eg->level = eg->target[0];
+        eg->step = 0u;
+        return;
+    }
+#endif
     eg->level = eg->target[3];
     eg->step = 0u;
 }

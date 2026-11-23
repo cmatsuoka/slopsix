@@ -3960,86 +3960,118 @@ static void stage_peg_range(void)
         check(state->pitch_eg_offset == slopsix_dx7s_pitch_eg_offset,
               "the DX7S plays its own composed pitch envelope");
 
-        /* The neutral parameters leave the envelope as the firmware
-         * plays it: the eight-octave range divides nothing and the
-         * velocity switch is off. */
+        /* A full positive level byte (parameter 99) exercises the ROM's
+         * level composition; the rates start at parameter 0 (table 1). */
+        {
+            unsigned i;
+
+            for (i = 0; i < 4u; i++) {
+                state->patch.peg_levels[i] = 99u;
+                state->patch.peg_rates[i] = 0u;
+            }
+        }
+
+        /* The ROM composes the range and velocity into the envelope's
+         * targets and increments, so the shared offset stays the plain
+         * distance from neutral. */
         slopsix_note_on(ctx, 60u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.range_shift == 0u &&
-              engine->pitch_eg.velocity_on == 0u,
-              "the DX7S's neutral parameters compose nothing");
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
+        check(engine->pitch_eg.start_at_first == 0u &&
+              engine->pitch_eg.target[3] == 0x7F80,
+              "the neutral DX7S range is the firmware's eight-octave span");
+        check(state->pitch_eg_offset(&engine->pitch_eg) == 0x3F80,
               "the neutral DX7S envelope is the firmware's envelope");
 
-        /* The range: the four settings in the hardware's data encoding,
-         * raw 0 = 8 octaves dividing nothing and raw 3 = 1/2 octave
-         * dividing by sixteen; the middle raw values scale 1/4 and 1/8. */
+        /* The range: raw 0..3 divide the signed offset by 1/4/16/64, so
+         * the spans are 8, 2, 0.5 and 0.125 octaves (ROM FUN_be56). */
         slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_HALF_OCTAVE);
         slopsix_note_on(ctx, 60u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.range_shift == 4u,
-              "the half-octave range divides the excursion by sixteen");
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -256,
-              "the range divides the composed excursion");
+        check(engine->pitch_eg.target[3] == 0x40FE &&
+              state->pitch_eg_offset(&engine->pitch_eg) == 0xFE,
+              "raw 3 divides the excursion by sixty-four (1/8 octave)");
         slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_2_OCTAVES);
         slopsix_note_on(ctx, 60u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.range_shift == 2u,
-              "the two-octave range (raw 1) divides the excursion by four");
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -1024,
-              "the range divides the composed excursion");
+        check(engine->pitch_eg.target[3] == 0x4FE0 &&
+              state->pitch_eg_offset(&engine->pitch_eg) == 0xFE0,
+              "raw 1 divides the excursion by four (2 octaves)");
         slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_1_OCTAVE);
         slopsix_note_on(ctx, 60u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.range_shift == 3u,
-              "the one-octave range (raw 2) divides the excursion by eight");
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -512,
-              "the range divides the composed excursion");
+        check(engine->pitch_eg.target[3] == 0x43F8 &&
+              state->pitch_eg_offset(&engine->pitch_eg) == 0x3F8,
+              "raw 2 divides the excursion by sixteen (1/2 octave)");
         slopsix_set_peg_range(ctx, SLOPSIX_PEG_RANGE_8_OCTAVES);
         slopsix_note_on(ctx, 60u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.range_shift == 0u,
-              "the eight-octave range divides nothing");
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
-              "the eight-octave range is the firmware's span");
+        check(engine->pitch_eg.target[3] == 0x7F80,
+              "raw 0 divides nothing (8 octaves)");
 
-        /* The velocity switch: with it on, the depth follows the key's
-         * velocity, and with it off the depth is the envelope's own. */
+        /* The velocity switch: depth is scaled by (velocity + 1) / 128
+         * with the +1 level bias; the extreme byte wraps in 8 bits as the
+         * ROM does. */
         slopsix_set_peg_velocity(ctx, true);
-        slopsix_note_on(ctx, 60u, 127u);
-        engine = newest_engine(state);
-        check(engine->pitch_eg.velocity_on == 1u &&
-              engine->pitch_eg.velocity_scale_q8 == 256u,
-              "the velocity switch scales the depth with the key");
         slopsix_note_on(ctx, 60u, 0u);
         engine = newest_engine(state);
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == 0,
-              "the velocity switch follows the key's velocity down to none");
+        check(engine->pitch_eg.target[3] == 0x4080,
+              "the softest key leaves the +1-biased depth");
+        slopsix_note_on(ctx, 60u, 63u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.target[3] == 0x6000,
+              "half velocity halves the depth");
+        slopsix_note_on(ctx, 60u, 126u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.target[3] == 0x7F80,
+              "the top velocity reaches the full depth");
+        slopsix_note_on(ctx, 60u, 127u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.target[3] == 0x0000,
+              "the ROM's byte composition wraps at the top velocity");
         slopsix_set_peg_velocity(ctx, false);
         slopsix_note_on(ctx, 60u, 0u);
         engine = newest_engine(state);
-        engine->pitch_eg.level = SLOPSIX_PITCH_EG_NEUTRAL_WORD - 4096;
-        check(state->pitch_eg_offset(&engine->pitch_eg) == -4096,
+        check(engine->pitch_eg.target[3] == 0x7F80,
               "the velocity switch off leaves the depth alone");
 
-        /* The rate scaling: the stages' increments grow with the key. */
+        /* The rate scaling is additive on the composed rate byte:
+         * (max(note - 26, 0) >> 2) * depth, clamp 0xFE, and the process
+         * moves by twice the result. */
         slopsix_set_peg_rate_scaling(ctx, 0u);
         slopsix_note_on(ctx, 96u, 100u);
         engine = newest_engine(state);
-        check(engine->pitch_eg.increment[0] ==
-                  slopsix_pitch_eg_rate_value(0u),
-              "without the rate scaling the stages keep the ROM's rates");
+        check(engine->pitch_eg.increment[0] == 2u,
+              "without the rate scaling the ROM rate is doubled at run time");
         slopsix_set_peg_rate_scaling(ctx, 7u);
         slopsix_note_on(ctx, 96u, 100u);
         engine = newest_engine(state);
+        check(engine->pitch_eg.increment[0] == 240u,
+              "the rate scaling adds (note-26)/4*depth to the rate byte");
+        slopsix_note_on(ctx, 26u, 100u);
+        engine = newest_engine(state);
         check(engine->pitch_eg.increment[0] == 2u,
-              "the rate scaling speeds the stages up with the key");
+              "notes at or below 26 get no rate-scaling delta");
+
+        /* The velocity switch also speeds the stages up. */
+        slopsix_set_peg_velocity(ctx, true);
+        state->patch.peg_rates[0] = 50u;
+        slopsix_set_peg_rate_scaling(ctx, 0u);
+        slopsix_note_on(ctx, 60u, 63u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.increment[0] == 40u,
+              "the velocity switch scales the stage rate");
+        slopsix_set_peg_velocity(ctx, false);
+
+        /* The 0xFF first rate is the instant sentinel: the ROM starts
+         * the envelope at level 1 instead of the release level. */
+        state->patch.peg_rates[0] = 99u;
+        state->patch.peg_levels[0] = 99u;
+        state->patch.peg_levels[3] = 0u;
+        slopsix_note_on(ctx, 60u, 100u);
+        engine = newest_engine(state);
+        check(engine->pitch_eg.start_at_first == 1u &&
+              engine->pitch_eg.level == engine->pitch_eg.target[0],
+              "the 0xFF first rate starts the envelope at level 1");
 
         slopsix_destroy_context(ctx);
     }
@@ -4168,7 +4200,7 @@ static void stage_unison(void)
         check(state->engines[3].lfo.phase == 0x7FFFu &&
               state->engines[9].lfo.phase == 0x7FFFu,
               "the fresh stack's key events seed their LFOs in Multi");
-        slopsix_process(ctx, render_buf_a, 200u);
+        slopsix_process(ctx, render_buf_a, 300u);
         check(state->engines[3].lfo.phase != 0x7FFFu,
               "the per-voice LFOs drift on their own after the seed");
         {

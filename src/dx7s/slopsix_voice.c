@@ -466,9 +466,20 @@ static void slopsix_dx7s_defaults(slopsix_context_state *state)
     state->pitch_eg_offset = slopsix_dx7s_pitch_eg_offset;
 }
 
+/* The DX7S runs its control-rate processes from the 5200-count OCF
+ * reload (research dx7s-firmware §4.1).  The shared init uses the Mk1
+ * numerator; replace it for both cadences so the LFO and pitch EG keep
+ * the hardware's real-time rate. */
+static void slopsix_dx7s_cadence_apply(slopsix_context_state *state)
+{
+    state->lfo_cadence.tick_num = SLOPSIX_DX7S_CADENCE_TICK_NUM;
+    state->pitch_cadence.tick_num = SLOPSIX_DX7S_CADENCE_TICK_NUM;
+}
+
 void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
 {
     slopsix_dx7_init(state, sample_rate);
+    slopsix_dx7s_cadence_apply(state);
     /* The DX7S brings its own tail: re-design the filter from the
      * personality's prototype after the shared DX7 initialization. */
     slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
@@ -484,6 +495,7 @@ void slopsix_dx7s_init(slopsix_context_state *state, uint32_t sample_rate)
 void slopsix_dx7s_reset(slopsix_context_state *state)
 {
     slopsix_dx7_reset(state);
+    slopsix_dx7s_cadence_apply(state);
     slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
     state->voice_bus = slopsix_dx7s_voice_bus;
     state->output_mix = slopsix_dx7s_output_mix;
@@ -494,6 +506,7 @@ void slopsix_dx7s_set_sample_rate(slopsix_context_state *state,
     uint32_t sample_rate)
 {
     slopsix_dx7_set_sample_rate(state, sample_rate);
+    slopsix_dx7s_cadence_apply(state);
     slopsix_dx7s_filter_init(&state->filter, state->sample_rate);
 }
 
@@ -518,10 +531,8 @@ void slopsix_dx7s_process(slopsix_context ctx, int16_t *stereo_out,
     }
 
     alg = slopsix_algorithm_get(state->patch.algorithm);
-    lfo_threshold = slopsix_cadence_threshold(
-        state->lfo_cadence.sample_rate);
-    peg_threshold = slopsix_cadence_threshold(
-        state->pitch_cadence.sample_rate);
+    lfo_threshold = slopsix_cadence_threshold(&state->lfo_cadence);
+    peg_threshold = slopsix_cadence_threshold(&state->pitch_cadence);
 
     while (done < frames) {
         uint32_t lfo_distance = slopsix_cadence_distance(

@@ -340,36 +340,37 @@ int32_t slopsix_filter_process(slopsix_filter *filter, int32_t code);
 #define SLOPSIX_DX7S_NORMALIZED_SCALE_SHIFT 24
 
 /* The pitch envelope (Phase 4).  It is CPU-side and per voice, updated
- * every second OCF tick (about 187.6 Hz), as the firmware does (research
- * E-04, plan decision D-1).  The level is held in the firmware's 16-bit
- * domain, where the patch's level quantizes through the ROM's table and
- * the neutral value is 0x4000.
+ * every second OCF tick - about 187.6 Hz on the DX7's 3140-count reload
+ * and about 113.3 Hz on the DX7S's 5200-count one (research E-04 and
+ * dx7s-firmware §4.1, plan decision D-1).  The level is held in the
+ * firmware's 16-bit domain, where the patch's level quantizes through the
+ * ROM's table and the neutral value is 0x4000.
  *
  * The envelope itself carries no cadence: the update is driven by the
  * context's global toggle (below), so every voice's envelope steps on the
  * same samples, as on the hardware. */
 typedef struct {
-    uint8_t increment[4];   /* the ROM rate table's increments, 1..255 */
+    /* The stage increment.  The DX7's firmware adds the ROM rate table's
+     * value (1..255), while the DX7S's process adds twice the composed
+     * rate byte (2..510), so the field is wide enough for both. */
+    uint16_t increment[4];
     int32_t target[4];      /* the ROM level table's words: value << 7 */
     int32_t level;          /* the current level, 0..0x7F80 */
     uint8_t step;           /* 0..2 held stages, 3 sustain, 4 release,
                              * 5 finished */
 #if defined(SLOPSIX_DX7S)
-    /* The DX7S's composition of this envelope (D7S-4): the range's span
-     * divisor and the velocity switch's depth factor.  Only the DX7S's
-     * own law (src/dx7s/slopsix_pitch_eg.c) reads and writes them, and
-     * the DX7's law ignores them entirely, so a DX7 context plays the
-     * firmware's envelope whatever they hold.
+    /* The DX7S's composition of this envelope (D7S-4) is baked into the
+     * targets, the starting level and the increments by the personality's
+     * configure hook, so the shared offset law stays the plain distance
+     * from neutral.  One piece of state cannot be baked: the firmware's
+     * note-on start selection.  When the first composed rate byte is the
+     * 0xFF instant sentinel the firmware starts at level 1 instead of the
+     * release level; this flag carries that choice to note-on.
      *
-     * The neutral values are the zeroed ones, so the memset in
-     * slopsix_pitch_eg_init leaves an envelope the DX7S has not
-     * composed at the Mk1's excursion: a range shift of zero divides
-     * nothing (the eight-octave range is the Mk1's own span), and the
-     * velocity switch off leaves the depth alone (the depth factor is
-     * read only while the switch is on). */
-    uint8_t range_shift;        /* 0 = full span, else the divisor's log2 */
-    uint8_t velocity_on;        /* the velocity switch */
-    uint16_t velocity_scale_q8; /* 0..256: the depth factor, 256 = full */
+     * The zeroed value (the memset in slopsix_pitch_eg_init) is the
+     * ordinary release-level start, so a DX7 context and an uncomposed
+     * DX7S envelope both behave as the Mk1 does. */
+    uint8_t start_at_first;     /* start at level 1 (the 0xFF first rate) */
 #endif
 } slopsix_pitch_eg;
 
@@ -385,6 +386,7 @@ typedef struct {
     uint32_t sample_rate;
     uint32_t acc;           /* the sub-tick cadence accumulator */
     uint32_t step;          /* the accumulator's increment per sample */
+    uint32_t tick_num;      /* the period numerator (785 Mk1, 1300 DX7S) */
 } slopsix_cadence;
 
 /* The cadence's period numerator.
@@ -396,8 +398,17 @@ typedef struct {
  * that is 25,120 / 192 = 785 / 6 samples per tick; the pitch EG advances
  * on every second tick, so its step is half the LFO's.  For a host rate
  * the same real-time interval is 785 * rate / (6 * 49,096) samples, which
- * the accumulator realizes in 32-bit integer arithmetic. */
+ * the accumulator realizes in 32-bit integer arithmetic.  The DX7S's
+ * 5200-count reload scales the numerator to 1300 (research
+ * dx7s-firmware §4.1); each cadence carries its own numerator so the two
+ * personalities keep their own real-time rate. */
 #define SLOPSIX_CADENCE_TICK_NUM 785u
+
+/* The DX7S runs the same OCF process from a 5200-count reload instead of
+ * the Mk1's 3140.  With the same E-clock the tick period scales by
+ * 5200/3140, i.e. the numerator becomes 785 * 5200 / 3140 = 1300 (the
+ * OCF tick is 8 * 5200 / 192 = 650/3 samples at the anchor rate). */
+#define SLOPSIX_DX7S_CADENCE_TICK_NUM 1300u
 
 static inline void slopsix_cadence_init(slopsix_cadence *cadence,
     uint32_t sample_rate, uint32_t step)
@@ -405,6 +416,7 @@ static inline void slopsix_cadence_init(slopsix_cadence *cadence,
     cadence->sample_rate = sample_rate;
     cadence->acc = 0u;
     cadence->step = step;
+    cadence->tick_num = SLOPSIX_CADENCE_TICK_NUM;
 }
 
 /* The cadence gate: call once per sample; it returns nonzero on the
@@ -424,7 +436,7 @@ static inline int slopsix_cadence_tick(slopsix_cadence *cadence)
         rate = SLOPSIX_DEFAULT_SAMPLE_RATE * 8u;
     }
 
-    threshold = SLOPSIX_CADENCE_TICK_NUM * rate;
+    threshold = cadence->tick_num * rate;
     cadence->acc += cadence->step;
 
     if (cadence->acc >= threshold) {
@@ -1334,7 +1346,7 @@ void slopsix_dx7s_clear_groups(slopsix_context_state *state);
 
 /* The shared render-span helpers (src/slopsix_voice.c): the DX7S process
  * loop reuses the same cadence arithmetic and voice mix as the DX7 loop. */
-uint32_t slopsix_cadence_threshold(uint32_t sample_rate);
+uint32_t slopsix_cadence_threshold(const slopsix_cadence *cadence);
 uint32_t slopsix_cadence_distance(const slopsix_cadence *cad,
     uint32_t threshold);
 void slopsix_cadence_skip(slopsix_cadence *cad, size_t samples);
